@@ -284,6 +284,8 @@ dependencies = [
  "gstreamer-audio",
  "gstreamer-base",
  "once_cell",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

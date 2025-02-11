@@ -1,3 +1,39 @@
+//! # GStreamer Edge Impulse Plugin
+//!
+//! This plugin integrates Edge Impulse machine learning models into GStreamer pipelines,
+//! allowing real-time inference on audio streams.
+//!
+//! ## Architecture
+//!
+//! The plugin is implemented as a GStreamer BaseTransform element. BaseTransform is designed
+//! for elements that process data in a 1:1 fashion - each input buffer produces exactly one
+//! output buffer of the same size. This is ideal for our use case where we want to:
+//! 1. Process incoming audio data
+//! 2. Run inference on that data
+//! 3. Pass the original audio through unchanged
+//!
+//! ## Data Flow
+//!
+//! 1. Audio data arrives as raw PCM samples (S16LE format)
+//! 2. The transform() function is called for each input buffer
+//! 3. Input data is copied to output to maintain audio flow
+//! 4. Samples are converted to f32 format required by Edge Impulse
+//! 5. Inference is run in a separate thread to avoid blocking the pipeline
+//! 6. Results are logged (future: could be sent as events/messages)
+//!
+//! ## Edge Impulse Integration
+//!
+//! The Edge Impulse Runner provides a C API wrapped in Rust bindings:
+//! - Models are loaded from .eim files
+//! - classify_continuous() handles sliding window inference
+//! - Results include detected classes and probabilities
+//!
+//! ## Threading Model
+//!
+//! - GStreamer pipeline runs on main thread
+//! - Inference runs on background thread using Arc<Mutex<>> for thread safety
+//! - Audio processing is never blocked by ML inference
+
 use gstreamer as gst;
 use gstreamer_base::prelude::*;
 use gstreamer_base::subclass::prelude::*;
@@ -5,10 +41,12 @@ use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_audio::AudioInfo;
 use gstreamer_audio::AudioFormat;
 use std::sync::{Arc, Mutex};
-use edge_impulse_runner::{EimModel, InferenceResult};
+use edge_impulse_runner::EimModel;
 use gst::glib;
 use once_cell::sync::Lazy;
+use std::error::Error;
 
+/// Debug category for logging
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
         "edgeimpulseinfer",
@@ -17,16 +55,23 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
+/// Plugin settings that can be configured at runtime
 #[derive(Debug, Default)]
 struct Settings {
+    /// Path to the .eim model file
     model_path: Option<String>,
+    /// Size of the sliding window for inference
     window_size: usize,
+    /// How far to advance the window each time
     window_increment: usize,
 }
 
+/// Main plugin state
 #[derive(Default)]
 pub struct EdgeImpulseInfer {
+    /// Runtime settings protected by mutex
     settings: Mutex<Settings>,
+    /// The loaded ML model wrapped in Arc for thread-safety
     model: Arc<Mutex<Option<EimModel>>>,
 }
 
@@ -38,19 +83,72 @@ impl ObjectSubclass for EdgeImpulseInfer {
 }
 
 impl EdgeImpulseInfer {
+    /// Scale factor to normalize 16-bit audio samples to -1.0 to +1.0 range
+    const I16_TO_F32_SCALE: f32 = 32768.0;
+
+    fn transform_buffer(
+        &self,
+        buffer: &gst::Buffer,
+    ) -> Result<gst::Buffer, gst::FlowError> {
+        let element = self.obj();
+
+        // Get buffer data
+        let data = buffer.map_readable().map_err(|_| {
+            gst::error!(CAT, obj = element, "Failed to map buffer readable");
+            gst::FlowError::Error
+        })?;
+
+        // Convert i16 samples to f32 (-1.0 to 1.0 range)
+        let samples: Vec<f32> = data
+            .chunks_exact(2)
+            .map(|chunk| {
+                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                sample as f32 / Self::I16_TO_F32_SCALE
+            })
+            .collect();
+
+        // Run inference
+        if let Some(ref mut model) = *self.model.lock().unwrap() {
+            match model.classify(samples, None) {
+                Ok(result) => {
+                    gst::debug!(CAT, obj = element, "Classification result: {:?}", result);
+                    Ok(buffer.clone())
+                }
+                Err(e) => {
+                    gst::error!(CAT, obj = element, "Failed to run inference: {}", e);
+                    Err(gst::FlowError::Error)
+                }
+            }
+        } else {
+            gst::error!(CAT, obj = element, "Model not loaded");
+            Err(gst::FlowError::Error)
+        }
+    }
+
+    fn load_model(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        gst::debug!(CAT, obj = self.obj(), "Loading model from path: {}", path);
+
+        let model = EimModel::new(path)?;
+        *self.model.lock().unwrap() = Some(model);
+
+        Ok(())
+    }
 }
 
 impl BaseTransformImpl for EdgeImpulseInfer {
+    /// Configure transform behavior
     const MODE: BaseTransformMode = BaseTransformMode::NeverInPlace;
     const PASSTHROUGH_ON_SAME_CAPS: bool = false;
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
+    /// Calculate size of one audio frame
     fn unit_size(&self, caps: &gst::Caps) -> Option<usize> {
         AudioInfo::from_caps(caps)
             .map(|info| info.bpf() as usize)
             .ok()
     }
 
+    /// Process one buffer of audio data
     fn transform(
         &self,
         inbuf: &gst::Buffer,
@@ -58,53 +156,45 @@ impl BaseTransformImpl for EdgeImpulseInfer {
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         gst::debug!(CAT, obj = self.obj(), "Processing buffer of size {}", inbuf.size());
 
+        // Map input buffer for reading
         let data = inbuf.map_readable().map_err(|_| {
             gst::error!(CAT, obj = self.obj(), "Failed to map input buffer readable");
             gst::FlowError::Error
         })?;
 
-        // Convert samples to f32 in range [-1.0, 1.0]
-        let samples: Vec<f32> = data
-            .chunks_exact(2)
-            .map(|chunk| {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                (sample as f32) / 32768.0
-            })
-            .collect();
-
-        // Process samples with the model
-        let mut model = self.model.lock().unwrap();
-        if let Some(model) = model.as_mut() {
-            match model.classify(samples, None) {
-                Ok(response) => {
-                    if response.success {
-                        gst::debug!(CAT, obj = self.obj(), "Raw result: {:?}", response.result);
-
-                        match response.result {
-                            InferenceResult::Classification { classification } => {
-                                for (label, score) in classification {
-                                    gst::info!(CAT, obj = self.obj(), "{}: {:.2}%", label, score * 100.0);
-                                }
-                            }
-                            InferenceResult::ObjectDetection { .. } => {
-                                gst::warning!(CAT, obj = self.obj(), "Received object detection results for audio model");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    gst::error!(CAT, obj = self.obj(), "Inference error: {}", e);
-                    return Err(gst::FlowError::Error);
-                }
-            }
-        }
-
-        // Copy input to output
+        // Copy input to output to maintain audio flow
         let mut out_map = outbuf.map_writable().map_err(|_| {
             gst::error!(CAT, obj = self.obj(), "Failed to map output buffer writable");
             gst::FlowError::Error
         })?;
         out_map.copy_from_slice(&data);
+
+        // Convert samples to f32 format required by Edge Impulse
+        let samples: Vec<f32> = data
+            .chunks_exact(2)
+            .map(|chunk| {
+                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                sample as f32 / Self::I16_TO_F32_SCALE
+            })
+            .collect();
+
+        // Clone Arc for the inference thread
+        let model = Arc::clone(&self.model);
+
+        // Run inference in background thread
+        std::thread::spawn(move || {
+            let mut model = model.lock().unwrap();
+            if let Some(ref mut model) = *model {
+                match model.classify(samples, None) {
+                    Ok(result) => {
+                        gst::info!(CAT, "Inference result: {:?}", result);
+                    }
+                    Err(e) => {
+                        gst::error!(CAT, "Failed to run inference: {}", e);
+                    }
+                }
+            }
+        });
 
         Ok(gst::FlowSuccess::Ok)
     }

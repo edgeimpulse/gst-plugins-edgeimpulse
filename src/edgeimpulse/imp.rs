@@ -221,10 +221,7 @@ impl BaseTransformImpl for EdgeImpulseInfer {
         // Convert samples to f32 format required by Edge Impulse
         let samples: Vec<f32> = data
             .chunks_exact(2)
-            .map(|chunk| {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                sample as f32 / Self::I16_TO_F32_SCALE
-            })
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / Self::I16_TO_F32_SCALE)
             .collect();
 
         // Clone Arc for the inference thread
@@ -251,17 +248,43 @@ impl BaseTransformImpl for EdgeImpulseInfer {
     fn set_caps(&self, incaps: &gst::Caps, _outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
         gst::info!(CAT, obj = self.obj(), "set_caps called with incaps: {}", incaps);
 
-        let audio_info = AudioInfo::from_caps(incaps)
-            .map_err(|_| gst::loggable_error!(CAT, "Failed to parse input caps"))?;
+        let model = self.model.lock().unwrap();
+        if let Some(ref model) = *model {
+            // Get model parameters
+            let params = model.parameters()
+                .map_err(|e| gst::loggable_error!(CAT, "Failed to get model parameters: {}", e))?;
 
-        gst::info!(CAT, obj = self.obj(), "Audio info: rate={}, channels={}, format={:?}",
-            audio_info.rate(), audio_info.channels(), audio_info.format());
+            // Get sensor type
+            let sensor_type = model.sensor_type()
+                .map_err(|e| gst::loggable_error!(CAT, "Failed to get sensor type: {}", e))?;
 
-        let mut settings = self.settings.lock().unwrap();
-        settings.input_size = Some(audio_info.bpf() as usize);
-        settings.sensor_type = Some(SensorType::Microphone);
+            match sensor_type {
+                SensorType::Microphone => {
+                    let audio_info = AudioInfo::from_caps(incaps)
+                        .map_err(|_| gst::loggable_error!(CAT, "Failed to parse input caps"))?;
 
-        gst::info!(CAT, obj = self.obj(), "State initialized with input_size: {}", settings.input_size.unwrap());
+                    // Check the model's required frequency
+                    let freq = params.frequency as u32;
+                    if audio_info.rate() != freq {
+                        return Err(gst::loggable_error!(CAT,
+                            "Sample rate mismatch. Got {}, model requires {}Hz",
+                            audio_info.rate(), freq));
+                    }
+
+                    gst::info!(CAT, obj = self.obj(),
+                        "Audio configuration: rate={}Hz, channels={}, format={:?}",
+                        audio_info.rate(), audio_info.channels(), audio_info.format());
+                },
+                // TODO: Handle caps negotiation for other sensor types
+                _ => {
+                    return Err(gst::loggable_error!(CAT,
+                        "Sensor type {:?} not yet implemented", sensor_type));
+                }
+            }
+        } else {
+            return Err(gst::loggable_error!(CAT, "Model not loaded"));
+        }
+
         Ok(())
     }
 }
@@ -329,9 +352,9 @@ impl ElementImpl for EdgeImpulseInfer {
         static ELEMENT_METADATA: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
             gst::subclass::ElementMetadata::new(
                 "Edge Impulse Inference",
-                "Filter/Audio",
-                "Runs Edge Impulse ML inference on audio data",
-                "Your Name <your.email@example.com>",
+                "Filter/Audio/Video/Motion",
+                "Runs Edge Impulse ML inference on input data",
+                "Fernando Jiménez Moreno <fernando@edgeimpulse.com>",
             )
         });
 
@@ -340,12 +363,16 @@ impl ElementImpl for EdgeImpulseInfer {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-            let caps = gst::Caps::builder("audio/x-raw")
+            // Default caps that support all sensor types
+            let audio_caps = gst::Caps::builder("audio/x-raw")
                 .field("format", AudioFormat::S16le.to_str())
                 .field("rate", gst::IntRange::new(8000, 48000))
                 .field("channels", 1i32)
                 .field("layout", "interleaved")
                 .build();
+
+            // TODO: Add caps for other sensor types (video, etc)
+            let caps = audio_caps;
 
             vec![
                 gst::PadTemplate::new(

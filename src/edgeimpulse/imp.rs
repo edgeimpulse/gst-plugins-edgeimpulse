@@ -41,7 +41,7 @@ use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_audio::AudioInfo;
 use gstreamer_audio::AudioFormat;
 use std::sync::{Arc, Mutex};
-use edge_impulse_runner::EimModel;
+use edge_impulse_runner::{EimModel, SensorType};
 use gst::glib;
 use once_cell::sync::Lazy;
 use std::error::Error;
@@ -60,10 +60,9 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 struct Settings {
     /// Path to the .eim model file
     model_path: Option<String>,
-    /// Size of the sliding window for inference
-    window_size: usize,
-    /// How far to advance the window each time
-    window_increment: usize,
+    /// Model parameters obtained after loading
+    input_size: Option<usize>,
+    sensor_type: Option<SensorType>,
 }
 
 /// Main plugin state
@@ -91,6 +90,7 @@ impl EdgeImpulseInfer {
         buffer: &gst::Buffer,
     ) -> Result<gst::Buffer, gst::FlowError> {
         let element = self.obj();
+        let settings = self.settings.lock().unwrap();
 
         // Get buffer data
         let data = buffer.map_readable().map_err(|_| {
@@ -98,18 +98,51 @@ impl EdgeImpulseInfer {
             gst::FlowError::Error
         })?;
 
-        // Convert i16 samples to f32 (-1.0 to 1.0 range)
-        let samples: Vec<f32> = data
-            .chunks_exact(2)
-            .map(|chunk| {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                sample as f32 / Self::I16_TO_F32_SCALE
-            })
-            .collect();
+        // Convert input data based on sensor type
+        let features: Vec<f32> = match settings.sensor_type {
+            Some(SensorType::Microphone) => {
+                // Convert audio samples (S16LE) to f32
+                data.chunks_exact(2)
+                    .map(|chunk| {
+                        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                        sample as f32 / Self::I16_TO_F32_SCALE
+                    })
+                    .collect()
+            },
+            Some(SensorType::Camera) => {
+                // TODO: Handle image data conversion
+                gst::error!(CAT, obj = element, "Camera input not yet implemented");
+                return Err(gst::FlowError::Error);
+            },
+            Some(SensorType::Accelerometer) => {
+                // TODO: Handle accelerometer data conversion
+                gst::error!(CAT, obj = element, "Accelerometer input not yet implemented");
+                return Err(gst::FlowError::Error);
+            },
+            Some(SensorType::Positional) => {
+                // TODO: Handle positional data conversion
+                gst::error!(CAT, obj = element, "Positional input not yet implemented");
+                return Err(gst::FlowError::Error);
+            },
+            _ => {
+                gst::error!(CAT, obj = element, "Unknown or unset sensor type");
+                return Err(gst::FlowError::Error);
+            }
+        };
+
+        // Verify input size matches model requirements
+        if let Some(expected_size) = settings.input_size {
+            if features.len() != expected_size {
+                gst::error!(CAT, obj = element,
+                    "Input size mismatch. Got {} features, expected {}",
+                    features.len(), expected_size);
+                return Err(gst::FlowError::Error);
+            }
+        }
 
         // Run inference
         if let Some(ref mut model) = *self.model.lock().unwrap() {
-            match model.classify(samples, None) {
+            match model.classify(features, None) {
                 Ok(result) => {
                     gst::debug!(CAT, obj = element, "Classification result: {:?}", result);
                     Ok(buffer.clone())
@@ -129,6 +162,22 @@ impl EdgeImpulseInfer {
         gst::debug!(CAT, obj = self.obj(), "Loading model from path: {}", path);
 
         let model = EimModel::new(path)?;
+
+        // Get model parameters
+        let input_size = model.input_size()?;
+        let sensor_type = model.sensor_type()?;
+        let params = model.parameters()?;
+
+        gst::info!(CAT, obj = self.obj(),
+            "Model loaded: input_size={}, sensor_type={:?}, params={:?}",
+            input_size, sensor_type, params);
+
+        // Update settings
+        let mut settings = self.settings.lock().unwrap();
+        settings.input_size = Some(input_size);
+        settings.sensor_type = Some(sensor_type);
+
+        // Store model
         *self.model.lock().unwrap() = Some(model);
 
         Ok(())
@@ -209,10 +258,10 @@ impl BaseTransformImpl for EdgeImpulseInfer {
             audio_info.rate(), audio_info.channels(), audio_info.format());
 
         let mut settings = self.settings.lock().unwrap();
-        settings.window_size = 16000; // 1 second of audio at 16kHz
-        settings.window_increment = settings.window_size / 2;
+        settings.input_size = Some(audio_info.bpf() as usize);
+        settings.sensor_type = Some(SensorType::Microphone);
 
-        gst::info!(CAT, obj = self.obj(), "State initialized with window_size: {}", settings.window_size);
+        gst::info!(CAT, obj = self.obj(), "State initialized with input_size: {}", settings.input_size.unwrap());
         Ok(())
     }
 }

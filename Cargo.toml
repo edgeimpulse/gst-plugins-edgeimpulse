@@ -2,8 +2,9 @@
 name = "gst-plugin-edgeimpulse"
 version = "0.1.0"
 edition = "2021"
-description = "GStreamer Edge Impulse Plugin"
+description = "GStreamer plugin to run AI/ML inference via Edge Impulse machine learning models"
 authors = ["Fernando Jiménez Moreno <fernando@edgeimpulse.com>"]
+license = "BSD-3-Clause-Clear"
 
 [lib]
 name = "gstedgeimpulse"

@@ -40,11 +40,13 @@ use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_audio::AudioInfo;
 use gstreamer_audio::AudioFormat;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use edge_impulse_runner::{EimModel, SensorType};
 use gst::glib;
 use once_cell::sync::Lazy;
-use std::error::Error;
+use glib::subclass::Signal;
+use glib::value::ToValue;
+use std::collections::VecDeque;
 
 /// Debug category for logging
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
@@ -60,9 +62,6 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 struct Settings {
     /// Path to the .eim model file
     model_path: Option<String>,
-    /// Model parameters obtained after loading
-    input_size: Option<usize>,
-    sensor_type: Option<SensorType>,
 }
 
 /// Main plugin state
@@ -70,8 +69,15 @@ struct Settings {
 pub struct EdgeImpulseInfer {
     /// Runtime settings protected by mutex
     settings: Mutex<Settings>,
-    /// The loaded ML model wrapped in Arc for thread-safety
-    model: Arc<Mutex<Option<EimModel>>>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    model: Option<EimModel>,
+    sample_rate: Option<i32>,
+    samples_per_inference: Option<usize>,
+    sample_buffer: VecDeque<i16>,
 }
 
 #[glib::object_subclass]
@@ -84,104 +90,6 @@ impl ObjectSubclass for EdgeImpulseInfer {
 impl EdgeImpulseInfer {
     /// Scale factor to normalize 16-bit audio samples to -1.0 to +1.0 range
     const I16_TO_F32_SCALE: f32 = 32768.0;
-
-    fn transform_buffer(
-        &self,
-        buffer: &gst::Buffer,
-    ) -> Result<gst::Buffer, gst::FlowError> {
-        let element = self.obj();
-        let settings = self.settings.lock().unwrap();
-
-        // Get buffer data
-        let data = buffer.map_readable().map_err(|_| {
-            gst::error!(CAT, obj = element, "Failed to map buffer readable");
-            gst::FlowError::Error
-        })?;
-
-        // Convert input data based on sensor type
-        let features: Vec<f32> = match settings.sensor_type {
-            Some(SensorType::Microphone) => {
-                // Convert audio samples (S16LE) to f32
-                data.chunks_exact(2)
-                    .map(|chunk| {
-                        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                        sample as f32 / Self::I16_TO_F32_SCALE
-                    })
-                    .collect()
-            },
-            Some(SensorType::Camera) => {
-                // TODO: Handle image data conversion
-                gst::error!(CAT, obj = element, "Camera input not yet implemented");
-                return Err(gst::FlowError::Error);
-            },
-            Some(SensorType::Accelerometer) => {
-                // TODO: Handle accelerometer data conversion
-                gst::error!(CAT, obj = element, "Accelerometer input not yet implemented");
-                return Err(gst::FlowError::Error);
-            },
-            Some(SensorType::Positional) => {
-                // TODO: Handle positional data conversion
-                gst::error!(CAT, obj = element, "Positional input not yet implemented");
-                return Err(gst::FlowError::Error);
-            },
-            _ => {
-                gst::error!(CAT, obj = element, "Unknown or unset sensor type");
-                return Err(gst::FlowError::Error);
-            }
-        };
-
-        // Verify input size matches model requirements
-        if let Some(expected_size) = settings.input_size {
-            if features.len() != expected_size {
-                gst::error!(CAT, obj = element,
-                    "Input size mismatch. Got {} features, expected {}",
-                    features.len(), expected_size);
-                return Err(gst::FlowError::Error);
-            }
-        }
-
-        // Run inference
-        if let Some(ref mut model) = *self.model.lock().unwrap() {
-            match model.classify(features, None) {
-                Ok(result) => {
-                    gst::debug!(CAT, obj = element, "Classification result: {:?}", result);
-                    Ok(buffer.clone())
-                }
-                Err(e) => {
-                    gst::error!(CAT, obj = element, "Failed to run inference: {}", e);
-                    Err(gst::FlowError::Error)
-                }
-            }
-        } else {
-            gst::error!(CAT, obj = element, "Model not loaded");
-            Err(gst::FlowError::Error)
-        }
-    }
-
-    fn load_model(&self, path: &str) -> Result<(), Box<dyn Error>> {
-        gst::debug!(CAT, obj = self.obj(), "Loading model from path: {}", path);
-
-        let model = EimModel::new(path)?;
-
-        // Get model parameters
-        let input_size = model.input_size()?;
-        let sensor_type = model.sensor_type()?;
-        let params = model.parameters()?;
-
-        gst::info!(CAT, obj = self.obj(),
-            "Model loaded: input_size={}, sensor_type={:?}, params={:?}",
-            input_size, sensor_type, params);
-
-        // Update settings
-        let mut settings = self.settings.lock().unwrap();
-        settings.input_size = Some(input_size);
-        settings.sensor_type = Some(sensor_type);
-
-        // Store model
-        *self.model.lock().unwrap() = Some(model);
-
-        Ok(())
-    }
 }
 
 impl BaseTransformImpl for EdgeImpulseInfer {
@@ -203,89 +111,121 @@ impl BaseTransformImpl for EdgeImpulseInfer {
         inbuf: &gst::Buffer,
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, obj = self.obj(), "Processing buffer of size {}", inbuf.size());
+        let mut state = self.state.lock().map_err(|_| {
+            gst::error!(CAT, obj = self.obj(), "Failed to lock state");
+            gst::FlowError::Error
+        })?;
 
-        // Map input buffer for reading
+        // Verify we have a model loaded
+        if state.model.is_none() {
+            gst::error!(CAT, obj = self.obj(), "No model loaded");
+            return Err(gst::FlowError::Error);
+        }
+
+        let samples_needed = state.samples_per_inference.ok_or_else(|| {
+            gst::error!(CAT, obj = self.obj(), "Samples per inference not set");
+            gst::FlowError::Error
+        })?;
+
+        // Get input samples from buffer
         let data = inbuf.map_readable().map_err(|_| {
-            gst::error!(CAT, obj = self.obj(), "Failed to map input buffer readable");
+            gst::error!(CAT, obj = self.obj(), "Can't map buffer readable");
             gst::FlowError::Error
         })?;
 
-        // Copy input to output to maintain audio flow
-        let mut out_map = outbuf.map_writable().map_err(|_| {
-            gst::error!(CAT, obj = self.obj(), "Failed to map output buffer writable");
+        // Copy input to output
+        let mut out_data = outbuf.map_writable().map_err(|_| {
+            gst::error!(CAT, obj = self.obj(), "Can't map buffer writable");
             gst::FlowError::Error
         })?;
-        out_map.copy_from_slice(&data);
+        out_data.copy_from_slice(&data);
 
-        // Convert samples to f32 format required by Edge Impulse
-        let samples: Vec<f32> = data
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / Self::I16_TO_F32_SCALE)
-            .collect();
+        // Convert bytes to i16 samples
+        let samples = data.chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]));
 
-        // Clone Arc for the inference thread
-        let model = Arc::clone(&self.model);
+        // Add new samples to our buffer
+        state.sample_buffer.extend(samples);
 
-        // Run inference in background thread
-        std::thread::spawn(move || {
-            let mut model = model.lock().unwrap();
-            if let Some(ref mut model) = *model {
-                match model.classify(samples, None) {
+        // Keep only the most recent samples
+        while state.sample_buffer.len() > samples_needed {
+            state.sample_buffer.pop_front();
+        }
+
+        // Run inference if we have enough samples
+        if state.sample_buffer.len() >= samples_needed {
+            let inference_samples: Vec<f32> = state.sample_buffer.iter()
+                .map(|&s| s as f32 / Self::I16_TO_F32_SCALE)
+                .collect();
+
+            if let Some(model) = &mut state.model {
+                match model.classify(inference_samples, None) {
                     Ok(result) => {
-                        gst::info!(CAT, "Inference result: {:?}", result);
+                        gst::debug!(CAT, obj = self.obj(), "Inference result: {:?}", result);
+                        let obj = self.obj();
+                        obj.emit_by_name::<()>(
+                            "edge-impulse-inference-result",
+                            &[&format!("{:?}", result)]
+                        );
                     }
                     Err(e) => {
-                        gst::error!(CAT, "Failed to run inference: {}", e);
+                        gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
                     }
                 }
             }
-        });
+
+            state.sample_buffer.clear();
+        }
 
         Ok(gst::FlowSuccess::Ok)
     }
 
-    fn set_caps(&self, incaps: &gst::Caps, _outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
-        gst::info!(CAT, obj = self.obj(), "set_caps called with incaps: {}", incaps);
+    fn set_caps(
+        &self,
+        incaps: &gst::Caps,
+        _outcaps: &gst::Caps,
+    ) -> Result<(), gst::LoggableError> {
+        let s = incaps.structure(0).unwrap();
+        let rate = s.get::<i32>("rate").map_err(|_| {
+            gst::loggable_error!(CAT, "Failed to get rate from caps")
+        })?;
 
-        let model = self.model.lock().unwrap();
-        if let Some(ref model) = *model {
-            // Get model parameters
-            let params = model.parameters()
-                .map_err(|e| gst::loggable_error!(CAT, "Failed to get model parameters: {}", e))?;
+        let state = self.state.lock().unwrap();
 
-            // Get sensor type
-            let sensor_type = model.sensor_type()
-                .map_err(|e| gst::loggable_error!(CAT, "Failed to get sensor type: {}", e))?;
-
-            match sensor_type {
-                SensorType::Microphone => {
-                    let audio_info = AudioInfo::from_caps(incaps)
-                        .map_err(|_| gst::loggable_error!(CAT, "Failed to parse input caps"))?;
-
-                    // Check the model's required frequency
-                    let freq = params.frequency as u32;
-                    if audio_info.rate() != freq {
-                        return Err(gst::loggable_error!(CAT,
-                            "Sample rate mismatch. Got {}, model requires {}Hz",
-                            audio_info.rate(), freq));
-                    }
-
-                    gst::info!(CAT, obj = self.obj(),
-                        "Audio configuration: rate={}Hz, channels={}, format={:?}",
-                        audio_info.rate(), audio_info.channels(), audio_info.format());
-                },
-                // TODO: Handle caps negotiation for other sensor types
-                _ => {
-                    return Err(gst::loggable_error!(CAT,
-                        "Sensor type {:?} not yet implemented", sensor_type));
-                }
+        // Verify rate matches model's expected rate
+        if let Some(model_rate) = state.sample_rate {
+            if rate != model_rate {
+                return Err(gst::loggable_error!(CAT,
+                    "Input sample rate {} Hz doesn't match model's expected rate {} Hz",
+                    rate, model_rate
+                ));
             }
-        } else {
-            return Err(gst::loggable_error!(CAT, "Model not loaded"));
         }
 
         Ok(())
+    }
+
+    fn transform_caps(
+        &self,
+        direction: gst::PadDirection,
+        caps: &gst::Caps,
+        _filter: Option<&gst::Caps>,
+    ) -> Option<gst::Caps> {
+        let state = self.state.lock().unwrap();
+        let mut output_caps = caps.clone();
+
+        // Ensure we get the right format
+        if direction == gst::PadDirection::Sink {
+            if let Some(s) = output_caps.make_mut().structure_mut(0) {
+                s.set("format", "S16LE");
+                if let Some(rate) = state.sample_rate {
+                    s.set("rate", rate);
+                }
+                s.set("channels", 1i32);
+            }
+        }
+
+        Some(output_caps)
     }
 }
 
@@ -304,29 +244,104 @@ impl ObjectImpl for EdgeImpulseInfer {
     }
 
     fn constructed(&self) {
-        gst::info!(CAT, obj = self.obj(), "EdgeImpulseInfer constructed");
         self.parent_constructed();
+
+        // Initialize state
+        let mut state = self.state.lock().unwrap();
+
+        // Load model and get its properties
+        if let Some(model_path) = &self.settings.lock().unwrap().model_path {
+            match EimModel::new(model_path) {
+                Ok(model) => {
+                    // Get model parameters
+                    match model.parameters() {
+                        Ok(params) => {
+                            // Verify this is an audio model
+                            if params.sensor != SensorType::Microphone as u32 {
+                                gst::error!(CAT, obj = self.obj(),
+                                    "Model is not an audio model (sensor type: {})",
+                                    params.sensor
+                                );
+                                return;
+                            }
+
+                            // Store the parameters we need
+                            let frequency = params.frequency;
+                            let slice_size = params.slice_size;
+                            let labels = params.labels.clone();
+
+                            // Calculate sample rate from frequency
+                            state.sample_rate = Some(frequency as i32);
+
+                            // Calculate samples per inference from slice_size
+                            state.samples_per_inference = Some(slice_size);
+
+                            // Store model
+                            state.model = Some(model);
+
+                            gst::info!(CAT, obj = self.obj(),
+                                "Audio model loaded: sample_rate={}Hz, window_size={} samples, labels={:?}",
+                                frequency,
+                                slice_size,
+                                labels
+                            );
+                        }
+                        Err(err) => {
+                            gst::error!(CAT, obj = self.obj(),
+                                "Failed to get model parameters: {}",
+                                err
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    gst::error!(CAT, obj = self.obj(), "Failed to load model: {}", err);
+                }
+            }
+        }
     }
 
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-        gst::info!(CAT, obj = self.obj(), "set_property called for {}", pspec.name());
         match pspec.name() {
             "model-path" => {
                 let mut settings = self.settings.lock().unwrap();
-                settings.model_path = value.get().expect("type checked upstream");
-                gst::info!(CAT, obj = self.obj(), "Model path set to: {:?}", settings.model_path);
+                let mut state = self.state.lock().unwrap();
 
-                // Try to load the model
+                settings.model_path = value.get().expect("type checked upstream");
+
                 if let Some(path) = &settings.model_path {
-                    gst::info!(CAT, obj = self.obj(), "Attempting to load model from {}", path);
+                    gst::info!(CAT, obj = self.obj(), "Loading model from {}", path);
                     match EimModel::new(path) {
                         Ok(model) => {
-                            gst::info!(CAT, obj = self.obj(), "Model loaded successfully");
-                            let mut model_guard = self.model.lock().unwrap();
-                            *model_guard = Some(model);
+                            // Get parameters and clone the values we need
+                            let (frequency, slice_size, sensor) = match model.parameters() {
+                                Ok(p) => (p.frequency, p.slice_size, p.sensor),
+                                Err(e) => {
+                                    gst::error!(CAT, obj = self.obj(),
+                                        "Failed to get model parameters: {}", e);
+                                    return;
+                                }
+                            };
+
+                            // Validate sensor type
+                            if sensor != SensorType::Microphone as u32 {
+                                gst::error!(CAT, obj = self.obj(),
+                                    "Invalid sensor type {}", sensor);
+                                return;
+                            }
+
+                            // Update state
+                            state.sample_rate = Some(frequency as i32);
+                            state.samples_per_inference = Some(slice_size);
+                            state.model = Some(model);
+
+                            gst::info!(CAT, obj = self.obj(),
+                                "Model loaded: {}Hz, {} samples",
+                                frequency, slice_size);
                         }
                         Err(e) => {
-                            gst::error!(CAT, obj = self.obj(), "Failed to load model: {}", e);
+                            gst::error!(CAT, obj = self.obj(),
+                                "Failed to load model: {}", e);
                         }
                     }
                 }
@@ -344,6 +359,15 @@ impl ObjectImpl for EdgeImpulseInfer {
             }
             _ => unimplemented!(),
         }
+    }
+
+    fn signals() -> &'static [Signal] {
+        static SIGNALS: Lazy<Vec<Signal>> = Lazy::new(|| {
+            vec![Signal::builder("edge-impulse-inference-result")
+                .param_types([String::static_type()])
+                .build()]
+        });
+        SIGNALS.as_ref()
     }
 }
 

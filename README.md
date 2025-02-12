@@ -4,7 +4,7 @@ A GStreamer plugin that enables real-time machine learning inference using Edge 
 ## Dependencies
 This plugin depends on:
 * GStreamer 1.20 or newer
-* edge-impulse-runner-rs - Rust bindings for Edge Impulse Linux SDK
+* [edge-impulse-runner-rs](https://github.com/edgeimpulse/edge-impulse-runner-rs) - Rust bindings for Edge Impulse Linux SDK
 * A trained Edge Impulse model file (.eim)
 
 ## Installation

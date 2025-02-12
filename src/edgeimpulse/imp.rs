@@ -42,6 +42,7 @@ use gstreamer_audio::AudioInfo;
 use gstreamer_audio::AudioFormat;
 use std::sync::Mutex;
 use edge_impulse_runner::{EimModel, SensorType};
+use edge_impulse_runner::InferenceResult::Classification;
 use gst::glib;
 use once_cell::sync::Lazy;
 use glib::subclass::Signal;
@@ -161,12 +162,25 @@ impl BaseTransformImpl for EdgeImpulseInfer {
             if let Some(model) = &mut state.model {
                 match model.classify(inference_samples, None) {
                     Ok(result) => {
+                        // Create a structure with the classification results
+                        let mut s = gst::Structure::builder("edge-impulse-inference-result")
+                            .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
+                            .build();
+
+                        // Add classification results as a nested structure
+                        if let Classification { ref classification } = result.result {
+                            let mut class_struct = gst::Structure::new_empty("classification");
+                            for (label, confidence) in classification {
+                                class_struct.set(label, confidence);
+                            }
+                            s.set("classification", class_struct);
+                        }
+
+                        // Post the message on the bus
+                        let msg = gst::message::Element::new(s);
+                        let _ = self.obj().post_message(msg);
+
                         gst::debug!(CAT, obj = self.obj(), "Inference result: {:?}", result);
-                        let obj = self.obj();
-                        obj.emit_by_name::<()>(
-                            "edge-impulse-inference-result",
-                            &[&format!("{:?}", result)]
-                        );
                     }
                     Err(e) => {
                         gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
@@ -251,7 +265,12 @@ impl ObjectImpl for EdgeImpulseInfer {
 
         // Load model and get its properties
         if let Some(model_path) = &self.settings.lock().unwrap().model_path {
-            match EimModel::new(model_path) {
+            // Check debug level for edgeimpulseinfer category
+            let debug_enabled = gst::DebugCategory::get("edgeimpulseinfer")
+                .map(|cat| cat.threshold() > gst::DebugLevel::Debug)
+                .unwrap_or(false);
+
+            match EimModel::new_with_debug(model_path, debug_enabled) {
                 Ok(model) => {
                     // Get model parameters
                     match model.parameters() {
@@ -311,7 +330,13 @@ impl ObjectImpl for EdgeImpulseInfer {
 
                 if let Some(path) = &settings.model_path {
                     gst::info!(CAT, obj = self.obj(), "Loading model from {}", path);
-                    match EimModel::new(path) {
+
+                    // Check debug level for edgeimpulseinfer category
+                    let debug_enabled = gst::DebugCategory::get("edgeimpulseinfer")
+                        .map(|cat| cat.threshold() > gst::DebugLevel::Debug)
+                        .unwrap_or(false);
+
+                    match EimModel::new_with_debug(path, debug_enabled) {
                         Ok(model) => {
                             // Get parameters and clone the values we need
                             let (frequency, slice_size, sensor) = match model.parameters() {

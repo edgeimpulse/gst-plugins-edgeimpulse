@@ -10,7 +10,6 @@
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
 
 use clap::Parser;
-use edge_impulse_runner::{EimModel, ModelParameters};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::error::Error;
@@ -26,6 +25,10 @@ struct VideoClassifyParams {
     /// Enable debug output
     #[arg(short, long)]
     debug: bool,
+
+    /// Confidence threshold (0.0 to 1.0) for showing results
+    #[clap(short, long, default_value = "0.8")]
+    threshold: f32,
 }
 
 // macOS specific run loop handling
@@ -106,7 +109,7 @@ where
     }
 }
 
-fn create_pipeline(model_path: &Path, model_params: &ModelParameters) -> Result<gst::Pipeline, Box<dyn Error>> {
+fn create_pipeline(model_path: &Path) -> Result<gst::Pipeline, Box<dyn Error>> {
     // Get absolute path to model
     let absolute_model_path = model_path.canonicalize()?;
     println!("Using model at: {}", absolute_model_path.display());
@@ -116,124 +119,111 @@ fn create_pipeline(model_path: &Path, model_params: &ModelParameters) -> Result<
 
     // Create elements
     let src = gst::ElementFactory::make("avfvideosrc")
+        .property("device-index", 0i32)
         .build()?;
 
-    let convert = gst::ElementFactory::make("videoconvert")
-        .build()?;
-
-    let scale = gst::ElementFactory::make("videoscale")
-        .build()?;
-
-    let caps = gst::ElementFactory::make("capsfilter")
+    let videoscale = gst::ElementFactory::make("videoscale").build()?;
+    let videoconvert = gst::ElementFactory::make("videoconvert").build()?;
+    let capsfilter = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             gst::Caps::builder("video/x-raw")
-                .field("width", model_params.image_input_width as i32)
-                .field("height", model_params.image_input_height as i32)
-                .field("format", "RGB")
-                .build()
+                .field("width", 1280i32)
+                .field("height", 720i32)
+                .build(),
         )
         .build()?;
 
-    let tee = gst::ElementFactory::make("tee")
-        .build()?;
+    let tee = gst::ElementFactory::make("tee").build()?;
 
-    // Preview branch elements
-    let queue_preview = gst::ElementFactory::make("queue")
-        .build()?;
-    let preview_convert = gst::ElementFactory::make("videoconvert")
-        .build()?;
-    let preview_sink = gst::ElementFactory::make("autovideosink")
-        .build()?;
+    // Preview branch
+    let queue_preview = gst::ElementFactory::make("queue").build()?;
+    let convert_preview = gst::ElementFactory::make("videoconvert").build()?;
+    let sink_preview = gst::ElementFactory::make("autovideosink").build()?;
 
-    // Inference branch elements
-    let queue_inference = gst::ElementFactory::make("queue")
-        .build()?;
-    let inference_convert = gst::ElementFactory::make("videoconvert")
-        .build()?;
-    let inference = gst::ElementFactory::make("edgeimpulseinfer")
+    // Inference branch
+    let queue_infer = gst::ElementFactory::make("queue").build()?;
+    let convert_infer = gst::ElementFactory::make("videoconvert").build()?;
+    let inferencer = gst::ElementFactory::make("edgeimpulseinfer")
         .property("model-path", absolute_model_path.to_str().unwrap())
         .build()?;
 
     // Add elements to pipeline
     pipeline.add_many(&[
-        &src,
-        &convert,
-        &scale,
-        &caps,
-        &tee,
-        &queue_preview,
-        &preview_convert,
-        &preview_sink,
-        &queue_inference,
-        &inference_convert,
-        &inference,
+        &src, &videoscale, &videoconvert, &capsfilter, &tee,
+        &queue_preview, &convert_preview, &sink_preview,
+        &queue_infer, &convert_infer, &inferencer,
     ])?;
 
     // Link the main pipeline elements
-    gst::Element::link_many(&[&src, &convert, &scale, &caps, &tee])?;
+    gst::Element::link_many(&[
+        &src, &videoscale, &videoconvert, &capsfilter, &tee,
+    ])?;
 
     // Link preview branch
-    gst::Element::link_many(&[&queue_preview, &preview_convert, &preview_sink])?;
+    gst::Element::link_many(&[
+        &queue_preview, &convert_preview, &sink_preview,
+    ])?;
 
     // Link inference branch
-    gst::Element::link_many(&[&queue_inference, &inference_convert, &inference])?;
+    gst::Element::link_many(&[
+        &queue_infer, &convert_infer, &inferencer,
+    ])?;
 
-    // Link tee pads
+    // Link tee to both branches
     let tee_src_pad_template = tee.pad_template("src_%u").unwrap();
+    let tee_preview_pad = tee.request_pad(&tee_src_pad_template, None, None)
+        .ok_or("Failed to get tee preview pad")?;
+    let tee_infer_pad = tee.request_pad(&tee_src_pad_template, None, None)
+        .ok_or("Failed to get tee inference pad")?;
+    let queue_preview_pad = queue_preview.static_pad("sink")
+        .ok_or("Failed to get queue preview sink pad")?;
+    let queue_infer_pad = queue_infer.static_pad("sink")
+        .ok_or("Failed to get queue inference sink pad")?;
 
-    // Link preview branch
-    let tee_preview_pad = tee.request_pad(&tee_src_pad_template, None, None).unwrap();
-    let queue_preview_sink_pad = queue_preview.static_pad("sink").unwrap();
-    tee_preview_pad.link(&queue_preview_sink_pad)?;
-
-    // Link inference branch
-    let tee_inference_pad = tee.request_pad(&tee_src_pad_template, None, None).unwrap();
-    let queue_inference_sink_pad = queue_inference.static_pad("sink").unwrap();
-    tee_inference_pad.link(&queue_inference_sink_pad)?;
+    tee_preview_pad.link(&queue_preview_pad)?;
+    tee_infer_pad.link(&queue_infer_pad)?;
 
     Ok(pipeline)
 }
 
 fn example_main() -> Result<(), Box<dyn Error>> {
+    let args = VideoClassifyParams::parse();
+
     // Initialize GStreamer
     gst::init()?;
 
-    // Parse command line arguments
-    let params = VideoClassifyParams::parse();
-
-    // Load the model and get its parameters
-    let model = EimModel::new_with_debug(&params.model, params.debug)?;
-    let model_params = model.parameters()?;
-
-    println!(
-        "Model expects {}x{} input with {} channels",
-        model_params.image_input_width,
-        model_params.image_input_height,
-        model_params.image_channel_count
-    );
-
-    // Create pipeline using model parameters and path
-    let pipeline = create_pipeline(&Path::new(&params.model), &model_params)?;
+    // Create and build the pipeline
+    let pipeline = create_pipeline(Path::new(&args.model))?;
 
     // Start playing
     pipeline.set_state(gst::State::Playing)?;
-    println!("Pipeline is playing...");
+    println!("Playing... (Ctrl+C to stop)");
 
-    // Wait for messages on the pipeline's bus
+    // Wait until error or EOS
     let bus = pipeline.bus().unwrap();
     for msg in bus.iter_timed(gst::ClockTime::NONE) {
         use gst::MessageView;
         match msg.view() {
             MessageView::Eos(..) => break,
             MessageView::Error(err) => {
-                eprintln!(
+                println!(
                     "Error from {:?}: {} ({:?})",
                     err.src().map(|s| s.path_string()),
                     err.error(),
                     err.debug()
                 );
                 break;
+            }
+            MessageView::StateChanged(state) => {
+                if args.debug {
+                    println!(
+                        "State changed from {:?}: {:?} -> {:?}",
+                        state.src().map(|s| s.path_string()),
+                        state.old(),
+                        state.current()
+                    );
+                }
             }
             _ => (),
         }
@@ -247,5 +237,9 @@ fn example_main() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
     run(|| example_main().unwrap());
+
+    #[cfg(not(target_os = "macos"))]
+    println!("This example only works on macOS");
 }

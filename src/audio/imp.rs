@@ -39,7 +39,6 @@ use gstreamer_base::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_audio::AudioInfo;
-use gstreamer_audio::AudioFormat;
 use std::sync::Mutex;
 use edge_impulse_runner::{EimModel, SensorType, InferenceResult};
 use gst::glib;
@@ -330,24 +329,60 @@ impl BaseTransformImpl for EdgeImpulseInfer {
     fn set_caps(
         &self,
         incaps: &gst::Caps,
-        _outcaps: &gst::Caps,
+        outcaps: &gst::Caps,
     ) -> Result<(), gst::LoggableError> {
         let s = incaps.structure(0).unwrap();
-        let rate = s.get::<i32>("rate").map_err(|_| {
-            gst::loggable_error!(CAT, "Failed to get rate from caps")
-        })?;
-
         let state = self.state.lock().unwrap();
 
-        // Verify rate matches model's expected rate
-        if let Some(model_rate) = state.sample_rate {
-            if rate != model_rate {
-                return Err(gst::loggable_error!(CAT,
-                    "Input sample rate {} Hz doesn't match model's expected rate {} Hz",
-                    rate, model_rate
-                ));
+        match state.sensor_type {
+            Some(SensorType::Microphone) => {
+                let rate = s.get::<i32>("rate").map_err(|_| {
+                    gst::loggable_error!(CAT, "Failed to get rate from caps")
+                })?;
+
+                // Verify rate matches model's expected rate
+                if let Some(model_rate) = state.sample_rate {
+                    if rate != model_rate {
+                        return Err(gst::loggable_error!(CAT,
+                            "Input sample rate {} Hz doesn't match model's expected rate {} Hz",
+                            rate, model_rate
+                        ));
+                    }
+                }
+            }
+            Some(SensorType::Camera) => {
+                let width = s.get::<i32>("width").map_err(|_| {
+                    gst::loggable_error!(CAT, "Failed to get width from caps")
+                })?;
+                let height = s.get::<i32>("height").map_err(|_| {
+                    gst::loggable_error!(CAT, "Failed to get height from caps")
+                })?;
+
+                // Verify dimensions match model's expected dimensions
+                if let Some(model_width) = state.width {
+                    if width != model_width as i32 {
+                        return Err(gst::loggable_error!(CAT,
+                            "Input width {} doesn't match model's expected width {}",
+                            width, model_width
+                        ));
+                    }
+                }
+                if let Some(model_height) = state.height {
+                    if height != model_height as i32 {
+                        return Err(gst::loggable_error!(CAT,
+                            "Input height {} doesn't match model's expected height {}",
+                            height, model_height
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(gst::loggable_error!(CAT, "No sensor type set"));
             }
         }
+
+        gst::debug!(CAT, obj = self.obj(),
+            "Set caps:\n  in:  {}\n  out: {}", incaps, outcaps);
 
         Ok(())
     }
@@ -361,16 +396,48 @@ impl BaseTransformImpl for EdgeImpulseInfer {
         let state = self.state.lock().unwrap();
         let mut output_caps = caps.clone();
 
-        // Ensure we get the right format
         if direction == gst::PadDirection::Sink {
             if let Some(s) = output_caps.make_mut().structure_mut(0) {
-                s.set("format", "S16LE");
-                if let Some(rate) = state.sample_rate {
-                    s.set("rate", rate);
+                // Handle caps based on sensor type
+                match state.sensor_type {
+                    Some(SensorType::Microphone) => {
+                        s.set("format", "S16LE");
+                        // Use model's sample rate if available
+                        if let Some(rate) = state.sample_rate {
+                            s.set("rate", rate);
+                        }
+                        s.set("channels", 1i32);
+                    }
+                    Some(SensorType::Camera) => {
+                        // Set format to RGB which is what Edge Impulse expects
+                        s.set("format", "RGB");
+
+                        // Set exact dimensions from model parameters
+                        if let Some(width) = state.width {
+                            // Remove any existing width field and set exact value
+                            s.remove_field("width");
+                            s.set("width", width as i32);
+                        }
+                        if let Some(height) = state.height {
+                            // Remove any existing height field and set exact value
+                            s.remove_field("height");
+                            s.set("height", height as i32);
+                        }
+                        if let Some(channels) = state.channels {
+                            gst::debug!(CAT, obj = self.obj(),
+                                "Model expects {} channels", channels);
+                        }
+                    }
+                    _ => {
+                        gst::warning!(CAT, obj = self.obj(),
+                            "No sensor type set - using default caps");
+                    }
                 }
-                s.set("channels", 1i32);
             }
         }
+
+        gst::debug!(CAT, obj = self.obj(),
+            "Transformed caps {} -> {}", caps, output_caps);
 
         Some(output_caps)
     }
@@ -509,7 +576,7 @@ impl ElementImpl for EdgeImpulseInfer {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-            // Audio caps
+            // Audio caps - keep generic since model isn't loaded yet
             let audio_caps = gst::Caps::builder("audio/x-raw")
                 .field("format", "S16LE")
                 .field("rate", gst::IntRange::new(8000, 48000))
@@ -517,9 +584,9 @@ impl ElementImpl for EdgeImpulseInfer {
                 .field("layout", "interleaved")
                 .build();
 
-            // Video caps
+            // Video caps - keep generic since model isn't loaded yet
             let video_caps = gst::Caps::builder("video/x-raw")
-                .field("format", gst::List::new(["RGB", "RGBA", "BGR", "BGRA"]))
+                .field("format", "RGB")  // Edge Impulse typically expects RGB
                 .field("width", gst::IntRange::new(1, i32::MAX))
                 .field("height", gst::IntRange::new(1, i32::MAX))
                 .field("framerate", gst::FractionRange::new(
@@ -534,7 +601,6 @@ impl ElementImpl for EdgeImpulseInfer {
                 .structure(video_caps.structure(0).unwrap().to_owned())
                 .build();
 
-            // Create pad templates
             vec![
                 gst::PadTemplate::new(
                     "src",

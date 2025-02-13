@@ -1,17 +1,21 @@
 use gstreamer as gst;
 use gstreamer::glib;
 
-mod edgeimpulse;
+mod common;
+mod video;
+mod audio;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
-    edgeimpulse::register(plugin)
+    video::register(plugin)?;
+    audio::register(plugin)?;
+    Ok(())
 }
 
 gst::plugin_define!(
     edgeimpulse,
-    "Edge Impulse Inference Plugin",
+    env!("CARGO_PKG_DESCRIPTION"),
     plugin_init,
-    env!("CARGO_PKG_VERSION"),
+    concat!(env!("CARGO_PKG_VERSION")),
     "MIT/X11",
     env!("CARGO_PKG_NAME"),
     env!("CARGO_PKG_NAME"),

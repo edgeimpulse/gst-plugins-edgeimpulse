@@ -478,6 +478,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-audio",
  "gstreamer-base",
+ "gstreamer-video",
  "objc",
  "once_cell",
  "serde",
@@ -584,6 +585,37 @@ checksum = "16cf1ae0a869aa7066ce3c685b76053b4b4f48f364a5b18c4b1f36ef57469719"
 dependencies = [
  "glib-sys",
  "gobject-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
+name = "gstreamer-video"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fa41e40319e923236e96f0b691711d1504746ab9c89607d77d22aa84777f33f"
+dependencies = [
+ "cfg-if",
+ "futures-channel",
+ "glib",
+ "gstreamer",
+ "gstreamer-base",
+ "gstreamer-video-sys",
+ "libc",
+ "once_cell",
+ "thiserror 2.0.11",
+]
+
+[[package]]
+name = "gstreamer-video-sys"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31dc0f49c117f4867b0f98c712aa55ebf25580151d794be8f9179ec2d877fd14"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-base-sys",
+ "gstreamer-sys",
  "libc",
  "system-deps",
 ]

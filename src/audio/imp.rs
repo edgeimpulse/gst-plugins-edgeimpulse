@@ -221,59 +221,57 @@ impl EdgeImpulseInfer {
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         match model.classify(features, None) {
             Ok(result) => {
-                // Create message structure based on result type
-                let mut s = gst::Structure::builder("edge-impulse-inference-result").build();
+                // Create base message structure
+                let mut s = gst::Structure::builder("edge-impulse-inference-result")
+                    .field("timestamp", gst::ClockTime::ZERO)
+                    .build();
 
-                match result.result {
-                    InferenceResult::Classification { classification } => {
+                if let InferenceResult::ObjectDetection { bounding_boxes, classification: _ } = result.result {
+                    let mut detect_struct = gst::Structure::new_empty("object-detection");
+                    // Add bounding boxes information
+                    for (idx, bbox) in bounding_boxes.iter().enumerate() {
+                        let box_struct = gst::Structure::builder("bbox")
+                            .field("label", bbox.label.clone())
+                            .field("confidence", bbox.value)
+                            .field("x", bbox.x)
+                            .field("y", bbox.y)
+                            .field("width", bbox.width)
+                            .field("height", bbox.height)
+                            .build();
+                        detect_struct.set(&format!("object_{}", idx), box_struct);
+                    }
+                    s.set("detection", detect_struct);
+                } else {
+                    // For classification results
+                    if let InferenceResult::Classification { classification } = result.result {
                         let mut class_struct = gst::Structure::new_empty("classification");
                         for (label, confidence) in classification {
                             class_struct.set(label, confidence);
                         }
                         s.set("classification", class_struct);
                     }
-                    InferenceResult::ObjectDetection { bounding_boxes, classification } => {
-                        // Convert bounding boxes to array value
-                        let boxes: Vec<gst::Structure> = bounding_boxes.into_iter()
-                            .map(|bb| {
-                                gst::Structure::builder("bbox")
-                                    .field("label", bb.label)
-                                    .field("confidence", bb.value)
-                                    .field("x", bb.x)
-                                    .field("y", bb.y)
-                                    .field("width", bb.width)
-                                    .field("height", bb.height)
-                                    .build()
-                            })
-                            .collect();
-
-                        // Convert Vec<Structure> to array value
-                        let boxes_array = gst::Array::from_iter(
-                            boxes.into_iter()
-                                .map(|s| s.to_send_value())
-                        );
-                        s.set("bounding_boxes", boxes_array);
-
-                        // Add classification if present
-                        if !classification.is_empty() {
-                            let mut class_struct = gst::Structure::new_empty("classification");
-                            for (label, confidence) in classification {
-                                class_struct.set(label, confidence);
-                            }
-                            s.set("classification", class_struct);
-                        }
-                    }
                 }
 
+                // Post the message
                 let msg = gst::message::Element::new(s);
                 let _ = self.obj().post_message(msg);
-                Ok(gst::FlowSuccess::Ok)
+
+                gst::debug!(CAT, obj = self.obj(), "Inference completed successfully");
             }
             Err(e) => {
                 gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
-                Err(gst::FlowError::Error)
+
+                // Post error message with consistent structure
+                let s = gst::Structure::builder("edge-impulse-inference-result")
+                    .field("timestamp", gst::ClockTime::ZERO)
+                    .field("error", e.to_string())
+                    .build();
+
+                let msg = gst::message::Element::new(s);
+                let _ = self.obj().post_message(msg);
             }
         }
+        Ok(gst::FlowSuccess::Ok)
     }
 }
 

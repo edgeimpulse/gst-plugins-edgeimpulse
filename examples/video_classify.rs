@@ -4,7 +4,7 @@
 //! video classification using a trained model.
 //!
 //! Usage:
-//!   cargo run --example video_classify -- --model <path_to_model> [--debug]
+//!   cargo run --example video_classify -- --model <path_to_model>
 //!
 //! Environment setup:
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
@@ -13,6 +13,7 @@ use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::error::Error;
+use serde_json;
 
 /// Command line parameters for the video classification example
 #[derive(Parser, Debug)]
@@ -27,11 +28,11 @@ struct VideoClassifyParams {
     format: String,
 
     /// Input width
-    #[arg(short = 'W', long, default_value_t = 96)]
+    #[arg(short = 'W', long)]
     width: i32,
 
     /// Input height
-    #[arg(short = 'H', long, default_value_t = 96)]
+    #[arg(short = 'H', long)]
     height: i32,
 
     /// Enable debug output
@@ -132,45 +133,88 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     let src = gst::ElementFactory::make("avfvideosrc")
         .build()
         .expect("Could not create avfvideosrc element.");
-    let videoconvert0 = gst::ElementFactory::make("videoconvert")
+
+    let queue1 = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 2u32)
+        .property_from_str("leaky", "downstream")
+        .build()
+        .expect("Could not create queue element.");
+
+    let videoconvert1 = gst::ElementFactory::make("videoconvert")
+        .property("n-threads", 4u32)
         .build()
         .expect("Could not create videoconvert element.");
-    let videoscale = gst::ElementFactory::make("videoscale")
+
+    let videoscale1 = gst::ElementFactory::make("videoscale")
         .build()
         .expect("Could not create videoscale element.");
+
     let caps1 = gst::ElementFactory::make("capsfilter")
         .build()
         .expect("Could not create capsfilter element.");
-    let classifier = gst::ElementFactory::make("edgeimpulseinfer")
+
+    let queue2 = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 2u32)
+        .property_from_str("leaky", "downstream")
         .build()
-        .expect("Could not create edgeimpulseinfer element.");
-    let videoconvert1 = gst::ElementFactory::make("videoconvert")
+        .expect("Could not create queue element.");
+
+    let classifier = gst::ElementFactory::make("edgeimpulsevideoinfer")
+        .property("model-path", &args.model)
+        .build()
+        .expect("Could not create edgeimpulsevideoinfer element.");
+
+    let queue3 = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 2u32)
+        .property_from_str("leaky", "downstream")
+        .build()
+        .expect("Could not create queue element.");
+
+    let videoscale2 = gst::ElementFactory::make("videoscale")
+        .build()
+        .expect("Could not create videoscale element.");
+
+    let caps2 = gst::ElementFactory::make("capsfilter")
+        .build()
+        .expect("Could not create capsfilter element.");
+
+    let videoconvert2 = gst::ElementFactory::make("videoconvert")
+        .property("n-threads", 4u32)
         .build()
         .expect("Could not create videoconvert element.");
+
     let sink = gst::ElementFactory::make("autovideosink")
+        .property("sync", false)
         .build()
         .expect("Could not create autovideosink element.");
 
-    // Set caps for the classifier input
-    let caps = gst::Caps::builder("video/x-raw")
+    // Set caps using provided dimensions
+    let caps1_struct = gst::Caps::builder("video/x-raw")
         .field("format", "RGB")
-        .field("width", 96i32)
-        .field("height", 96i32)
+        .field("width", args.width)
+        .field("height", args.height)
         .build();
-    caps1.set_property("caps", &caps);
+    caps1.set_property("caps", &caps1_struct);
 
-    // Set the model path
-    classifier.set_property("model-path", args.model.to_string());
+    let caps2_struct = gst::Caps::builder("video/x-raw")
+        .field("width", 480i32)
+        .field("height", 480i32)
+        .build();
+    caps2.set_property("caps", &caps2_struct);
 
     // Add elements to the pipeline
-    pipeline.add_many(&[&src, &videoconvert0, &videoscale, &caps1, &classifier, &videoconvert1, &sink])?;
+    pipeline.add_many(&[
+        &src, &queue1, &videoconvert1, &videoscale1, &caps1,
+        &queue2, &classifier, &queue3, &videoscale2, &caps2,
+        &videoconvert2, &sink,
+    ])?;
 
     // Link the elements
-    gst::Element::link_many(&[&src, &videoconvert0, &videoscale, &caps1])?;
-    gst::Element::link_many(&[&classifier, &videoconvert1, &sink])?;
-
-    // Link caps1 to classifier with compatible caps
-    caps1.link(&classifier)?;
+    gst::Element::link_many(&[
+        &src, &queue1, &videoconvert1, &videoscale1, &caps1,
+        &queue2, &classifier, &queue3, &videoscale2, &caps2,
+        &videoconvert2, &sink,
+    ])?;
 
     Ok(pipeline)
 }
@@ -186,9 +230,29 @@ fn example_main() -> Result<(), Box<dyn Error>> {
     for msg in bus.iter_timed(gst::ClockTime::NONE) {
         use gst::MessageView;
         match msg.view() {
+            MessageView::Element(element) => {
+                let structure = element.structure().unwrap();
+                if structure.name() == "edge-impulse-inference-result" {
+                    if let Ok(result) = structure.get::<String>("result") {
+                        // Parse the JSON string
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                            // Access the bounding_boxes array
+                            if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                for bbox in boxes {
+                                    if let (Some(label), Some(value)) = (
+                                        bbox["label"].as_str(),
+                                        bbox["value"].as_f64(),
+                                    ) {
+                                        println!("Detected {} with confidence {}", label, value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             MessageView::Error(err) => {
-                pipeline.set_state(gst::State::Null)?;
-                eprintln!(
+                println!(
                     "Error from {:?}: {} ({:?})",
                     err.src().map(|s| s.path_string()),
                     err.error(),
@@ -197,13 +261,6 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                 break;
             }
             MessageView::Eos(..) => break,
-            MessageView::Element(element) => {
-                if let Some(s) = element.structure() {
-                    if s.name() == "edge-impulse-inference-result" {
-                        println!("Inference result: {:#?}", s);
-                    }
-                }
-            }
             _ => (),
         }
     }

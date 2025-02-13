@@ -26,6 +26,7 @@ use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use serde_json;
 
 use crate::common::State;
 
@@ -73,7 +74,7 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
 
                 // Initialize the model when the path is set
                 if let Some(model_path) = model_path {
-                    match edge_impulse_runner::EimModel::new_with_debug(&model_path, true) {
+                    match edge_impulse_runner::EimModel::new(&model_path) {
                         Ok(model) => {
                             gst::debug!(CAT, obj = self.obj(), "Successfully loaded model from {}", model_path);
                             state.model = Some(model);
@@ -269,15 +270,49 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Run inference
             match model.classify(features, None) {
                 Ok(result) => {
+                    // Convert result to JSON string
+                    let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {
+                        gst::warning!(CAT, obj = self.obj(), "Failed to serialize result: {}", e);
+                        String::from("{}")
+                    });
+
                     if is_object_detection {
-                        gst::info!(CAT, obj = self.obj(), "Object detection result: {:?}", result);
-                        // TODO: Draw bounding boxes on the frame
+                        gst::info!(CAT, obj = self.obj(), "Object detection result: {}", result_json);
+
+                        // Create message structure for object detection results
+                        let s = gst::Structure::builder("edge-impulse-inference-result")
+                            .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
+                            .field("type", "object-detection")
+                            .field("result", result_json)
+                            .build();
+
+                        // Post the message
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
-                        gst::info!(CAT, obj = self.obj(), "Classification result: {:?}", result);
+                        gst::info!(CAT, obj = self.obj(), "Classification result: {}", result_json);
+
+                        // Create message structure for classification results
+                        let s = gst::Structure::builder("edge-impulse-inference-result")
+                            .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
+                            .field("type", "classification")
+                            .field("result", result_json)
+                            .build();
+
+                        // Post the message
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
                 }
                 Err(e) => {
                     gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
+
+                    // Post error message
+                    let s = gst::Structure::builder("edge-impulse-inference-result")
+                        .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
+                        .field("type", "error")
+                        .field("error", e.to_string())
+                        .build();
+
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
             }
         } else {

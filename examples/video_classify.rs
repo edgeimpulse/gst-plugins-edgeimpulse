@@ -12,8 +12,8 @@
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use std::error::Error;
 use serde_json;
+use std::error::Error;
 
 /// Command line parameters for the video classification example
 #[derive(Parser, Debug)]
@@ -204,16 +204,34 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
 
     // Add elements to the pipeline
     pipeline.add_many(&[
-        &src, &queue1, &videoconvert1, &videoscale1, &caps1,
-        &queue2, &classifier, &queue3, &videoscale2, &caps2,
-        &videoconvert2, &sink,
+        &src,
+        &queue1,
+        &videoconvert1,
+        &videoscale1,
+        &caps1,
+        &queue2,
+        &classifier,
+        &queue3,
+        &videoscale2,
+        &caps2,
+        &videoconvert2,
+        &sink,
     ])?;
 
     // Link the elements
     gst::Element::link_many(&[
-        &src, &queue1, &videoconvert1, &videoscale1, &caps1,
-        &queue2, &classifier, &queue3, &videoscale2, &caps2,
-        &videoconvert2, &sink,
+        &src,
+        &queue1,
+        &videoconvert1,
+        &videoscale1,
+        &caps1,
+        &queue2,
+        &classifier,
+        &queue3,
+        &videoscale2,
+        &caps2,
+        &videoconvert2,
+        &sink,
     ])?;
 
     Ok(pipeline)
@@ -239,11 +257,16 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                             // Access the bounding_boxes array
                             if let Some(boxes) = json["bounding_boxes"].as_array() {
                                 for bbox in boxes {
-                                    if let (Some(label), Some(value)) = (
-                                        bbox["label"].as_str(),
-                                        bbox["value"].as_f64(),
-                                    ) {
-                                        println!("Detected {} with confidence {}", label, value);
+                                    if let (Some(label), Some(value)) =
+                                        (bbox["label"].as_str(), bbox["value"].as_f64())
+                                    {
+                                        // Only show detections with confidence > threshold
+                                        if value > args.threshold as f64 {
+                                            println!(
+                                                "Detected {} with confidence {}",
+                                                label, value
+                                            );
+                                        }
                                     }
                                 }
                             }

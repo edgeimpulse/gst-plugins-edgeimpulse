@@ -1,9 +1,9 @@
 use gstreamer as gst;
 use gstreamer::glib;
 
+mod audio;
 mod common;
 mod video;
-mod audio;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     video::register(plugin)?;

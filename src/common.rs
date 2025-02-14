@@ -1,6 +1,6 @@
+use edge_impulse_runner::EimModel;
 use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
-use edge_impulse_runner::EimModel;
 
 /// State structure for Edge Impulse elements
 ///
@@ -47,10 +47,8 @@ impl Default for State {
 /// gst-launch-1.0 edgeimpulsevideoinfer model-path=/path/to/model.eim ! ...
 /// ```
 pub fn create_common_properties() -> Vec<glib::ParamSpec> {
-    vec![
-        glib::ParamSpecString::builder("model-path")
-            .nick("Model Path")
-            .blurb("Path to Edge Impulse model file")
-            .build()
-    ]
+    vec![glib::ParamSpecString::builder("model-path")
+        .nick("Model Path")
+        .blurb("Path to Edge Impulse model file")
+        .build()]
 }

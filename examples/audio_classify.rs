@@ -36,7 +36,10 @@ struct AudioClassifyParams {
     audio: Option<String>,
 }
 
-fn create_pipeline(model_path: &Path, audio_path: Option<&Path>) -> Result<gst::Pipeline, Box<dyn std::error::Error>> {
+fn create_pipeline(
+    model_path: &Path,
+    audio_path: Option<&Path>,
+) -> Result<gst::Pipeline, Box<dyn std::error::Error>> {
     let pipeline = gst::Pipeline::new();
 
     // Create source element based on whether we have an audio file or using mic
@@ -187,7 +190,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             if max_confidence > 0.0 {
-                                println!("Detected: {} ({:.1}%)", max_class, max_confidence * 100.0);
+                                println!(
+                                    "Detected: {} ({:.1}%)",
+                                    max_class,
+                                    max_confidence * 100.0
+                                );
                             }
                         }
                     }

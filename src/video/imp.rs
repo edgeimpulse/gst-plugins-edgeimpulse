@@ -2,20 +2,171 @@
 //!
 //! This module implements a GStreamer BaseTransform element that performs
 //! machine learning inference on video frames using Edge Impulse models.
-//! The element operates in two modes:
+//! The element always passes the original frames through unchanged while
+//! optionally performing inference when a model is loaded.
 //!
-//! 1. Pass-through mode: When no model is loaded, frames are passed through unchanged
-//! 2. Inference mode: When a model is loaded, each frame is processed for inference
+//! # Video Processing Flow
+//! 1. The element receives RGB video frames
+//! 2. Input frames are copied directly to output (always)
+//! 3. If a model is loaded, frames are also:
+//!    - Mapped to raw RGB data
+//!    - Converted to features based on model requirements (RGB or grayscale)
+//!    - Processed through the Edge Impulse model
+//!    - Results are emitted as GStreamer messages
 //!
-//! The element maintains the original video stream while performing inference,
-//! making it suitable for real-time video processing applications.
+//! # Properties
+//! - `model-path`: Path to the Edge Impulse model file (.eim)
+//!   - When set, loads the model and begins inference
+//!   - When unset or invalid, only passes frames through
 //!
-//! # Pipeline Example
-//! ```bash
-//! gst-launch-1.0 v4l2src ! videoconvert ! \
-//!     edgeimpulsevideoinfer model-path=/path/to/model.eim ! \
-//!     videoconvert ! autovideosink
+//! # Messages
+//! The element emits "edge-impulse-inference-result" messages with:
+//! - timestamp: Frame presentation timestamp
+//! - type: "classification" or "object-detection" based on model type
+//! - result: JSON string containing model output
+//!
+//! For classification models, result contains:
+//! ```json
+//! {
+//!   "classification": [
+//!     {"label": "class1", "value": 0.95},
+//!     {"label": "class2", "value": 0.05}
+//!   ]
+//! }
 //! ```
+//!
+//! For object detection models, result contains:
+//! ```json
+//! {
+//!   "bounding_boxes": [
+//!     {
+//!       "label": "object1",
+//!       "value": 0.95,
+//!       "x": 100,
+//!       "y": 100,
+//!       "width": 50,
+//!       "height": 50
+//!     }
+//!   ]
+//! }
+//! ```
+//!
+//! # Pipeline Examples
+//! ```bash
+//! # Basic webcam pipeline
+//! gst-launch-1.0 \
+//!   avfvideosrc ! \
+//!   queue max-size-buffers=2 leaky=downstream ! \
+//!   videoconvert n-threads=4 ! \
+//!   videoscale method=nearest-neighbour ! \
+//!   video/x-raw,format=RGB,width=384,height=384 ! \
+//!   queue max-size-buffers=2 leaky=downstream ! \
+//!   edgeimpulsevideoinfer model-path=<model path> ! \
+//!   queue max-size-buffers=2 leaky=downstream ! \
+//!   videoscale method=nearest-neighbour ! \
+//!   video/x-raw,width=480,height=480 ! \
+//!   videoconvert n-threads=4 ! \
+//!   autovideosink sync=false
+//! ```
+//!
+//! # Implementation Details
+//!
+//! ## Frame Processing
+//! - Input frames must be in RGB format
+//! - Each frame is copied directly to output buffer
+//! - For inference, RGB data is converted to features based on model type:
+//!
+//!   RGB models (3 channels):
+//!   ```text
+//!   for each pixel:
+//!     packed = (r << 16) | (g << 8) | b
+//!     feature = packed as f32
+//!   ```
+//!
+//!   Grayscale models (1 channel):
+//!   ```text
+//!   for each pixel:
+//!     gray = 0.299*r + 0.587*g + 0.114*b
+//!     packed = (gray << 16) | (gray << 8) | gray
+//!     feature = packed as f32
+//!   ```
+//!
+//! ## Model Types
+//! The element supports two types of Edge Impulse models:
+//!
+//! 1. Classification models:
+//!    - Process entire frame
+//!    - Output class probabilities
+//!    - Message type: "classification"
+//!
+//! 2. Object Detection models:
+//!    - Detect and locate objects in frame
+//!    - Output bounding boxes and class probabilities
+//!    - Message type: "object-detection"
+//!
+//! ## Video Format Requirements
+//! - Format must be RGB (no other color formats supported)
+//! - Width and height must match model input dimensions
+//! - Frame rate is unrestricted
+//! - Stride must be width * 3 (no padding supported)
+//!
+//! ## Error Handling
+//! The element handles errors gracefully:
+//! - Model loading failures:
+//!   - Logged as errors
+//!   - Element continues in pass-through mode
+//! - Buffer mapping errors:
+//!   - Return GST_FLOW_ERROR
+//!   - May cause pipeline to stop
+//! - Inference errors:
+//!   - Logged as errors
+//!   - Emitted as error messages
+//!   - Pipeline continues running
+//!
+//! ## Memory Management
+//! - Input frames are copied once to output buffer
+//! - Feature conversion uses temporary vectors
+//! - Buffer mappings are dropped immediately after use
+//! - No frame data is retained between transforms
+//!
+//! ## Performance Considerations
+//! - Single frame copy operation
+//! - Feature conversion optimized for both RGB and grayscale
+//! - No additional scaling or format conversion
+//! - Pipeline should handle any necessary pre-processing
+//! - Inference runs in transform thread
+//!
+//! ## Pad Templates
+//! ```text
+//! SRC template: 'src'
+//! Availability: Always
+//! Capabilities:
+//!   video/x-raw
+//!     format: RGB
+//!     width: [ 1, 2147483647 ]
+//!     height: [ 1, 2147483647 ]
+//!
+//! SINK template: 'sink'
+//! Availability: Always
+//! Capabilities:
+//!   video/x-raw
+//!     format: RGB
+//!     width: [ 1, 2147483647 ]
+//!     height: [ 1, 2147483647 ]
+//! ```
+//!
+//! ## Element Information
+//! - Name: "edgeimpulsevideoinfer"
+//! - Classification: Filter/Video/AI
+//! - Description: "Runs video inference on Edge Impulse models (EIM)"
+//!
+//! ## Debug Categories
+//! The element uses the "edgeimpulsevideoinfer" debug category for logging.
+//! Enable with:
+//! ```bash
+//! GST_DEBUG=edgeimpulsevideoinfer:4
+//! ```
+//!
 
 use gstreamer as gst;
 use gstreamer::glib;
@@ -24,9 +175,9 @@ use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
-use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use serde_json;
+use std::sync::Mutex;
 
 use crate::common::State;
 
@@ -60,9 +211,8 @@ impl ObjectSubclass for EdgeImpulseVideoInfer {
 
 impl ObjectImpl for EdgeImpulseVideoInfer {
     fn properties() -> &'static [glib::ParamSpec] {
-        static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
-            crate::common::create_common_properties()
-        });
+        static PROPERTIES: Lazy<Vec<glib::ParamSpec>> =
+            Lazy::new(|| crate::common::create_common_properties());
         PROPERTIES.as_ref()
     }
 
@@ -76,7 +226,12 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
                 if let Some(model_path) = model_path {
                     match edge_impulse_runner::EimModel::new(&model_path) {
                         Ok(model) => {
-                            gst::debug!(CAT, obj = self.obj(), "Successfully loaded model from {}", model_path);
+                            gst::debug!(
+                                CAT,
+                                obj = self.obj(),
+                                "Successfully loaded model from {}",
+                                model_path
+                            );
                             state.model = Some(model);
                         }
                         Err(err) => {
@@ -133,13 +288,15 @@ impl ElementImpl for EdgeImpulseVideoInfer {
                     gst::PadDirection::Src,
                     gst::PadPresence::Always,
                     &caps,
-                ).unwrap(),
+                )
+                .unwrap(),
                 gst::PadTemplate::new(
                     "sink",
                     gst::PadDirection::Sink,
                     gst::PadPresence::Always,
                     &caps,
-                ).unwrap(),
+                )
+                .unwrap(),
             ]
         });
         PAD_TEMPLATES.as_ref()
@@ -195,7 +352,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let params = match model.parameters() {
                 Ok(p) => p,
                 Err(e) => {
-                    gst::error!(CAT, obj = self.obj(), "Failed to get model parameters: {}", e);
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to get model parameters: {}",
+                        e
+                    );
                     return Err(gst::FlowError::Error);
                 }
             };
@@ -205,9 +367,15 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let channels = params.image_channel_count;
             let is_object_detection = params.model_type == "constrained_object_detection";
 
-            gst::debug!(CAT, obj = self.obj(),
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
                 "Processing frame for {} model with dimensions {}x{} and {} channels",
-                params.model_type, width, height, channels);
+                params.model_type,
+                width,
+                height,
+                channels
+            );
 
             // Extract frame data for inference
             let in_frame = match VideoFrameRef::from_buffer_ref_readable(
@@ -219,9 +387,14 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 Ok(frame) => {
                     gst::debug!(CAT, obj = self.obj(), "Successfully mapped input buffer");
                     frame
-                },
+                }
                 Err(err) => {
-                    gst::error!(CAT, obj = self.obj(), "Failed to map input buffer: {:?}", err);
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to map input buffer: {:?}",
+                        err
+                    );
                     return Err(gst::FlowError::Error);
                 }
             };
@@ -229,9 +402,14 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Get the raw frame data
             let frame_data = match in_frame.plane_data(0) {
                 Ok(data) => {
-                    gst::debug!(CAT, obj = self.obj(), "Successfully got frame data of size {}", data.len());
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Successfully got frame data of size {}",
+                        data.len()
+                    );
                     data
-                },
+                }
                 Err(err) => {
                     gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {:?}", err);
                     return Err(gst::FlowError::Error);
@@ -256,7 +434,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 for chunk in frame_data.chunks_exact(3) {
                     if let [r, g, b] = chunk {
                         // Convert RGB to grayscale using standard weights
-                        let gray = (0.299 * (*r as f32) + 0.587 * (*g as f32) + 0.114 * (*b as f32)) as u8;
+                        let gray =
+                            (0.299 * (*r as f32) + 0.587 * (*g as f32) + 0.114 * (*b as f32)) as u8;
                         // Pack grayscale value into RGB format
                         let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
                         features.push(packed as f32);
@@ -265,7 +444,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 features
             };
 
-            gst::debug!(CAT, obj = self.obj(), "Running inference with {} features", features.len());
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Running inference with {} features",
+                features.len()
+            );
 
             // Run inference
             match model.classify(features, None) {
@@ -277,7 +461,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     });
 
                     if is_object_detection {
-                        gst::info!(CAT, obj = self.obj(), "Object detection result: {}", result_json);
+                        gst::info!(
+                            CAT,
+                            obj = self.obj(),
+                            "Object detection result: {}",
+                            result_json
+                        );
 
                         // Create message structure for object detection results
                         let s = gst::Structure::builder("edge-impulse-inference-result")
@@ -289,7 +478,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         // Post the message
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
-                        gst::info!(CAT, obj = self.obj(), "Classification result: {}", result_json);
+                        gst::info!(
+                            CAT,
+                            obj = self.obj(),
+                            "Classification result: {}",
+                            result_json
+                        );
 
                         // Create message structure for classification results
                         let s = gst::Structure::builder("edge-impulse-inference-result")
@@ -327,12 +521,14 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
     ///
     /// Stores the video dimensions from the negotiated caps for use during
     /// frame processing.
-    fn set_caps(
-        &self,
-        incaps: &gst::Caps,
-        outcaps: &gst::Caps,
-    ) -> Result<(), gst::LoggableError> {
-        gst::debug!(CAT, obj = self.obj(), "Set caps called with incaps: {:?}, outcaps: {:?}", incaps, outcaps);
+    fn set_caps(&self, incaps: &gst::Caps, outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Set caps called with incaps: {:?}, outcaps: {:?}",
+            incaps,
+            outcaps
+        );
 
         let mut state = self.state.lock().unwrap();
 
@@ -340,8 +536,13 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         let in_info = VideoInfo::from_caps(incaps)
             .map_err(|_| gst::loggable_error!(CAT, "Failed to parse input caps"))?;
 
-        gst::info!(CAT, obj = self.obj(), "Setting caps: width={}, height={}",
-            in_info.width(), in_info.height());
+        gst::info!(
+            CAT,
+            obj = self.obj(),
+            "Setting caps: width={}, height={}",
+            in_info.width(),
+            in_info.height()
+        );
 
         // Store dimensions
         state.width = Some(in_info.width() as u32);
@@ -360,7 +561,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         caps: &gst::Caps,
         _filter: Option<&gst::Caps>,
     ) -> Option<gst::Caps> {
-        gst::debug!(CAT, obj = self.obj(), "Transform caps called with direction {:?}", direction);
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Transform caps called with direction {:?}",
+            direction
+        );
         Some(caps.clone())
     }
 }

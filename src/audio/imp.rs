@@ -323,7 +323,6 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                             .build();
 
                         // Post the message
-                        println!("Posting message: {:?}", s);
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
                     Err(e) => {

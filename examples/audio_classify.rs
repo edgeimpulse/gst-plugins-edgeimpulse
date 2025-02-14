@@ -12,6 +12,7 @@
 //!
 //! Optional arguments:
 //!   --audio <path>         Path to input audio file (if not specified, uses microphone)
+//!   --threshold <float>    Confidence threshold (0.0 to 1.0) for showing results (default: 0.8)
 //!
 //! Example with microphone:
 //!   cargo run --example audio_classify -- --model model.eim
@@ -23,6 +24,7 @@ use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::path::Path;
+use serde_json;
 
 /// Command line parameters for the real-time audio classification example
 #[derive(Parser, Debug)]
@@ -34,6 +36,10 @@ struct AudioClassifyParams {
     /// Optional path to input audio file
     #[clap(short, long)]
     audio: Option<String>,
+
+    /// Confidence threshold (0.0 to 1.0) for showing results
+    #[clap(short, long, default_value = "0.8")]
+    threshold: f32,
 }
 
 fn create_pipeline(
@@ -56,46 +62,64 @@ fn create_pipeline(
         autoaudiosrc.upcast()
     };
 
-    // Create remaining elements
-    let audioconvert = gst::ElementFactory::make("audioconvert").build()?;
-    let audioresample = gst::ElementFactory::make("audioresample").build()?;
-    let capsfilter = gst::ElementFactory::make("capsfilter").build()?;
-    let audiobuffer = gst::ElementFactory::make("queue").build()?;
-    let edgeimpulseinfer = gst::ElementFactory::make("edgeimpulseinfer").build()?;
+    // Create pipeline elements
+    let capsfilter1 = gst::ElementFactory::make("capsfilter").build()?;
+    let audioconvert1 = gst::ElementFactory::make("audioconvert").build()?;
+    let audioresample1 = gst::ElementFactory::make("audioresample").build()?;
+    let capsfilter2 = gst::ElementFactory::make("capsfilter").build()?;
+    let edgeimpulseinfer = gst::ElementFactory::make("edgeimpulseaudioinfer").build()?;
+    let audioconvert2 = gst::ElementFactory::make("audioconvert").build()?;
+    let audioresample2 = gst::ElementFactory::make("audioresample").build()?;
+    let capsfilter3 = gst::ElementFactory::make("capsfilter").build()?;
     let sink = gst::ElementFactory::make("autoaudiosink").build()?;
 
-    // Configure audio format
-    let caps = gst::Caps::builder("audio/x-raw")
-        .field("format", "S16LE")
-        .field("rate", 16000)
-        .field("channels", 1)
+    // Configure caps
+    let caps1 = gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
         .build();
-    capsfilter.set_property("caps", &caps);
+    capsfilter1.set_property("caps", &caps1);
 
-    // Configure buffer size to match model's expected input
-    audiobuffer.set_property("max-size-buffers", 1u32);
-    audiobuffer.set_property("max-size-bytes", (16000 * 2) as u32); // 1 second of S16LE audio
+    let caps2 = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("channels", 1)
+        .field("rate", 16000)
+        .field("layout", "interleaved")
+        .build();
+    capsfilter2.set_property("caps", &caps2);
+
+    let caps3 = gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
+        .field("channels", 2)
+        .field("rate", 44100)
+        .build();
+    capsfilter3.set_property("caps", &caps3);
 
     edgeimpulseinfer.set_property("model-path", model_path.to_str().unwrap());
 
-    // Add remaining elements to pipeline
+    // Add elements to pipeline
     pipeline.add_many(&[
-        &audioconvert,
-        &audioresample,
-        &capsfilter,
-        &audiobuffer,
+        &capsfilter1,
+        &audioconvert1,
+        &audioresample1,
+        &capsfilter2,
         &edgeimpulseinfer,
+        &audioconvert2,
+        &audioresample2,
+        &capsfilter3,
         &sink,
     ])?;
 
     // Link elements
     gst::Element::link_many(&[
         &source,
-        &audioconvert,
-        &audioresample,
-        &capsfilter,
-        &audiobuffer,
+        &capsfilter1,
+        &audioconvert1,
+        &audioresample1,
+        &capsfilter2,
         &edgeimpulseinfer,
+        &audioconvert2,
+        &audioresample2,
+        &capsfilter3,
         &sink,
     ])?;
 
@@ -163,38 +187,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MessageView::Element(element) => {
                 let structure = element.structure();
                 if let Some(s) = structure {
-                    println!("Got element message with name: {}", s.name());
-
                     if s.name() == "edge-impulse-inference-result" {
-                        println!("Got inference result message");
-                        println!("Message structure: {:?}", s);
-
-                        // Try to get the result string first
-                        if let Ok(result_str) = s.get::<String>("result") {
-                            println!("Raw result string: {}", result_str);
-                        }
-
-                        // Extract classification results
-                        if let Ok(classifications) = s.get::<gst::Structure>("classification") {
-                            // Find the class with highest confidence
-                            let mut max_confidence = 0.0f32;
-                            let mut max_class = "";
-
-                            for field in classifications.fields() {
-                                if let Ok(confidence) = classifications.get::<f32>(field.as_str()) {
-                                    if confidence > max_confidence {
-                                        max_confidence = confidence;
-                                        max_class = field.as_str();
+                        if let Ok(result) = s.get::<String>("result") {
+                            // Parse the JSON string
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                                if let Some(classifications) = json["classification"].as_object() {
+                                    for (label, value) in classifications {
+                                        if let Some(confidence) = value.as_f64() {
+                                            // Only show detections with confidence > threshold
+                                            if confidence > params.threshold as f64 {
+                                                println!(
+                                                    "Detected {} with confidence {:.1}%",
+                                                    label,
+                                                    confidence * 100.0
+                                                );
+                                            }
+                                        }
                                     }
                                 }
-                            }
-
-                            if max_confidence > 0.0 {
-                                println!(
-                                    "Detected: {} ({:.1}%)",
-                                    max_class,
-                                    max_confidence * 100.0
-                                );
                             }
                         }
                     }

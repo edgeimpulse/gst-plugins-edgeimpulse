@@ -92,3 +92,32 @@ where
         _ => unimplemented!(),
     }
 }
+
+/// Creates a standard inference result message structure
+pub fn create_inference_message(
+    element_type: &str,
+    timestamp: gst::ClockTime,
+    result_type: &str,
+    result_json: String,
+    timing_ms: u32,
+) -> gst::Structure {
+    gst::Structure::builder(&format!("edge-impulse-{}-inference-result", element_type))
+        .field("timestamp", timestamp)
+        .field("type", result_type)
+        .field("result", result_json)
+        .field("timing_ms", timing_ms)
+        .build()
+}
+
+/// Creates an error message structure
+pub fn create_error_message(
+    element_type: &str,
+    timestamp: gst::ClockTime,
+    error: String,
+) -> gst::Structure {
+    gst::Structure::builder(&format!("edge-impulse-{}-inference-result", element_type))
+        .field("timestamp", timestamp)
+        .field("type", "error")
+        .field("error", error)
+        .build()
+}

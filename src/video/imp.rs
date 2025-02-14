@@ -446,36 +446,32 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     });
 
                     if is_object_detection {
-                        gst::info!(
-                            CAT,
-                            obj = self.obj(),
-                            "Object detection result: {}",
-                            result_json
-                        );
+                        let now = std::time::Instant::now();
+                        // ... existing inference code ...
+                        let elapsed = now.elapsed();
 
-                        // Create message structure for object detection results
-                        let s = gst::Structure::builder("edge-impulse-inference-result")
-                            .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
-                            .field("type", "object-detection")
-                            .field("result", result_json)
-                            .build();
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "object-detection",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
 
                         // Post the message
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
-                        gst::info!(
-                            CAT,
-                            obj = self.obj(),
-                            "Classification result: {}",
-                            result_json
-                        );
+                        let now = std::time::Instant::now();
+                        // ... existing inference code ...
+                        let elapsed = now.elapsed();
 
-                        // Create message structure for classification results
-                        let s = gst::Structure::builder("edge-impulse-inference-result")
-                            .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
-                            .field("type", "classification")
-                            .field("result", result_json)
-                            .build();
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "classification",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
 
                         // Post the message
                         let _ = self.obj().post_message(gst::message::Element::new(s));
@@ -484,13 +480,13 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 Err(e) => {
                     gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
 
-                    // Post error message
-                    let s = gst::Structure::builder("edge-impulse-inference-result")
-                        .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
-                        .field("type", "error")
-                        .field("error", e.to_string())
-                        .build();
+                    let s = crate::common::create_error_message(
+                        "video",
+                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        e.to_string(),
+                    );
 
+                    // Post the message
                     let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
             }

@@ -250,7 +250,7 @@ fn example_main() -> Result<(), Box<dyn Error>> {
         match msg.view() {
             MessageView::Element(element) => {
                 let structure = element.structure().unwrap();
-                if structure.name() == "edge-impulse-inference-result" {
+                if structure.name() == "edge-impulse-video-inference-result" {
                     if let Ok(result) = structure.get::<String>("result") {
                         // Parse the JSON string
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {

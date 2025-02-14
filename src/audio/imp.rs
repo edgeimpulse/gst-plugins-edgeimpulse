@@ -300,19 +300,25 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                                 String::from("{}")
                             });
 
-                        // Create message structure for classification results
-                        let s = gst::Structure::builder("edge-impulse-inference-result")
-                            .field("timestamp", inbuf.pts().unwrap_or(gst::ClockTime::ZERO))
-                            .field("type", "classification")
-                            .field("result", result_json)
-                            .field("timing_ms", elapsed.as_millis() as u32)
-                            .build();
+                        let s = crate::common::create_inference_message(
+                            "audio",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "classification",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
 
                         // Post the message
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
                     Err(e) => {
                         gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
+                        let s = crate::common::create_error_message(
+                            "audio",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            e.to_string(),
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
                 }
             }

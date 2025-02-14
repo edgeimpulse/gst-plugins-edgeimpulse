@@ -187,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MessageView::Element(element) => {
                 let structure = element.structure();
                 if let Some(s) = structure {
-                    if s.name() == "edge-impulse-inference-result" {
+                    if s.name() == "edge-impulse-audio-inference-result" {
                         if let Ok(result) = s.get::<String>("result") {
                             // Parse the JSON string
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {

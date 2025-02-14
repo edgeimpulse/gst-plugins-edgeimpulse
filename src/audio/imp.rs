@@ -29,23 +29,16 @@
 //! # Pipeline Example
 //! ```bash
 //! # Basic pipeline
-//! gst-launch-1.0 autoaudiosrc ! \
+//! gst-launch-1.0 \
+//!     autoaudiosrc ! \
+//!     capsfilter caps="audio/x-raw,format=F32LE" ! \
 //!     audioconvert ! \
 //!     audioresample ! \
-//!     audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved ! \
-//!     edgeimpulseaudioinfer model-path=/path/to/model.eim ! \
-//!     audioconvert ! \
-//!     autoaudiosink
-//!
-//! # Pipeline with noise reduction
-//! gst-launch-1.0 autoaudiosrc ! \
+//!     capsfilter caps="audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved" ! \
+//!     edgeimpulseaudioinfer model-path=<path-to-model> ! \
 //!     audioconvert ! \
 //!     audioresample ! \
-//!     audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved ! \
-//!     audiodynamicrange noise-floor-dbfs=-50 ! \
-//!     audioamplify amplification=1.5 ! \
-//!     edgeimpulseaudioinfer model-path=/path/to/model.eim ! \
-//!     audioconvert ! \
+//!     capsfilter caps="audio/x-raw,format=F32LE,channels=2,rate=44100" ! \
 //!     autoaudiosink
 //! ```
 //!

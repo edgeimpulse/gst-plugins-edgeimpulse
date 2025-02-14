@@ -23,8 +23,8 @@
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use std::path::Path;
 use serde_json;
+use std::path::Path;
 
 /// Command line parameters for the real-time audio classification example
 #[derive(Parser, Debug)]

@@ -76,6 +76,7 @@
 //! - Buffer mappings are dropped as soon as possible
 //! - Sample buffer is cleared after each inference
 
+use crate::common::CAT;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -88,21 +89,33 @@ use serde_json;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-pub(crate) static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
-    gst::DebugCategory::new(
-        "edgeimpulseaudioinfer",
-        gst::DebugColorFlags::empty(),
-        Some("Edge Impulse Audio Inference"),
-    )
-});
-
 /// Audio-specific state structure
-#[derive(Default)]
-struct AudioState {
+pub struct AudioState {
     /// The loaded Edge Impulse model
-    model: Option<edge_impulse_runner::EimModel>,
+    pub model: Option<edge_impulse_runner::EimModel>,
     /// Audio sample rate
-    sample_rate: Option<u32>,
+    pub sample_rate: Option<u32>,
+}
+
+impl Default for AudioState {
+    fn default() -> Self {
+        Self {
+            model: None,
+            sample_rate: None,
+        }
+    }
+}
+
+impl AsRef<Option<edge_impulse_runner::EimModel>> for AudioState {
+    fn as_ref(&self) -> &Option<edge_impulse_runner::EimModel> {
+        &self.model
+    }
+}
+
+impl AsMut<Option<edge_impulse_runner::EimModel>> for AudioState {
+    fn as_mut(&mut self) -> &mut Option<edge_impulse_runner::EimModel> {
+        &mut self.model
+    }
 }
 
 /// Audio inference element structure
@@ -128,45 +141,18 @@ impl ObjectImpl for EdgeImpulseAudioInfer {
         PROPERTIES.as_ref()
     }
 
-    fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-        match pspec.name() {
-            "model-path" => {
-                let mut state = self.state.lock().unwrap();
-                let model_path: Option<String> = value.get().expect("type checked upstream");
-
-                if let Some(model_path) = model_path {
-                    match edge_impulse_runner::EimModel::new(&model_path) {
-                        Ok(model) => {
-                            gst::debug!(
-                                CAT,
-                                obj = self.obj(),
-                                "Successfully loaded model from {}",
-                                model_path
-                            );
-                            state.model = Some(model);
-                        }
-                        Err(err) => {
-                            gst::error!(CAT, obj = self.obj(), "Failed to load model: {}", err);
-                        }
-                    }
-                }
-            }
-            _ => unimplemented!(),
-        }
+    fn set_property(&self, id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        crate::common::set_common_property::<AudioState>(
+            &self.state,
+            id,
+            value,
+            pspec,
+            &*self.obj(),
+        );
     }
 
-    fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        match pspec.name() {
-            "model-path" => {
-                let state = self.state.lock().unwrap();
-                if let Some(ref model) = state.model {
-                    model.path().to_value()
-                } else {
-                    None::<String>.to_value()
-                }
-            }
-            _ => unimplemented!(),
-        }
+    fn property(&self, id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        crate::common::get_common_property::<AudioState>(&self.state, id, pspec)
     }
 }
 

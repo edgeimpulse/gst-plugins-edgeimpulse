@@ -1,32 +1,19 @@
 use edge_impulse_runner::EimModel;
+use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
+use gstreamer::prelude::*;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 
-/// State structure for Edge Impulse elements
-///
-/// This structure maintains the runtime state of the Edge Impulse elements,
-/// including the loaded model and media format information. It's protected
-/// by a Mutex to ensure thread-safe access in streaming contexts.
-pub struct State {
-    /// The loaded Edge Impulse model instance
-    pub model: Option<EimModel>,
-
-    /// Width of the input frames (for video models)
-    pub width: Option<u32>,
-
-    /// Height of the input frames (for video models)
-    pub height: Option<u32>,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            model: None,
-            width: None,
-            height: None,
-        }
-    }
-}
+// Create a common debug category
+pub(crate) static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    gst::DebugCategory::new(
+        "edgeimpulseinfer",
+        gst::DebugColorFlags::empty(),
+        Some("Edge Impulse Inference"),
+    )
+});
 
 /// Creates common GStreamer properties shared between Edge Impulse elements
 ///
@@ -51,4 +38,57 @@ pub fn create_common_properties() -> Vec<glib::ParamSpec> {
         .nick("Model Path")
         .blurb("Path to Edge Impulse model file")
         .build()]
+}
+
+pub fn set_common_property<T>(
+    state: &Mutex<T>,
+    _id: usize,
+    value: &glib::Value,
+    pspec: &glib::ParamSpec,
+    obj: &impl GstObjectExt,
+) where
+    T: AsMut<Option<EimModel>>,
+{
+    match pspec.name() {
+        "model-path" => {
+            let mut state = state.lock().unwrap();
+            let model_path: Option<String> = value.get().expect("type checked upstream");
+
+            // Initialize the model when the path is set
+            if let Some(model_path) = model_path {
+                match edge_impulse_runner::EimModel::new(&model_path) {
+                    Ok(model) => {
+                        gst::debug!(
+                            CAT,
+                            obj = obj,
+                            "Successfully loaded model from {}",
+                            model_path
+                        );
+                        *state.as_mut() = Some(model);
+                    }
+                    Err(err) => {
+                        gst::error!(CAT, obj = obj, "Failed to load model: {}", err);
+                    }
+                }
+            }
+        }
+        _ => unimplemented!(),
+    }
+}
+
+pub fn get_common_property<T>(state: &Mutex<T>, _id: usize, pspec: &glib::ParamSpec) -> glib::Value
+where
+    T: AsRef<Option<EimModel>>,
+{
+    match pspec.name() {
+        "model-path" => {
+            let state = state.lock().unwrap();
+            if let Some(ref model) = *state.as_ref() {
+                model.path().to_value()
+            } else {
+                None::<String>.to_value()
+            }
+        }
+        _ => unimplemented!(),
+    }
 }

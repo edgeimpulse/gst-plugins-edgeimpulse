@@ -187,12 +187,12 @@
 
 use edge_impulse_runner::EimModel;
 use gstreamer as gst;
-use gstreamer_video as gst_video;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
+use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
 use serde_json;
@@ -381,7 +381,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let width = params.image_input_width;
             let height = params.image_input_height;
             let channels = params.image_channel_count;
-            let is_object_detection = params.model_type == "constrained_object_detection" || params.model_type == "object_detection";
+            let is_object_detection = params.model_type == "constrained_object_detection"
+                || params.model_type == "object_detection";
 
             gst::debug!(
                 CAT,
@@ -482,14 +483,33 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
                             gst::debug!(CAT, obj = self.obj(), "Parsed JSON result: {:?}", json);
 
-                            if let Some(boxes) = json.get("bounding_boxes").and_then(|b| b.as_array()) {
-                                gst::debug!(CAT, obj = self.obj(), "Processing {} detections", boxes.len());
+                            if let Some(boxes) =
+                                json.get("bounding_boxes").and_then(|b| b.as_array())
+                            {
+                                gst::debug!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "Processing {} detections",
+                                    boxes.len()
+                                );
 
                                 // Create detection metadata
                                 for bbox in boxes {
-                                    gst::debug!(CAT, obj = self.obj(), "Processing bbox: {:?}", bbox);
+                                    gst::debug!(
+                                        CAT,
+                                        obj = self.obj(),
+                                        "Processing bbox: {:?}",
+                                        bbox
+                                    );
 
-                                    if let (Some(label), Some(value), Some(x), Some(y), Some(w), Some(h)) = (
+                                    if let (
+                                        Some(label),
+                                        Some(value),
+                                        Some(x),
+                                        Some(y),
+                                        Some(w),
+                                        Some(h),
+                                    ) = (
                                         bbox.get("label").and_then(|v| v.as_str()),
                                         bbox.get("value").and_then(|v| v.as_f64()),
                                         bbox.get("x").and_then(|v| v.as_i64()),
@@ -505,11 +525,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         );
 
                                         // Create ROI metadata
-                                        let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
-                                            outbuf,
-                                            label,
-                                            (x as u32, y as u32, w as u32, h as u32)
-                                        );
+                                        let mut roi_meta =
+                                            gst_video::VideoRegionOfInterestMeta::add(
+                                                outbuf,
+                                                label,
+                                                (x as u32, y as u32, w as u32, h as u32),
+                                            );
 
                                         // Add detection parameters
                                         let s = gst::Structure::builder("ObjectDetection")
@@ -518,13 +539,26 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                             .build();
                                         roi_meta.add_param(s);
 
-                                        gst::debug!(CAT, obj = self.obj(), "Successfully added ROI metadata");
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Successfully added ROI metadata"
+                                        );
                                     } else {
-                                        gst::warning!(CAT, obj = self.obj(), "Invalid bbox format: {:?}", bbox);
+                                        gst::warning!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Invalid bbox format: {:?}",
+                                            bbox
+                                        );
                                     }
                                 }
                             } else {
-                                gst::warning!(CAT, obj = self.obj(), "No bounding_boxes array in result");
+                                gst::warning!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "No bounding_boxes array in result"
+                                );
                             }
 
                             let elapsed = now.elapsed();

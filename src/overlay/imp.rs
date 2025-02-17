@@ -6,7 +6,7 @@ use gstreamer_base::subclass::prelude::*;
 use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
 use gstreamer_video::subclass::prelude::*;
-use gstreamer_video::{VideoFormat, VideoInfo, VideoFrameRef};
+use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -162,19 +162,13 @@ impl ElementImpl for EdgeImpulseOverlay {
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
             let caps = gst::Caps::builder("video/x-raw")
-                .field("format", gst::List::new([
-                    "RGB",
-                    "BGR",
-                    "RGBA",
-                    "BGRA",
-                    "UYVY",
-                    "YUY2",
-                    "YVYU",
-                    "NV12",
-                    "NV21",
-                    "I420",
-                    "YV12"
-                ]))
+                .field(
+                    "format",
+                    gst::List::new([
+                        "RGB", "BGR", "RGBA", "BGRA", "UYVY", "YUY2", "YVYU", "NV12", "NV21",
+                        "I420", "YV12",
+                    ]),
+                )
                 .field("width", gst::IntRange::new(1, i32::MAX))
                 .field("height", gst::IntRange::new(1, i32::MAX))
                 .build();
@@ -185,13 +179,15 @@ impl ElementImpl for EdgeImpulseOverlay {
                     gst::PadDirection::Sink,
                     gst::PadPresence::Always,
                     &caps,
-                ).unwrap(),
+                )
+                .unwrap(),
                 gst::PadTemplate::new(
                     "src",
                     gst::PadDirection::Src,
                     gst::PadPresence::Always,
                     &caps,
-                ).unwrap(),
+                )
+                .unwrap(),
             ]
         });
         PAD_TEMPLATES.as_slice()
@@ -208,7 +204,12 @@ impl BaseTransformImpl for EdgeImpulseOverlay {
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
         gst::debug!(CAT, obj = self.obj(), "transform_ip called");
         let res = self.parent_transform_ip(buf);
-        gst::debug!(CAT, obj = self.obj(), "transform_ip completed with result: {:?}", res);
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "transform_ip completed with result: {:?}",
+            res
+        );
         res
     }
 
@@ -234,7 +235,8 @@ impl BaseTransformImpl for EdgeImpulseOverlay {
 
 // Implementation of element specific methods
 impl EdgeImpulseOverlay {
-    fn draw_bbox(&self,
+    fn draw_bbox(
+        &self,
         frame: &mut VideoFrameRef<&mut gst::BufferRef>,
         x: i32,
         y: i32,
@@ -245,24 +247,35 @@ impl EdgeImpulseOverlay {
         let format;
         {
             let video_info = self.video_info.lock().unwrap();
-            let info = video_info.as_ref().ok_or_else(|| {
-                gst::loggable_error!(CAT, "Video info not available")
-            })?;
+            let info = video_info
+                .as_ref()
+                .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
             format = info.format();
         }
 
-        gst::debug!(CAT, obj = self.obj(), "Drawing bbox for {} with format: {:?}", roi_type, format);
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Drawing bbox for {} with format: {:?}",
+            roi_type,
+            format
+        );
 
         let settings = self.settings.lock().unwrap();
         match format {
             VideoFormat::Rgb => {
                 gst::debug!(CAT, obj = self.obj(), "Using RGB drawing for {}", roi_type);
                 self.draw_bbox_rgb(frame, x, y, w, h, &settings)
-            },
+            }
             VideoFormat::Nv12 | VideoFormat::Nv21 => {
-                gst::debug!(CAT, obj = self.obj(), "Using NV12/21 drawing for {}", roi_type);
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Using NV12/21 drawing for {}",
+                    roi_type
+                );
                 self.draw_bbox_nv12(frame, x, y, w, h, &settings)
-            },
+            }
             _ => {
                 gst::warning!(CAT, obj = self.obj(), "Unsupported format: {:?}", format);
                 Err(gst::loggable_error!(CAT, "Unsupported format"))
@@ -285,9 +298,9 @@ impl EdgeImpulseOverlay {
         let height;
         {
             let info = self.video_info.lock().unwrap();
-            let info = info.as_ref().ok_or_else(|| {
-                gst::loggable_error!(CAT, "Video info not available")
-            })?;
+            let info = info
+                .as_ref()
+                .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
             stride = info.stride()[0] as i32;
             width = info.width() as i32;
             height = info.height() as i32;
@@ -296,12 +309,25 @@ impl EdgeImpulseOverlay {
         // Ensure stroke width is at least 1
         let stroke_width = std::cmp::max(1, settings.stroke_width);
 
-        gst::debug!(CAT, obj = self.obj(),
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
             "Starting RGB bbox drawing: stride={}, width={}, height={}, data_len={}",
-            stride, width, height, frame.plane_data(0).unwrap().len());
-        gst::debug!(CAT, obj = self.obj(),
+            stride,
+            width,
+            height,
+            frame.plane_data(0).unwrap().len()
+        );
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
             "Drawing bbox at ({}, {}) with size {}x{} and stroke_width={}",
-            x, y, w, h, stroke_width);
+            x,
+            y,
+            w,
+            h,
+            stroke_width
+        );
 
         let data = frame.plane_data_mut(0).unwrap();
 
@@ -309,12 +335,19 @@ impl EdgeImpulseOverlay {
         let g = ((settings.bbox_color >> 8) & 0xFF) as u8;
         let b = (settings.bbox_color & 0xFF) as u8;
 
-        gst::debug!(CAT, obj = self.obj(), "Using RGB color: ({}, {}, {})", r, g, b);
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Using RGB color: ({}, {}, {})",
+            r,
+            g,
+            b
+        );
 
         let mut pixels_drawn = 0;
 
         // Draw horizontal lines with specified stroke width
-        for i in x..x+w {
+        for i in x..x + w {
             if i < 0 || i >= width {
                 continue;
             }
@@ -348,11 +381,15 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        gst::debug!(CAT, obj = self.obj(),
-            "Completed horizontal lines ({} pixels), starting vertical", pixels_drawn);
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Completed horizontal lines ({} pixels), starting vertical",
+            pixels_drawn
+        );
 
         // Draw vertical lines with specified stroke width
-        for j in y..y+h {
+        for j in y..y + h {
             if j < 0 || j >= height {
                 continue;
             }
@@ -386,11 +423,19 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        gst::debug!(CAT, obj = self.obj(),
-            "Completed RGB bbox drawing: {} total pixels drawn", pixels_drawn);
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Completed RGB bbox drawing: {} total pixels drawn",
+            pixels_drawn
+        );
 
         if pixels_drawn == 0 {
-            gst::warning!(CAT, obj = self.obj(), "No pixels were drawn - check coordinates and bounds");
+            gst::warning!(
+                CAT,
+                obj = self.obj(),
+                "No pixels were drawn - check coordinates and bounds"
+            );
             return Err(gst::loggable_error!(CAT, "No pixels were drawn"));
         }
 
@@ -421,7 +466,7 @@ impl EdgeImpulseOverlay {
         let y_value = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
 
         // Draw horizontal lines with specified stroke width
-        for i in x..x+w {
+        for i in x..x + w {
             // Top lines
             for s in 0..settings.stroke_width {
                 if (y + s as i32) >= 0 && (y + s as i32) < info.height() as i32 {
@@ -443,7 +488,7 @@ impl EdgeImpulseOverlay {
         }
 
         // Draw vertical lines with specified stroke width
-        for j in y..y+h {
+        for j in y..y + h {
             // Left lines
             for s in 0..settings.stroke_width {
                 if j >= 0 && j < info.height() as i32 {
@@ -486,10 +531,19 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
         for (rect, roi_type) in regions {
             let (x, y, w, h) = rect;
-            gst::debug!(CAT, obj = self.obj(), "Drawing bbox at ({}, {}) size {}x{} type {:?}",
-                x, y, w, h, roi_type);
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Drawing bbox at ({}, {}) size {}x{} type {:?}",
+                x,
+                y,
+                w,
+                h,
+                roi_type
+            );
 
-            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, roi_type) {
+            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, roi_type)
+            {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw bbox: {}", e);
                 return Err(gst::FlowError::Error);
             }
@@ -502,7 +556,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
     fn set_info(
         &self,
-        incaps: &gst::Caps,
+        _incaps: &gst::Caps,
         in_info: &gst_video::VideoInfo,
         _outcaps: &gst::Caps,
         _out_info: &gst_video::VideoInfo,
@@ -513,4 +567,3 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
         Ok(())
     }
 }
-

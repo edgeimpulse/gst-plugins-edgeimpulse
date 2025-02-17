@@ -24,9 +24,9 @@
 //!
 //! 2. Video Frame Metadata (QC IM SDK Compatible):
 //!    - Attaches VideoRegionOfInterestMeta to each video frame
-//!    - Compatible with Qualcomm IM SDK voverlay element for automatic visualization
+//!    - Compatible with Qualcomm IM SDK `qtioverlay` element for automatic visualization
 //!    - Each ROI includes the bounding box coordinates, label and confidence
-//!    - QC IM SDK's voverlay element will automatically render these as boxes on the video
+//!    - QC IM SDK's `qtioverlay` element will automatically render these as boxes on the video
 //!
 //! This dual mechanism allows both custom applications and QC IM SDK
 //! visualization tools to work with the detection results.
@@ -233,9 +233,9 @@ impl Default for VideoState {
 ///
 /// 2. Video Frame Metadata (QC IM SDK Compatible):
 ///    - Attaches VideoRegionOfInterestMeta to each video frame
-///    - Compatible with Qualcomm IM SDK voverlay element for automatic visualization
+///    - Compatible with Qualcomm IM SDK  element for automatic visualization
 ///    - Each ROI includes the bounding box coordinates, label and confidence
-///    - QC IM SDK's voverlay element will automatically render these as boxes on the video
+///    - QC IM SDK's qtioverlay element will automatically render these as boxes on the video
 ///
 /// This dual mechanism allows both custom applications and QC IM SDK
 /// visualization tools to work with the detection results.

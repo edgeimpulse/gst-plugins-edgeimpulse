@@ -1,5 +1,5 @@
 # GStreamer Edge Impulse Plugin
-A GStreamer plugin that enables real-time machine learning inference using Edge Impulse models. The plugin provides two elements for audio and video inference.
+A GStreamer plugin that enables real-time machine learning inference using Edge Impulse models. The plugin provides three elements for audio and video inference and visualization.
 
 ## Dependencies
 This plugin depends on:
@@ -94,7 +94,20 @@ Key features:
 - Supports both classification and object detection models
 - Emits inference results as messages
 
-Example pipeline:
+For object detection models, the element provides two mechanisms to consume results:
+
+1. Bus Messages:
+   - Sends element messages on the GStreamer bus
+   - Messages contain raw JSON results and timing information
+   - Useful for custom applications that want to process detection results
+
+2. QC IM SDK Compatible Metadata:
+   - Attaches VideoRegionOfInterestMeta to each video frame
+   - Compatible with Qualcomm IM SDK `qtioverlay` element
+   - Enables automatic visualization in QC IM SDK pipelines
+   - Each ROI includes bounding box coordinates, label and confidence
+
+Example pipeline with built-in overlay:
 ```bash
 gst-launch-1.0  avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
@@ -103,10 +116,27 @@ gst-launch-1.0  avfvideosrc ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   queue max-size-buffers=2 leaky=downstream ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  queue max-size-buffers=2 leaky=downstream ! \
-  videoscale method=nearest-neighbour ! \
-  video/x-raw,width=480,height=480 ! \
-  videoconvert n-threads=4 ! \
+  edgeimpulseoverlay ! \
+  autovideosink sync=false
+```
+
+### edgeimpulseoverlay
+Video overlay element that visualizes inference results from edgeimpulsevideoinfer.
+
+Key features:
+- Draws bounding boxes for object detection results
+- Displays class labels with confidence scores
+- Works with RGB video frames
+- Customizable visualization options
+
+Example pipeline:
+```bash
+gst-launch-1.0 avfvideosrc ! \
+  videoconvert ! \
+  videoscale ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  edgeimpulsevideoinfer model-path=<path-to-model> ! \
+  edgeimpulseoverlay ! \
   autovideosink sync=false
 ```
 
@@ -141,19 +171,19 @@ Run the video classification example:
 cargo run --example video_classify -- --model path/to/your/model.eim
 ```
 
-This will capture video from your camera and display inference results:
+This will capture video from your camera and display inference results with visualization:
 ```
 Got element message with name: edge-impulse-inference-result
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 1234567890,
-    type: "classification",
-    result: "{\"classification\":[{\"label\":\"cat\",\"value\":0.95},{\"label\":\"dog\",\"value\":0.05}]}"
+    type: "object-detection",
+    result: "{\"bounding-boxes\":[{\"label\":\"person\",\"value\":0.95,\"x\":24,\"y\":145,\"width\":352,\"height\":239}]}"
 }
-Detected: cat (95.0%)
+Detected: person (95.0%)
 ```
 
 ## Message Format
-Both elements emit "edge-impulse-inference-result" messages containing:
+The elements emit "edge-impulse-inference-result" messages containing:
 - timestamp: Buffer presentation timestamp
 - type: "classification" or "object-detection" (video only)
 - result: JSON string with model output
@@ -163,6 +193,7 @@ Enable debug output with:
 ```bash
 GST_DEBUG=edgeimpulseaudioinfer:4 # for audio element
 GST_DEBUG=edgeimpulsevideoinfer:4 # for video element
+GST_DEBUG=edgeimpulseoverlay:4 # for overlay element
 ```
 
 ## Acknowledgments

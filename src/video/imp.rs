@@ -14,6 +14,23 @@
 //!    - Processed through the Edge Impulse model
 //!    - Results are emitted as GStreamer messages
 //!
+//! # Result Output Mechanisms
+//! For object detection models, the element provides two mechanisms to consume results:
+//!
+//! 1. Bus Messages:
+//!    - Sends element messages on the GStreamer bus using create_inference_message
+//!    - Messages contain the raw JSON results and timing information
+//!    - Useful for custom applications that want to process detection results
+//!
+//! 2. Video Frame Metadata (QC IM SDK Compatible):
+//!    - Attaches VideoRegionOfInterestMeta to each video frame
+//!    - Compatible with Qualcomm IM SDK voverlay element for automatic visualization
+//!    - Each ROI includes the bounding box coordinates, label and confidence
+//!    - QC IM SDK's voverlay element will automatically render these as boxes on the video
+//!
+//! This dual mechanism allows both custom applications and QC IM SDK
+//! visualization tools to work with the detection results.
+//!
 //! # Properties
 //! - `model-path`: Path to the Edge Impulse model file (.eim)
 //!   - When set, loads the model and begins inference
@@ -170,6 +187,7 @@
 
 use edge_impulse_runner::EimModel;
 use gstreamer as gst;
+use gstreamer_video as gst_video;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
@@ -203,11 +221,24 @@ impl Default for VideoState {
     }
 }
 
-/// Video inference element structure
+/// EdgeImpulseVideoInfer element
 ///
-/// This element processes video frames through an Edge Impulse model.
-/// It operates as a BaseTransform element, which means it processes
-/// input buffers one at a time and produces corresponding output buffers.
+/// This element performs ML inference on video frames using Edge Impulse models.
+/// For object detection models, it provides two mechanisms to consume the results:
+///
+/// 1. Bus Messages:
+///    - Sends element messages on the GStreamer bus using create_inference_message
+///    - Messages contain the raw JSON results and timing information
+///    - Useful for custom applications that want to process detection results
+///
+/// 2. Video Frame Metadata (QC IM SDK Compatible):
+///    - Attaches VideoRegionOfInterestMeta to each video frame
+///    - Compatible with Qualcomm IM SDK voverlay element for automatic visualization
+///    - Each ROI includes the bounding box coordinates, label and confidence
+///    - QC IM SDK's voverlay element will automatically render these as boxes on the video
+///
+/// This dual mechanism allows both custom applications and QC IM SDK
+/// visualization tools to work with the detection results.
 #[derive(Default)]
 pub struct EdgeImpulseVideoInfer {
     /// Shared state protected by a mutex for thread-safe access
@@ -445,11 +476,42 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         String::from("{}")
                     });
 
+                    let now = std::time::Instant::now();
                     if is_object_detection {
-                        let now = std::time::Instant::now();
-                        // ... existing inference code ...
+                        // Parse the detection results
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
+                            if let Some(boxes) = json.get("bounding_boxes").and_then(|b| b.as_array()) {
+                                // Create detection metadata
+                                for bbox in boxes {
+                                    if let (Some(label), Some(value), Some(x), Some(y), Some(w), Some(h)) = (
+                                        bbox.get("label").and_then(|v| v.as_str()),
+                                        bbox.get("value").and_then(|v| v.as_f64()),
+                                        bbox.get("x").and_then(|v| v.as_i64()),
+                                        bbox.get("y").and_then(|v| v.as_i64()),
+                                        bbox.get("width").and_then(|v| v.as_i64()),
+                                        bbox.get("height").and_then(|v| v.as_i64()),
+                                    ) {
+                                        // Create ROI metadata for QC IM SDK voverlay compatibility
+                                        let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
+                                            outbuf,
+                                            label,
+                                            (x as u32, y as u32, w as u32, h as u32)
+                                        );
+
+                                        // Add detection parameters
+                                        let s = gst::Structure::builder("ObjectDetection")
+                                            .field("confidence", value)
+                                            .field("color", 0xFF0000FFu32) // Red color as u32
+                                            .build();
+                                        roi_meta.add_param(s);
+                                    }
+                                }
+                            }
+                        }
+
                         let elapsed = now.elapsed();
 
+                        // Create and post inference message to the bus as well.
                         let s = crate::common::create_inference_message(
                             "video",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
@@ -461,8 +523,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         // Post the message
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
-                        let now = std::time::Instant::now();
-                        // ... existing inference code ...
                         let elapsed = now.elapsed();
 
                         let s = crate::common::create_inference_message(

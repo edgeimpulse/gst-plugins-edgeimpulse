@@ -381,7 +381,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let width = params.image_input_width;
             let height = params.image_input_height;
             let channels = params.image_channel_count;
-            let is_object_detection = params.model_type == "constrained_object_detection";
+            let is_object_detection = params.model_type == "constrained_object_detection" || params.model_type == "object_detection";
 
             gst::debug!(
                 CAT,
@@ -480,9 +480,15 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     if is_object_detection {
                         // Parse the detection results
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
+                            gst::debug!(CAT, obj = self.obj(), "Parsed JSON result: {:?}", json);
+
                             if let Some(boxes) = json.get("bounding_boxes").and_then(|b| b.as_array()) {
+                                gst::debug!(CAT, obj = self.obj(), "Processing {} detections", boxes.len());
+
                                 // Create detection metadata
                                 for bbox in boxes {
+                                    gst::debug!(CAT, obj = self.obj(), "Processing bbox: {:?}", bbox);
+
                                     if let (Some(label), Some(value), Some(x), Some(y), Some(w), Some(h)) = (
                                         bbox.get("label").and_then(|v| v.as_str()),
                                         bbox.get("value").and_then(|v| v.as_f64()),
@@ -491,7 +497,14 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         bbox.get("width").and_then(|v| v.as_i64()),
                                         bbox.get("height").and_then(|v| v.as_i64()),
                                     ) {
-                                        // Create ROI metadata for QC IM SDK voverlay compatibility
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Creating ROI metadata for {} at ({}, {}, {}, {}) with confidence {}",
+                                            label, x, y, w, h, value
+                                        );
+
+                                        // Create ROI metadata
                                         let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
                                             outbuf,
                                             label,
@@ -501,27 +514,35 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         // Add detection parameters
                                         let s = gst::Structure::builder("ObjectDetection")
                                             .field("confidence", value)
-                                            .field("color", 0xFF0000FFu32) // Red color as u32
+                                            .field("color", 0xFF0000FFu32)
                                             .build();
                                         roi_meta.add_param(s);
+
+                                        gst::debug!(CAT, obj = self.obj(), "Successfully added ROI metadata");
+                                    } else {
+                                        gst::warning!(CAT, obj = self.obj(), "Invalid bbox format: {:?}", bbox);
                                     }
                                 }
+                            } else {
+                                gst::warning!(CAT, obj = self.obj(), "No bounding_boxes array in result");
                             }
+
+                            let elapsed = now.elapsed();
+
+                            // Create and post inference message to the bus as well.
+                            let s = crate::common::create_inference_message(
+                                "video",
+                                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                                "object-detection",
+                                result_json,
+                                elapsed.as_millis() as u32,
+                            );
+
+                            // Post the message
+                            let _ = self.obj().post_message(gst::message::Element::new(s));
+                        } else {
+                            gst::warning!(CAT, obj = self.obj(), "Failed to parse JSON result");
                         }
-
-                        let elapsed = now.elapsed();
-
-                        // Create and post inference message to the bus as well.
-                        let s = crate::common::create_inference_message(
-                            "video",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            "object-detection",
-                            result_json,
-                            elapsed.as_millis() as u32,
-                        );
-
-                        // Post the message
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
                         let elapsed = now.elapsed();
 

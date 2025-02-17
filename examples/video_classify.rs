@@ -12,6 +12,7 @@
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_video as gst_video;
 use serde_json;
 use std::error::Error;
 
@@ -170,6 +171,10 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create queue element.");
 
+    let overlay = gst::ElementFactory::make("edgeimpulseoverlay")
+        .build()
+        .expect("Could not create edgeimpulseoverlay element.");
+
     let videoscale2 = gst::ElementFactory::make("videoscale")
         .build()
         .expect("Could not create videoscale element.");
@@ -212,6 +217,7 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         &queue2,
         &classifier,
         &queue3,
+        &overlay,
         &videoscale2,
         &caps2,
         &videoconvert2,
@@ -228,11 +234,34 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         &queue2,
         &classifier,
         &queue3,
+        &overlay,
         &videoscale2,
         &caps2,
         &videoconvert2,
         &sink,
     ])?;
+
+    // Add debug probe to check ROI metadata
+    let overlay_sink_pad = overlay.static_pad("sink").unwrap();
+    overlay_sink_pad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
+        if let Some(buffer) = probe_info.buffer() {
+            let rois: Vec<_> = buffer
+                .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
+                .collect();
+            println!("Number of ROIs on buffer: {}", rois.len());
+
+            for roi in rois {
+                let (x, y, w, h) = roi.rect();
+                println!("ROI: {} at ({}, {}, {}, {})", roi.roi_type(), x, y, w, h);
+
+                // Iterate through all parameters
+                for param in roi.params() {
+                    println!("ROI param: {:?}", param);
+                }
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
 
     Ok(pipeline)
 }
@@ -251,6 +280,7 @@ fn example_main() -> Result<(), Box<dyn Error>> {
             MessageView::Element(element) => {
                 let structure = element.structure().unwrap();
                 if structure.name() == "edge-impulse-video-inference-result" {
+                    println!("Inference result: {:?}", structure);
                     if let Ok(result) = structure.get::<String>("result") {
                         // Parse the JSON string
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {

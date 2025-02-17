@@ -3,11 +3,13 @@ use gstreamer::glib;
 
 mod audio;
 mod common;
+mod overlay;
 mod video;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     video::register(plugin)?;
     audio::register(plugin)?;
+    overlay::register(plugin)?;
     Ok(())
 }
 

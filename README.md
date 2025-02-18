@@ -55,8 +55,8 @@ sudo apt-get install \
 
 Clone and build the plugin:
 ```bash
-git clone https://github.com/edgeimpulse/gst-plugin-edgeimpulse.git
-cd gst-plugin-edgeimpulse
+git clone https://github.com/edgeimpulse/gst-plugins-edgeimpulse.git
+cd gst-plugins-edgeimpulse
 cargo build --release
 ```
 
@@ -64,7 +64,7 @@ cargo build --release
 To build a Linux ARM64-compatible .so file from macOS, you'll need Docker. Build the Docker image:
 
 ```bash
-docker build -t gst-plugin-edgeimpulse-builder .
+docker build -t gst-plugins-edgeimpulse-builder .
 ```
 
 Add the aarch64 target to your Rust toolchain:
@@ -74,7 +74,7 @@ rustup target add aarch64-unknown-linux-gnu
 
 Run the build (from the project directory):
 ```bash
-docker run -it -v $(pwd):/app gst-plugin-edgeimpulse-builder cargo build --release --target aarch64-unknown-linux-gnu
+docker run -it -v $(pwd):/app gst-plugins-edgeimpulse-builder cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
 The compiled .so file will be available in `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.
@@ -83,7 +83,7 @@ Note: The Docker command assumes your project is in a directory next to the `edg
 ```
 parent-dir/
 ├── edge-impulse-runner-rs/
-└── gst-plugin-edgeimpulse/
+└── gst-plugins-edgeimpulse/
 ```
 
 If your directory structure is different, adjust the Docker volume mount path accordingly.

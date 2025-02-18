@@ -467,7 +467,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "gst-plugin-edgeimpulse"
+name = "gst-plugin-version-helper"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e5e874f1660252fd2ec81c602066df3633b3a6fcbe2b196f7f93c27cf069b2a"
+dependencies = [
+ "chrono",
+ "toml_edit",
+]
+
+[[package]]
+name = "gst-plugins-edgeimpulse"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -483,16 +493,6 @@ dependencies = [
  "once_cell",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "gst-plugin-version-helper"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e5e874f1660252fd2ec81c602066df3633b3a6fcbe2b196f7f93c27cf069b2a"
-dependencies = [
- "chrono",
- "toml_edit",
 ]
 
 [[package]]

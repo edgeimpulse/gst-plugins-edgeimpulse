@@ -1,5 +1,5 @@
 [package]
-name = "gst-plugin-edgeimpulse"
+name = "gst-plugins-edgeimpulse"
 version = "0.1.0"
 edition = "2021"
 description = "GStreamer plugin to run AI/ML inference via Edge Impulse machine learning models"

@@ -21,6 +21,6 @@ gst::plugin_define!(
     "MIT/X11",
     env!("CARGO_PKG_NAME"),
     env!("CARGO_PKG_NAME"),
-    "https://github.com/edgeimpulse/gst-plugin-edgeimpulse",
+    "https://github.com/edgeimpulse/gst-plugins-edgeimpulse",
     env!("BUILD_REL_DATE")
 );

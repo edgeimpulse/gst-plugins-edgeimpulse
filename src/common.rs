@@ -3,17 +3,7 @@ use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
 use gstreamer::prelude::*;
-use once_cell::sync::Lazy;
 use std::sync::Mutex;
-
-// Create a common debug category
-pub(crate) static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
-    gst::DebugCategory::new(
-        "edgeimpulseinfer",
-        gst::DebugColorFlags::empty(),
-        Some("Edge Impulse Inference"),
-    )
-});
 
 /// Creates common GStreamer properties shared between Edge Impulse elements
 ///
@@ -46,6 +36,7 @@ pub fn set_common_property<T>(
     value: &glib::Value,
     pspec: &glib::ParamSpec,
     obj: &impl GstObjectExt,
+    cat: &gst::DebugCategory,
 ) where
     T: AsMut<Option<EimModel>>,
 {
@@ -59,7 +50,7 @@ pub fn set_common_property<T>(
                 match edge_impulse_runner::EimModel::new(&model_path) {
                     Ok(model) => {
                         gst::debug!(
-                            CAT,
+                            cat,
                             obj = obj,
                             "Successfully loaded model from {}",
                             model_path
@@ -67,7 +58,7 @@ pub fn set_common_property<T>(
                         *state.as_mut() = Some(model);
                     }
                     Err(err) => {
-                        gst::error!(CAT, obj = obj, "Failed to load model: {}", err);
+                        gst::error!(cat, obj = obj, "Failed to load model: {}", err);
                     }
                 }
             }

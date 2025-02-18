@@ -76,7 +76,6 @@
 //! - Buffer mappings are dropped as soon as possible
 //! - Sample buffer is cleared after each inference
 
-use crate::common::CAT;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -88,6 +87,14 @@ use once_cell::sync::Lazy;
 use serde_json;
 use std::collections::VecDeque;
 use std::sync::Mutex;
+
+static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    gst::DebugCategory::new(
+        "edgeimpulseaudioinfer",
+        gst::DebugColorFlags::empty(),
+        Some("Edge Impulse Audio Inference"),
+    )
+});
 
 /// Audio-specific state structure
 pub struct AudioState {
@@ -148,6 +155,7 @@ impl ObjectImpl for EdgeImpulseAudioInfer {
             value,
             pspec,
             &*self.obj(),
+            &*CAT,
         );
     }
 

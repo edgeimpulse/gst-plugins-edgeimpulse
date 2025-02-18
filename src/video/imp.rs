@@ -198,7 +198,13 @@ use once_cell::sync::Lazy;
 use serde_json;
 use std::sync::Mutex;
 
-use crate::common::CAT;
+static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    gst::DebugCategory::new(
+        "edgeimpulsevideoinfer",
+        gst::DebugColorFlags::empty(),
+        Some("Edge Impulse Video Inference"),
+    )
+});
 
 pub struct VideoState {
     /// The loaded Edge Impulse model instance
@@ -267,6 +273,7 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
             value,
             pspec,
             &*self.obj(),
+            &*CAT,
         );
     }
 

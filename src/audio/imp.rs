@@ -45,7 +45,7 @@
 //! # Implementation Details
 //!
 //! ## Sample Buffer Management
-//! - The element maintains a VecDeque<f32> to accumulate audio samples
+//! - The element maintains a `VecDeque<f32>` to accumulate audio samples
 //! - New samples are added to the buffer after normalization
 //! - When buffer reaches model's slice_size, samples are drained for inference
 //! - This creates a sliding window effect for continuous audio processing
@@ -72,7 +72,7 @@
 //!
 //! ## Memory Management
 //! - Input buffers are copied to output immediately
-//! - Sample conversions happen on temporary Vec<f32>
+//! - Sample conversions happen on temporary `Vec<f32>`
 //! - Buffer mappings are dropped as soon as possible
 //! - Sample buffer is cleared after each inference
 

@@ -289,6 +289,7 @@ dependencies = [
 [[package]]
 name = "edge_impulse_runner"
 version = "0.1.0"
+source = "git+ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git#7113db6ce0f6d2bb3579ecf57fbb086fc34bb7c2"
 dependencies = [
  "serde",
  "serde_json",

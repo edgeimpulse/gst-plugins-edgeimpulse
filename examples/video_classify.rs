@@ -325,9 +325,5 @@ fn example_main() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() {
-    #[cfg(target_os = "macos")]
     run(|| example_main().unwrap());
-
-    #[cfg(not(target_os = "macos"))]
-    println!("This example only works on macOS");
 }

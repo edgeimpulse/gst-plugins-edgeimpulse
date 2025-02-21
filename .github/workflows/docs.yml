@@ -1,45 +1,58 @@
-name: Docs
+name: Deploy Rust Docs to GitHub Pages
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+  workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_NET_GIT_FETCH_WITH_CLI: true
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
-  docs:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install SSH key
-      uses: webfactory/ssh-agent@v0.9.0
-      with:
-        ssh-private-key: ${{ secrets.EI_RUNNER_DEPLOY_KEY }}
+      - name: Install GStreamer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-    - name: Git config
-      run: |
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Install GStreamer dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Build Documentation
+        run: cargo doc --no-deps
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      - name: Add index.html redirect
+        run: |
+          echo '<meta http-equiv="refresh" content="0; url=gstedgeimpulse">' > target/doc/index.html
 
-    - name: Generate documentation
-      run: cargo doc --no-deps
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
 
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./target/doc
-        force_orphan: true
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+          jekyll: false
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

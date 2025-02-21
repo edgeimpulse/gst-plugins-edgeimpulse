@@ -11,7 +11,7 @@ name = "gstedgeimpulse"
 crate-type = ["cdylib"]
 
 [dependencies]
-edge_impulse_runner = { path = "../edge-impulse-runner-rs" }
+edge_impulse_runner = { git = "ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git" }
 glib = "0.20.7"
 gstreamer = "0.23.4"
 gstreamer-audio = "0.23.4"

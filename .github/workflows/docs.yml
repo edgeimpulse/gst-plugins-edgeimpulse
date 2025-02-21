@@ -1,0 +1,30 @@
+name: Docs
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install GStreamer dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Generate documentation
+      run: cargo doc --no-deps
+
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./target/doc
+        force_orphan: true

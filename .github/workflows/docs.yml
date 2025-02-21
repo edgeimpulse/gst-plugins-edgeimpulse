@@ -22,6 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Add SSH key setup
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EI_RUNNER_DEPLOY_KEY }}
+
+      # Configure git to use SSH instead of HTTPS
+      - name: Configure Git
+        run: |
+          git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+
       - name: Install GStreamer dependencies
         run: |
           sudo apt-get update

@@ -1,0 +1,229 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/common.rs`."><title>common.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-46132b98.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="gstedgeimpulse" data-themes="" data-resource-suffix="" data-rustdoc-version="1.85.0 (4d91de4e4 2025-02-17)" data-channel="1.85.0" data-search-js="search-75f5ac3e.js" data-settings-js="settings-0f613d39.js" ><script src="../../static.files/storage-59e33391.js"></script><script defer src="../../static.files/src-script-56102188.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">gstedgeimpulse/</div>common.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
+<a href="#1" id="1">1</a>
+<a href="#2" id="2">2</a>
+<a href="#3" id="3">3</a>
+<a href="#4" id="4">4</a>
+<a href="#5" id="5">5</a>
+<a href="#6" id="6">6</a>
+<a href="#7" id="7">7</a>
+<a href="#8" id="8">8</a>
+<a href="#9" id="9">9</a>
+<a href="#10" id="10">10</a>
+<a href="#11" id="11">11</a>
+<a href="#12" id="12">12</a>
+<a href="#13" id="13">13</a>
+<a href="#14" id="14">14</a>
+<a href="#15" id="15">15</a>
+<a href="#16" id="16">16</a>
+<a href="#17" id="17">17</a>
+<a href="#18" id="18">18</a>
+<a href="#19" id="19">19</a>
+<a href="#20" id="20">20</a>
+<a href="#21" id="21">21</a>
+<a href="#22" id="22">22</a>
+<a href="#23" id="23">23</a>
+<a href="#24" id="24">24</a>
+<a href="#25" id="25">25</a>
+<a href="#26" id="26">26</a>
+<a href="#27" id="27">27</a>
+<a href="#28" id="28">28</a>
+<a href="#29" id="29">29</a>
+<a href="#30" id="30">30</a>
+<a href="#31" id="31">31</a>
+<a href="#32" id="32">32</a>
+<a href="#33" id="33">33</a>
+<a href="#34" id="34">34</a>
+<a href="#35" id="35">35</a>
+<a href="#36" id="36">36</a>
+<a href="#37" id="37">37</a>
+<a href="#38" id="38">38</a>
+<a href="#39" id="39">39</a>
+<a href="#40" id="40">40</a>
+<a href="#41" id="41">41</a>
+<a href="#42" id="42">42</a>
+<a href="#43" id="43">43</a>
+<a href="#44" id="44">44</a>
+<a href="#45" id="45">45</a>
+<a href="#46" id="46">46</a>
+<a href="#47" id="47">47</a>
+<a href="#48" id="48">48</a>
+<a href="#49" id="49">49</a>
+<a href="#50" id="50">50</a>
+<a href="#51" id="51">51</a>
+<a href="#52" id="52">52</a>
+<a href="#53" id="53">53</a>
+<a href="#54" id="54">54</a>
+<a href="#55" id="55">55</a>
+<a href="#56" id="56">56</a>
+<a href="#57" id="57">57</a>
+<a href="#58" id="58">58</a>
+<a href="#59" id="59">59</a>
+<a href="#60" id="60">60</a>
+<a href="#61" id="61">61</a>
+<a href="#62" id="62">62</a>
+<a href="#63" id="63">63</a>
+<a href="#64" id="64">64</a>
+<a href="#65" id="65">65</a>
+<a href="#66" id="66">66</a>
+<a href="#67" id="67">67</a>
+<a href="#68" id="68">68</a>
+<a href="#69" id="69">69</a>
+<a href="#70" id="70">70</a>
+<a href="#71" id="71">71</a>
+<a href="#72" id="72">72</a>
+<a href="#73" id="73">73</a>
+<a href="#74" id="74">74</a>
+<a href="#75" id="75">75</a>
+<a href="#76" id="76">76</a>
+<a href="#77" id="77">77</a>
+<a href="#78" id="78">78</a>
+<a href="#79" id="79">79</a>
+<a href="#80" id="80">80</a>
+<a href="#81" id="81">81</a>
+<a href="#82" id="82">82</a>
+<a href="#83" id="83">83</a>
+<a href="#84" id="84">84</a>
+<a href="#85" id="85">85</a>
+<a href="#86" id="86">86</a>
+<a href="#87" id="87">87</a>
+<a href="#88" id="88">88</a>
+<a href="#89" id="89">89</a>
+<a href="#90" id="90">90</a>
+<a href="#91" id="91">91</a>
+<a href="#92" id="92">92</a>
+<a href="#93" id="93">93</a>
+<a href="#94" id="94">94</a>
+<a href="#95" id="95">95</a>
+<a href="#96" id="96">96</a>
+<a href="#97" id="97">97</a>
+<a href="#98" id="98">98</a>
+<a href="#99" id="99">99</a>
+<a href="#100" id="100">100</a>
+<a href="#101" id="101">101</a>
+<a href="#102" id="102">102</a>
+<a href="#103" id="103">103</a>
+<a href="#104" id="104">104</a>
+<a href="#105" id="105">105</a>
+<a href="#106" id="106">106</a>
+<a href="#107" id="107">107</a>
+<a href="#108" id="108">108</a>
+<a href="#109" id="109">109</a>
+<a href="#110" id="110">110</a>
+<a href="#111" id="111">111</a>
+<a href="#112" id="112">112</a>
+<a href="#113" id="113">113</a>
+<a href="#114" id="114">114</a></pre></div><pre class="rust"><code><span class="kw">use </span>edge_impulse_runner::EimModel;
+<span class="kw">use </span>gstreamer <span class="kw">as </span>gst;
+<span class="kw">use </span>gstreamer::glib;
+<span class="kw">use </span>gstreamer::glib::ParamSpecBuilderExt;
+<span class="kw">use </span>gstreamer::prelude::<span class="kw-2">*</span>;
+<span class="kw">use </span>std::sync::Mutex;
+
+<span class="doccomment">/// Creates common GStreamer properties shared between Edge Impulse elements
+///
+/// This function returns a vector of parameter specifications that define
+/// the properties available on Edge Impulse GStreamer elements. These
+/// properties can be set through standard GStreamer property mechanisms
+/// (e.g., gst-launch-1.0 element property=value).
+///
+/// # Returns
+///
+/// Returns a `Vec&lt;glib::ParamSpec&gt;` containing the property specifications:
+/// - model-path: String property for specifying the path to the .eim model file
+///
+/// # Example
+///
+/// ```bash
+/// # Setting properties in gst-launch-1.0:
+/// gst-launch-1.0 edgeimpulsevideoinfer model-path=/path/to/model.eim ! ...
+/// ```
+</span><span class="kw">pub fn </span>create_common_properties() -&gt; Vec&lt;glib::ParamSpec&gt; {
+    <span class="macro">vec!</span>[glib::ParamSpecString::builder(<span class="string">"model-path"</span>)
+        .nick(<span class="string">"Model Path"</span>)
+        .blurb(<span class="string">"Path to Edge Impulse model file"</span>)
+        .build()]
+}
+
+<span class="kw">pub fn </span>set_common_property&lt;T&gt;(
+    state: <span class="kw-2">&amp;</span>Mutex&lt;T&gt;,
+    _id: usize,
+    value: <span class="kw-2">&amp;</span>glib::Value,
+    pspec: <span class="kw-2">&amp;</span>glib::ParamSpec,
+    obj: <span class="kw-2">&amp;</span><span class="kw">impl </span>GstObjectExt,
+    cat: <span class="kw-2">&amp;</span>gst::DebugCategory,
+) <span class="kw">where
+    </span>T: AsMut&lt;<span class="prelude-ty">Option</span>&lt;EimModel&gt;&gt;,
+{
+    <span class="kw">match </span>pspec.name() {
+        <span class="string">"model-path" </span>=&gt; {
+            <span class="kw">let </span><span class="kw-2">mut </span>state = state.lock().unwrap();
+            <span class="kw">let </span>model_path: <span class="prelude-ty">Option</span>&lt;String&gt; = value.get().expect(<span class="string">"type checked upstream"</span>);
+
+            <span class="comment">// Initialize the model when the path is set
+            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(model_path) = model_path {
+                <span class="kw">match </span>edge_impulse_runner::EimModel::new(<span class="kw-2">&amp;</span>model_path) {
+                    <span class="prelude-val">Ok</span>(model) =&gt; {
+                        <span class="macro">gst::debug!</span>(
+                            cat,
+                            obj = obj,
+                            <span class="string">"Successfully loaded model from {}"</span>,
+                            model_path
+                        );
+                        <span class="kw-2">*</span>state.as_mut() = <span class="prelude-val">Some</span>(model);
+                    }
+                    <span class="prelude-val">Err</span>(err) =&gt; {
+                        <span class="macro">gst::error!</span>(cat, obj = obj, <span class="string">"Failed to load model: {}"</span>, err);
+                    }
+                }
+            }
+        }
+        <span class="kw">_ </span>=&gt; <span class="macro">unimplemented!</span>(),
+    }
+}
+
+<span class="kw">pub fn </span>get_common_property&lt;T&gt;(state: <span class="kw-2">&amp;</span>Mutex&lt;T&gt;, _id: usize, pspec: <span class="kw-2">&amp;</span>glib::ParamSpec) -&gt; glib::Value
+<span class="kw">where
+    </span>T: AsRef&lt;<span class="prelude-ty">Option</span>&lt;EimModel&gt;&gt;,
+{
+    <span class="kw">match </span>pspec.name() {
+        <span class="string">"model-path" </span>=&gt; {
+            <span class="kw">let </span>state = state.lock().unwrap();
+            <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>model) = <span class="kw-2">*</span>state.as_ref() {
+                model.path().to_value()
+            } <span class="kw">else </span>{
+                <span class="prelude-val">None</span>::&lt;String&gt;.to_value()
+            }
+        }
+        <span class="kw">_ </span>=&gt; <span class="macro">unimplemented!</span>(),
+    }
+}
+
+<span class="doccomment">/// Creates a standard inference result message structure
+</span><span class="kw">pub fn </span>create_inference_message(
+    element_type: <span class="kw-2">&amp;</span>str,
+    timestamp: gst::ClockTime,
+    result_type: <span class="kw-2">&amp;</span>str,
+    result_json: String,
+    timing_ms: u32,
+) -&gt; gst::Structure {
+    gst::Structure::builder(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"edge-impulse-{}-inference-result"</span>, element_type))
+        .field(<span class="string">"timestamp"</span>, timestamp)
+        .field(<span class="string">"type"</span>, result_type)
+        .field(<span class="string">"result"</span>, result_json)
+        .field(<span class="string">"timing_ms"</span>, timing_ms)
+        .build()
+}
+
+<span class="doccomment">/// Creates an error message structure
+</span><span class="kw">pub fn </span>create_error_message(
+    element_type: <span class="kw-2">&amp;</span>str,
+    timestamp: gst::ClockTime,
+    error: String,
+) -&gt; gst::Structure {
+    gst::Structure::builder(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"edge-impulse-{}-inference-result"</span>, element_type))
+        .field(<span class="string">"timestamp"</span>, timestamp)
+        .field(<span class="string">"type"</span>, <span class="string">"error"</span>)
+        .field(<span class="string">"error"</span>, error)
+        .build()
+}
+</code></pre></div></section></main></body></html>

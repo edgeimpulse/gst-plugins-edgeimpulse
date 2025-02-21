@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["gst_plugin_edgeimpulse_get_desc","gst_plugin_edgeimpulse_register","plugin_register_static"],"struct":["GstPluginDesc"]};

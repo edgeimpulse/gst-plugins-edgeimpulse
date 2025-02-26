@@ -64,32 +64,34 @@ cargo build --release
 ```
 
 #### Cross-compilation for ARM64
-To build a Linux ARM64-compatible .so file from macOS, you'll need Docker. Build the Docker image:
+To build a Linux ARM64-compatible .so file from macOS, you'll need Docker.
+
+You'll also need to provide your SSH key for accessing private repositories.
+The build process supports different SSH key types (id_rsa, id_ed25519, etc.).
+Replace `id_ed25519` in the following commands with your SSH key name if different:
+
+First, build the Docker image:
 
 ```bash
 docker build -t gst-plugins-edgeimpulse-builder .
 ```
 
-Add the aarch64 target to your Rust toolchain:
+Then, add the aarch64 target to your Rust toolchain:
 ```bash
 rustup target add aarch64-unknown-linux-gnu
 ```
 
-Run the build (from the project directory):
+Finally, run the build. Replace `id_ed25519` with your SSH key name if different:
 ```bash
-docker run -it -v $(pwd):/app gst-plugins-edgeimpulse-builder cargo build --release --target aarch64-unknown-linux-gnu
+docker run -it \
+    -v $(pwd):/app \
+    -v $HOME/.ssh/id_ed25519:/root/.ssh/id_ed25519 \
+    -e SSH_KEY_NAME=id_ed25519 \
+    gst-plugins-edgeimpulse-builder \
+    cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
 The compiled .so file will be available in `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.
-
-Note: The Docker command assumes your project is in a directory next to the `edge-impulse-runner-rs` dependency. This is required until the Edge Impulse runner crate is published to crates.io:
-```
-parent-dir/
-├── edge-impulse-runner-rs/
-└── gst-plugins-edgeimpulse/
-```
-
-If your directory structure is different, adjust the Docker volume mount path accordingly.
 
 ## Elements
 

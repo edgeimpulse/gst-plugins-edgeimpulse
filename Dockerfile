@@ -12,3 +12,13 @@ RUN dpkg --add-architecture arm64 && \
     pkg-config
 
 WORKDIR /app
+
+# Git SSH configuration
+RUN mkdir -p /root/.ssh && \
+    ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+# This is required to set the right permissions (600) for the SSH key
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

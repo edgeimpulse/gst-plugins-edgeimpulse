@@ -334,6 +334,18 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
     /// Don't transform in-place even in passthrough mode
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
+    /// Get the size of one unit for the given caps
+    fn unit_size(&self, caps: &gst::Caps) -> Option<usize> {
+        // Parse the caps into video info
+        let info = match gst_video::VideoInfo::from_caps(caps) {
+            Ok(info) => info,
+            Err(_) => return None,
+        };
+
+        // Return the size of one video frame
+        Some(info.size())
+    }
+
     /// Process a single video frame
     ///
     /// This function is called for each frame in the video stream. It either:

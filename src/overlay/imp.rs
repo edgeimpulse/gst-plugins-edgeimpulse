@@ -1,3 +1,4 @@
+use cairo;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
@@ -8,6 +9,9 @@ use gstreamer_video::prelude::*;
 use gstreamer_video::subclass::prelude::*;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
+use pango;
+use pangocairo;
+use pangocairo::functions::*;
 use std::sync::Mutex;
 
 /// A GStreamer element that draws bounding boxes on video frames based on ROI metadata.
@@ -27,6 +31,9 @@ use std::sync::Mutex;
 /// # Properties
 /// - `bbox-color`: The color of the bounding box in RGB format (default: green 0x00FF00)
 /// - `stroke-width`: Width of the bounding box lines in pixels (default: 2, minimum: 1)
+/// - `text-color`: Color of the text in RGB format (default: white 0xFFFFFF)
+/// - `text-font-size`: Size of the text font in pixels (default: 20)
+/// - `text-font`: Font family to use for text rendering (default: Sans)
 ///
 /// # Formats
 /// - Input: RGB
@@ -63,13 +70,19 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 struct Settings {
     bbox_color: u32,
     stroke_width: u32,
+    text_color: u32,
+    text_font_size: u32,
+    text_font: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            bbox_color: 0x00FF00, // Default to green
-            stroke_width: 2,      // Default to 2 pixels
+            bbox_color: 0x00FF00,          // Default to green
+            stroke_width: 2,               // Default to 2 pixels
+            text_color: 0xFFFFFF,          // Default to white
+            text_font_size: 20,            // Default font size
+            text_font: "Sans".to_string(), // Default font
         }
     }
 }
@@ -104,6 +117,21 @@ impl ObjectImpl for EdgeImpulseOverlay {
                     .blurb("Width of the bounding box lines in pixels")
                     .default_value(2)
                     .build(),
+                glib::ParamSpecUInt::builder("text-color")
+                    .nick("Text Color")
+                    .blurb("Color of the text in RGB format (default: white 0xFFFFFF)")
+                    .default_value(0xFFFFFF) // White
+                    .build(),
+                glib::ParamSpecUInt::builder("text-font-size")
+                    .nick("Text Font Size")
+                    .blurb("Size of the text font in pixels")
+                    .default_value(20)
+                    .build(),
+                glib::ParamSpecString::builder("text-font")
+                    .nick("Text Font")
+                    .blurb("Font family to use for text rendering (default: Sans)")
+                    .default_value(Some("Sans"))
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -119,6 +147,18 @@ impl ObjectImpl for EdgeImpulseOverlay {
                 let mut settings = self.settings.lock().unwrap();
                 settings.stroke_width = value.get().expect("type checked upstream");
             }
+            "text-color" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.text_color = value.get().expect("type checked upstream");
+            }
+            "text-font-size" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.text_font_size = value.get().expect("type checked upstream");
+            }
+            "text-font" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.text_font = value.get().expect("type checked upstream");
+            }
             _ => unimplemented!(),
         }
     }
@@ -132,6 +172,18 @@ impl ObjectImpl for EdgeImpulseOverlay {
             "stroke-width" => {
                 let settings = self.settings.lock().unwrap();
                 settings.stroke_width.to_value()
+            }
+            "text-color" => {
+                let settings = self.settings.lock().unwrap();
+                settings.text_color.to_value()
+            }
+            "text-font-size" => {
+                let settings = self.settings.lock().unwrap();
+                settings.text_font_size.to_value()
+            }
+            "text-font" => {
+                let settings = self.settings.lock().unwrap();
+                settings.text_font.to_value()
             }
             _ => unimplemented!(),
         }
@@ -511,6 +563,126 @@ impl EdgeImpulseOverlay {
 
         Ok(())
     }
+
+    fn draw_text(
+        &self,
+        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
+        text: &str,
+        x: i32,
+        y: i32,
+        settings: &Settings,
+    ) -> Result<(), gst::LoggableError> {
+        let (width, height, stride) = {
+            let video_info = self.video_info.lock().unwrap();
+            let info = video_info
+                .as_ref()
+                .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
+            (
+                info.width() as i32,
+                info.height() as i32,
+                info.stride()[0] as i32,
+            )
+        };
+
+        // Create a temporary surface with proper stride alignment
+        let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, width, height)
+            .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo surface: {}", e))?;
+
+        let surface_stride = surface.stride();
+
+        // Copy frame data to the temporary surface
+        {
+            let frame_data = frame.plane_data(0).unwrap();
+            let mut surface_data = surface.data().unwrap();
+
+            for y in 0..height {
+                for x in 0..width {
+                    let frame_idx = (y * stride + x * 3) as usize;
+                    let surface_idx = (y * surface_stride + x * 4) as usize;
+
+                    if frame_idx + 2 < frame_data.len() && surface_idx + 3 < surface_data.len() {
+                        surface_data[surface_idx] = frame_data[frame_idx + 2]; // B
+                        surface_data[surface_idx + 1] = frame_data[frame_idx + 1]; // G
+                        surface_data[surface_idx + 2] = frame_data[frame_idx]; // R
+                        surface_data[surface_idx + 3] = 255; // A
+                    }
+                }
+            }
+        }
+
+        // Get text dimensions first
+        let (text_width, text_height) = {
+            let cr = cairo::Context::new(&surface)
+                .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo context: {}", e))?;
+            let layout = create_layout(&cr);
+            let mut font_desc = pango::FontDescription::new();
+            font_desc.set_family(&settings.text_font);
+            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
+            layout.set_font_description(Some(&font_desc));
+            layout.set_text(text);
+            layout.pixel_size()
+        };
+
+        // Create Cairo context and draw text
+        {
+            let cr = cairo::Context::new(&surface)
+                .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo context: {}", e))?;
+
+            // Set up Pango layout
+            let layout = create_layout(&cr);
+            let mut font_desc = pango::FontDescription::new();
+            font_desc.set_family(&settings.text_font);
+            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
+            layout.set_font_description(Some(&font_desc));
+            layout.set_text(text);
+
+            // Draw text background for better visibility
+            cr.save()
+                .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.6);
+            cr.rectangle(x as f64, y as f64, text_width as f64, text_height as f64);
+            cr.fill()
+                .map_err(|e| gst::loggable_error!(CAT, "Cairo fill failed: {}", e))?;
+            cr.restore()
+                .map_err(|e| gst::loggable_error!(CAT, "Cairo restore failed: {}", e))?;
+
+            // Set text color
+            let r = ((settings.text_color >> 16) & 0xFF) as f64 / 255.0;
+            let g = ((settings.text_color >> 8) & 0xFF) as f64 / 255.0;
+            let b = (settings.text_color & 0xFF) as f64 / 255.0;
+            cr.set_source_rgb(r, g, b);
+
+            // Position and draw text
+            cr.move_to(x as f64, y as f64);
+            show_layout(&cr, &layout);
+        }
+
+        // Copy the modified region back to the frame
+        {
+            let surface_data = surface.data().unwrap();
+            let frame_data = frame.plane_data_mut(0).unwrap();
+
+            let text_y_start = std::cmp::max(0, y);
+            let text_y_end = std::cmp::min(height, y + text_height);
+            let text_x_start = std::cmp::max(0, x);
+            let text_x_end = std::cmp::min(width, x + text_width);
+
+            for y in text_y_start..text_y_end {
+                for x in text_x_start..text_x_end {
+                    let frame_idx = (y * stride + x * 3) as usize;
+                    let surface_idx = (y * surface_stride + x * 4) as usize;
+
+                    if frame_idx + 2 < frame_data.len() && surface_idx + 3 < surface_data.len() {
+                        frame_data[frame_idx] = surface_data[surface_idx + 2]; // R
+                        frame_data[frame_idx + 1] = surface_data[surface_idx + 1]; // G
+                        frame_data[frame_idx + 2] = surface_data[surface_idx]; // B
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // Implementation of VideoFilter virtual methods
@@ -521,16 +693,31 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         gst::debug!(CAT, obj = self.obj(), "Processing frame");
 
-        let regions: Vec<_> = frame
+        // Collect all ROI data first
+        let roi_data: Vec<_> = frame
             .buffer()
             .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
-            .map(|meta| (meta.rect(), meta.roi_type()))
+            .map(|meta| {
+                let rect = meta.rect();
+                let roi_type = meta.roi_type().to_string();
+                let confidence = meta
+                    .param("ObjectDetection")
+                    .and_then(|v| v.get::<f64>("confidence").ok())
+                    .unwrap_or(0.0) as f32;
+                (rect, roi_type, confidence)
+            })
             .collect();
 
-        gst::debug!(CAT, obj = self.obj(), "Found {} regions", regions.len());
+        gst::debug!(CAT, obj = self.obj(), "Found {} regions", roi_data.len());
 
-        for (rect, roi_type) in regions {
-            let (x, y, w, h) = rect;
+        // Get settings once and clone what we need
+        let settings_clone = {
+            let settings = self.settings.lock().unwrap();
+            settings.clone()
+        };
+
+        // Now process all collected data
+        for ((x, y, w, h), roi_type, confidence) in roi_data {
             gst::debug!(
                 CAT,
                 obj = self.obj(),
@@ -542,12 +729,21 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 roi_type
             );
 
-            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, roi_type)
+            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, &roi_type)
             {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw bbox: {}", e);
                 return Err(gst::FlowError::Error);
             }
             gst::debug!(CAT, obj = self.obj(), "Successfully drew bbox");
+
+            // Format text with label and confidence
+            let text = format!("{} {:.1}%", roi_type, confidence * 100.0);
+
+            // Draw text at the top-left corner of the bounding box
+            if let Err(e) = self.draw_text(frame, &text, x as i32, y as i32 - 24, &settings_clone) {
+                gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                return Err(gst::FlowError::Error);
+            }
         }
 
         gst::debug!(CAT, obj = self.obj(), "Frame processing complete");

@@ -84,7 +84,6 @@ use gstreamer_audio::AudioInfo;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use once_cell::sync::Lazy;
-use serde_json;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -97,20 +96,12 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 });
 
 /// Audio-specific state structure
+#[derive(Default)]
 pub struct AudioState {
     /// The loaded Edge Impulse model
     pub model: Option<edge_impulse_runner::EimModel>,
     /// Audio sample rate
     pub sample_rate: Option<u32>,
-}
-
-impl Default for AudioState {
-    fn default() -> Self {
-        Self {
-            model: None,
-            sample_rate: None,
-        }
-    }
 }
 
 impl AsRef<Option<edge_impulse_runner::EimModel>> for AudioState {
@@ -144,7 +135,7 @@ impl ObjectSubclass for EdgeImpulseAudioInfer {
 impl ObjectImpl for EdgeImpulseAudioInfer {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: Lazy<Vec<glib::ParamSpec>> =
-            Lazy::new(|| crate::common::create_common_properties());
+            Lazy::new(crate::common::create_common_properties);
         PROPERTIES.as_ref()
     }
 
@@ -155,7 +146,7 @@ impl ObjectImpl for EdgeImpulseAudioInfer {
             value,
             pspec,
             &*self.obj(),
-            &*CAT,
+            &CAT,
         );
     }
 
@@ -359,7 +350,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
         );
 
         // Store audio parameters
-        state.sample_rate = Some(in_info.rate() as u32);
+        state.sample_rate = Some(in_info.rate());
 
         Ok(())
     }

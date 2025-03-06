@@ -195,7 +195,6 @@ use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
-use serde_json;
 use std::sync::Mutex;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
@@ -206,6 +205,7 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
+#[derive(Default)]
 pub struct VideoState {
     /// The loaded Edge Impulse model instance
     pub model: Option<EimModel>,
@@ -215,16 +215,6 @@ pub struct VideoState {
 
     /// Height of the input frames (for video models)
     pub height: Option<u32>,
-}
-
-impl Default for VideoState {
-    fn default() -> Self {
-        Self {
-            model: None,
-            width: None,
-            height: None,
-        }
-    }
 }
 
 /// EdgeImpulseVideoInfer element
@@ -262,7 +252,7 @@ impl ObjectSubclass for EdgeImpulseVideoInfer {
 impl ObjectImpl for EdgeImpulseVideoInfer {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: Lazy<Vec<glib::ParamSpec>> =
-            Lazy::new(|| crate::common::create_common_properties());
+            Lazy::new(crate::common::create_common_properties);
         PROPERTIES.as_ref()
     }
 
@@ -273,7 +263,7 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
             value,
             pspec,
             &*self.obj(),
-            &*CAT,
+            &CAT,
         );
     }
 
@@ -660,8 +650,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         );
 
         // Store dimensions
-        state.width = Some(in_info.width() as u32);
-        state.height = Some(in_info.height() as u32);
+        state.width = Some(in_info.width());
+        state.height = Some(in_info.height());
 
         Ok(())
     }

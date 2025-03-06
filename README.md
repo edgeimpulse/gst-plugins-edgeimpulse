@@ -160,7 +160,6 @@ Video overlay element that visualizes inference results from edgeimpulsevideoinf
 Key features:
 - Draws bounding boxes for object detection results
 - Displays class labels with confidence scores
-- Works with RGB video frames
 - Customizable visualization options
 
 Example pipeline:

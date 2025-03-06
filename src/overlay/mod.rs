@@ -1,4 +1,3 @@
-use glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_video as gst_video;

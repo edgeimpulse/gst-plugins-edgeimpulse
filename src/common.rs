@@ -92,7 +92,7 @@ pub fn create_inference_message(
     result_json: String,
     timing_ms: u32,
 ) -> gst::Structure {
-    gst::Structure::builder(&format!("edge-impulse-{}-inference-result", element_type))
+    gst::Structure::builder(format!("edge-impulse-{}-inference-result", element_type))
         .field("timestamp", timestamp)
         .field("type", result_type)
         .field("result", result_json)
@@ -106,7 +106,7 @@ pub fn create_error_message(
     timestamp: gst::ClockTime,
     error: String,
 ) -> gst::Structure {
-    gst::Structure::builder(&format!("edge-impulse-{}-inference-result", element_type))
+    gst::Structure::builder(format!("edge-impulse-{}-inference-result", element_type))
         .field("timestamp", timestamp)
         .field("type", "error")
         .field("error", error)

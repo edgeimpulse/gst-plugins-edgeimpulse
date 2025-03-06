@@ -1,4 +1,3 @@
-use cairo;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
@@ -9,8 +8,6 @@ use gstreamer_video::prelude::*;
 use gstreamer_video::subclass::prelude::*;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
-use pango;
-use pangocairo;
 use pangocairo::functions::*;
 use std::sync::Mutex;
 
@@ -367,7 +364,7 @@ impl EdgeImpulseOverlay {
             let info = info
                 .as_ref()
                 .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
-            stride = info.stride()[0] as i32;
+            stride = info.stride()[0];
             width = info.width() as i32;
             height = info.height() as i32;
         }
@@ -521,7 +518,7 @@ impl EdgeImpulseOverlay {
 
         // Draw rectangle for bounding box
         // For now just draw on Y plane for NV12/NV21
-        let y_stride = info.stride()[0] as i32;
+        let y_stride = info.stride()[0];
         let y_data = frame.plane_data_mut(0).unwrap();
 
         // Convert RGB color to Y (luminance)
@@ -591,11 +588,7 @@ impl EdgeImpulseOverlay {
             let info = video_info
                 .as_ref()
                 .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
-            (
-                info.width() as i32,
-                info.height() as i32,
-                info.stride()[0] as i32,
-            )
+            (info.width() as i32, info.height() as i32, info.stride()[0])
         };
 
         // Create a temporary surface with proper stride alignment
@@ -746,10 +739,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 CAT,
                 obj = self.obj(),
                 "Drawing bbox at ({}, {}) size {}x{} type {:?} with color {:?}",
-                x, y, w, h, roi_type, color
+                x,
+                y,
+                w,
+                h,
+                roi_type,
+                color
             );
 
-            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, &roi_type, color) {
+            if let Err(e) = self.draw_bbox(
+                frame, x as i32, y as i32, w as i32, h as i32, &roi_type, color,
+            ) {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw bbox: {}", e);
                 return Err(gst::FlowError::Error);
             }

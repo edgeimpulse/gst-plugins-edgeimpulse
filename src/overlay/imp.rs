@@ -23,20 +23,25 @@ use std::sync::Mutex;
 ///
 /// # Features
 /// - Draws bounding boxes around regions specified by VideoRegionOfInterestMeta
-/// - Configurable box color and stroke width
-/// - Supports RGB video format
+/// - Automatic color assignment per object class
+/// - Configurable stroke width and text properties
+/// - Supports RGB and NV12/NV21 video formats
 /// - In-place buffer modification for efficient processing
 /// - Safe bounds checking for all drawing operations
 ///
 /// # Properties
-/// - `bbox-color`: The color of the bounding box in RGB format (default: green 0x00FF00)
 /// - `stroke-width`: Width of the bounding box lines in pixels (default: 2, minimum: 1)
 /// - `text-color`: Color of the text in RGB format (default: white 0xFFFFFF)
 /// - `text-font-size`: Size of the text font in pixels (default: 20)
 /// - `text-font`: Font family to use for text rendering (default: Sans)
 ///
+/// # Color Assignment
+/// The element automatically assigns distinct colors to different object classes.
+/// Each unique label (roi_type) gets assigned a color from a predefined palette,
+/// ensuring consistent coloring across frames for the same object class.
+///
 /// # Formats
-/// - Input: RGB
+/// - Input: RGB, NV12, NV21
 /// - Output: Same as input (in-place modification)
 ///
 /// # Metadata
@@ -45,6 +50,7 @@ use std::sync::Mutex;
 /// - x, y: Top-left corner coordinates
 /// - width, height: Dimensions of the region
 /// - roi_type: Type identifier for the region
+/// - confidence: Detection confidence value (0.0 - 1.0)
 ///
 /// # Example Pipeline
 /// ```text
@@ -52,10 +58,11 @@ use std::sync::Mutex;
 ///   videotestsrc ! \
 ///   video/x-raw,format=RGB,width=384,height=384 ! \
 ///   edgeimpulsevideoinfer ! \
-///   edgeimpulseoverlay stroke-width=3 bbox-color=0xFF0000 ! \
+///   edgeimpulseoverlay stroke-width=3 ! \
 ///   autovideosink
 /// ```
 ///
+
 // Static category for logging
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -65,10 +72,28 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
+static COLORS: Lazy<Vec<(u8, u8, u8)>> = Lazy::new(|| {
+    vec![
+        (0xE6, 0x19, 0x4B), // '#E6194B'
+        (0x3C, 0xB4, 0x4B), // '#3CB44B'
+        (0xFF, 0xE1, 0x19), // '#FFE119'
+        (0x43, 0x63, 0xD8), // '#4363D8'
+        (0xF5, 0x82, 0x31), // '#F58231'
+        (0x42, 0xD4, 0xF4), // '#42D4F4'
+        (0xF0, 0x32, 0xE6), // '#F032E6'
+        (0xFA, 0xBE, 0xD4), // '#FABED4'
+        (0x46, 0x99, 0x90), // '#469990'
+        (0xDC, 0xBE, 0xFF), // '#DCBEFF'
+        (0x9A, 0x63, 0x24), // '#9A6324'
+        (0xFF, 0xFA, 0xC8), // '#FFFAC8'
+        (0x80, 0x00, 0x00), // '#800000'
+        (0xAA, 0xFF, 0xC3), // '#AAFFC3'
+    ]
+});
+
 // Settings for configuring the overlay appearance
 #[derive(Debug, Clone)]
 struct Settings {
-    bbox_color: u32,
     stroke_width: u32,
     text_color: u32,
     text_font_size: u32,
@@ -78,7 +103,6 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            bbox_color: 0x00FF00,          // Default to green
             stroke_width: 2,               // Default to 2 pixels
             text_color: 0xFFFFFF,          // Default to white
             text_font_size: 20,            // Default font size
@@ -92,6 +116,7 @@ impl Default for Settings {
 pub struct EdgeImpulseOverlay {
     settings: Mutex<Settings>,
     video_info: Mutex<Option<VideoInfo>>,
+    label_colors: Mutex<std::collections::HashMap<String, (u8, u8, u8)>>,
 }
 
 // Implementation of GObject virtual methods
@@ -107,11 +132,6 @@ impl ObjectImpl for EdgeImpulseOverlay {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
             vec![
-                glib::ParamSpecUInt::builder("bbox-color")
-                    .nick("Bounding Box Color")
-                    .blurb("Color of the bounding box in RGB format (default: green 0x00FF00)")
-                    .default_value(0x00FF00) // Green
-                    .build(),
                 glib::ParamSpecInt::builder("stroke-width")
                     .nick("Stroke Width")
                     .blurb("Width of the bounding box lines in pixels")
@@ -139,10 +159,6 @@ impl ObjectImpl for EdgeImpulseOverlay {
 
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         match pspec.name() {
-            "bbox-color" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.bbox_color = value.get().expect("type checked upstream");
-            }
             "stroke-width" => {
                 let mut settings = self.settings.lock().unwrap();
                 settings.stroke_width = value.get().expect("type checked upstream");
@@ -165,10 +181,6 @@ impl ObjectImpl for EdgeImpulseOverlay {
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         match pspec.name() {
-            "bbox-color" => {
-                let settings = self.settings.lock().unwrap();
-                settings.bbox_color.to_value()
-            }
             "stroke-width" => {
                 let settings = self.settings.lock().unwrap();
                 settings.stroke_width.to_value()
@@ -295,6 +307,7 @@ impl EdgeImpulseOverlay {
         w: i32,
         h: i32,
         roi_type: &str,
+        color: (u8, u8, u8),
     ) -> Result<(), gst::LoggableError> {
         let format;
         {
@@ -317,7 +330,7 @@ impl EdgeImpulseOverlay {
         match format {
             VideoFormat::Rgb => {
                 gst::debug!(CAT, obj = self.obj(), "Using RGB drawing for {}", roi_type);
-                self.draw_bbox_rgb(frame, x, y, w, h, &settings)
+                self.draw_bbox_rgb(frame, x, y, w, h, &settings, color)
             }
             VideoFormat::Nv12 | VideoFormat::Nv21 => {
                 gst::debug!(
@@ -326,7 +339,7 @@ impl EdgeImpulseOverlay {
                     "Using NV12/21 drawing for {}",
                     roi_type
                 );
-                self.draw_bbox_nv12(frame, x, y, w, h, &settings)
+                self.draw_bbox_nv12(frame, x, y, w, h, &settings, color)
             }
             _ => {
                 gst::warning!(CAT, obj = self.obj(), "Unsupported format: {:?}", format);
@@ -343,6 +356,7 @@ impl EdgeImpulseOverlay {
         w: i32,
         h: i32,
         settings: &Settings,
+        color: (u8, u8, u8),
     ) -> Result<(), gst::LoggableError> {
         // Get the info we need first, then release the mutex
         let stride;
@@ -383,9 +397,7 @@ impl EdgeImpulseOverlay {
 
         let data = frame.plane_data_mut(0).unwrap();
 
-        let r = ((settings.bbox_color >> 16) & 0xFF) as u8;
-        let g = ((settings.bbox_color >> 8) & 0xFF) as u8;
-        let b = (settings.bbox_color & 0xFF) as u8;
+        let (r, g, b) = color;
 
         gst::debug!(
             CAT,
@@ -502,6 +514,7 @@ impl EdgeImpulseOverlay {
         w: i32,
         h: i32,
         settings: &Settings,
+        color: (u8, u8, u8),
     ) -> Result<(), gst::LoggableError> {
         let info = self.video_info.lock().unwrap();
         let info = info.as_ref().unwrap();
@@ -512,9 +525,10 @@ impl EdgeImpulseOverlay {
         let y_data = frame.plane_data_mut(0).unwrap();
 
         // Convert RGB color to Y (luminance)
-        let r = ((settings.bbox_color >> 16) & 0xFF) as f32;
-        let g = ((settings.bbox_color >> 8) & 0xFF) as f32;
-        let b = (settings.bbox_color & 0xFF) as f32;
+        let (r, g, b) = color;
+        let r = r as f32;
+        let g = g as f32;
+        let b = b as f32;
         let y_value = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
 
         // Draw horizontal lines with specified stroke width
@@ -718,23 +732,27 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
         // Now process all collected data
         for ((x, y, w, h), roi_type, confidence) in roi_data {
+            // Get or assign color for this label
+            let color = {
+                let mut label_colors = self.label_colors.lock().unwrap();
+                if !label_colors.contains_key(&roi_type) {
+                    let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
+                    label_colors.insert(roi_type.clone(), *next_color);
+                }
+                *label_colors.get(&roi_type).unwrap()
+            };
+
             gst::debug!(
                 CAT,
                 obj = self.obj(),
-                "Drawing bbox at ({}, {}) size {}x{} type {:?}",
-                x,
-                y,
-                w,
-                h,
-                roi_type
+                "Drawing bbox at ({}, {}) size {}x{} type {:?} with color {:?}",
+                x, y, w, h, roi_type, color
             );
 
-            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, &roi_type)
-            {
+            if let Err(e) = self.draw_bbox(frame, x as i32, y as i32, w as i32, h as i32, &roi_type, color) {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw bbox: {}", e);
                 return Err(gst::FlowError::Error);
             }
-            gst::debug!(CAT, obj = self.obj(), "Successfully drew bbox");
 
             // Format text with label and confidence
             let text = format!("{} {:.1}%", roi_type, confidence * 100.0);

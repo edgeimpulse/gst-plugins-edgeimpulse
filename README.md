@@ -98,8 +98,48 @@ The compiled .so file will be available in `target/aarch64-unknown-linux-gnu/rel
 ### edgeimpulseaudioinfer
 Audio inference element that processes audio streams through Edge Impulse models.
 
+Element Details:
+- Long name: Edge Impulse Audio Inference
+- Class: Filter/Audio/AI
+- Description: Runs audio inference on Edge Impulse models (EIM)
+
+Pad Templates:
+- Sink pad (Always available):
+  ```
+  audio/x-raw
+    format: S16LE
+    rate: [ 8000, 48000 ]
+    channels: 1
+    layout: interleaved
+  ```
+- Source pad (Always available):
+  ```
+  audio/x-raw
+    format: S16LE
+    rate: [ 8000, 48000 ]
+    channels: 1
+    layout: interleaved
+  ```
+
+Properties:
+1. `model-path` (string):
+   - Path to Edge Impulse model file
+   - Default: null
+   - Flags: readable, writable
+
+2. `threshold` (string):
+   - Format: `blockId.type=value`
+   - Types:
+     - `min_score`: For object detection blocks
+     - `min_anomaly_score`: For anomaly detection blocks
+   - Examples:
+     - `5.min_score=0.6`: Set minimum confidence score for block 5
+     - `4.min_anomaly_score=0.35`: Set minimum anomaly score for block 4
+   - Default: ""
+   - Flags: readable, writable
+
 Key features:
-- Accepts S16LE mono audio at 16kHz
+- Accepts S16LE mono audio at 8-48kHz
 - Passes audio through unchanged
 - Performs inference when model is loaded
 - Emits inference results as messages
@@ -121,12 +161,51 @@ gst-launch-1.0 autoaudiosrc ! \
 ### edgeimpulsevideoinfer
 Video inference element that processes video frames through Edge Impulse models.
 
+Element Details:
+- Long name: Edge Impulse Video Inference
+- Class: Filter/Video/AI
+- Description: Runs video inference on Edge Impulse models (EIM)
+
+Pad Templates:
+- Sink pad (Always available):
+  ```
+  video/x-raw
+    format: RGB
+    width: [ 1, 2147483647 ]
+    height: [ 1, 2147483647 ]
+  ```
+- Source pad (Always available):
+  ```
+  video/x-raw
+    format: RGB
+    width: [ 1, 2147483647 ]
+    height: [ 1, 2147483647 ]
+  ```
+
+Properties:
+1. `model-path` (string):
+   - Path to Edge Impulse model file
+   - Default: null
+   - Flags: readable, writable
+
+2. `threshold` (string):
+   - Format: `blockId.type=value`
+   - Types:
+     - `min_score`: For object detection blocks (confidence threshold)
+     - `min_anomaly_score`: For anomaly detection blocks
+   - Examples:
+     - `5.min_score=0.6`: Set minimum confidence score for block 5
+     - `4.min_anomaly_score=0.35`: Set minimum anomaly score for block 4
+   - Default: ""
+   - Flags: readable, writable
+
 Key features:
-- Accepts RGB video frames
+- Accepts RGB video frames of any resolution
 - Passes frames through unchanged
 - Performs inference when model is loaded
 - Supports both classification and object detection models
 - Emits inference results as messages
+- Configurable thresholds for object detection and anomaly detection
 
 For object detection models, the element provides two mechanisms to consume results:
 
@@ -141,7 +220,9 @@ For object detection models, the element provides two mechanisms to consume resu
    - Enables automatic visualization in QC IM SDK pipelines
    - Each ROI includes bounding box coordinates, label and confidence
 
-Example pipeline with built-in overlay:
+Example pipelines:
+
+Basic pipeline with built-in overlay:
 ```bash
 gst-launch-1.0  avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
@@ -150,6 +231,29 @@ gst-launch-1.0  avfvideosrc ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   queue max-size-buffers=2 leaky=downstream ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
+  edgeimpulseoverlay ! \
+  autovideosink sync=false
+```
+
+Pipeline with threshold settings:
+```bash
+# Set object detection threshold
+gst-launch-1.0 avfvideosrc ! \
+  videoconvert ! \
+  videoscale ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  edgeimpulsevideoinfer model-path=<path-to-model> threshold="5.min_score=0.6" ! \
+  edgeimpulseoverlay ! \
+  autovideosink sync=false
+
+# Set multiple thresholds
+gst-launch-1.0 avfvideosrc ! \
+  videoconvert ! \
+  videoscale ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  edgeimpulsevideoinfer model-path=<path-to-model> \
+    threshold="5.min_score=0.6" \
+    threshold="4.min_anomaly_score=0.35" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 ```
@@ -180,40 +284,112 @@ The repository includes examples demonstrating both audio and video inference. T
 ### Audio Classification
 Run the audio classification example:
 ```bash
+# Basic usage
 cargo run --example audio_classify -- --model path/to/your/model.eim
+
+# With threshold settings
+cargo run --example audio_classify -- --model path/to/your/model.eim \
+    --threshold "5.min_score=0.6" \
+    --threshold "4.min_anomaly_score=0.35"
+
+# With audio file input
+cargo run --example audio_classify -- --model path/to/your/model.eim \
+    --audio input.wav \
+    --threshold "5.min_score=0.6"
 ```
 
-This will capture audio from the default microphone and display classification results:
+This will capture audio from the default microphone (or audio file if specified) and display inference results:
+
+For classification:
 ```
 Got element message with name: edge-impulse-inference-result
-Got inference result message
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 9498000000,
-    classification: Structure(classification {
-        no: (gfloat) 0.015625,
-        noise: (gfloat) 0.968750,
-        yes: (gfloat) 0.019531
-    })
+    type: "classification",
+    result: {
+        "classification": {
+            "no": 0.015625,
+            "noise": 0.968750,
+            "yes": 0.019531
+        }
+    }
 }
 Detected: noise (96.9%)
 ```
 
+For anomaly detection:
+```
+Got element message with name: edge-impulse-inference-result
+Message structure: edge-impulse-inference-result {
+    timestamp: (guint64) 9498000000,
+    type: "anomaly",
+    result: {
+        "anomaly": 0.35,
+        "classification": {
+            "normal": 0.85,
+            "anomalous": 0.15
+        }
+    }
+}
+Detected: normal (85.0%)
+Anomaly score: 35.0%
+```
+
+The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks.
+
 ### Video Classification/Detection
 Run the video classification example:
 ```bash
+# Basic usage
 cargo run --example video_classify -- --model path/to/your/model.eim
+
+# With threshold settings
+cargo run --example video_classify -- --model path/to/your/model.eim \
+    --threshold "5.min_score=0.6" \
+    --threshold "4.min_anomaly_score=0.35"
 ```
 
-This will capture video from your camera and display inference results with visualization:
+This will capture video from your camera and display inference results with visualization. Example outputs:
+
+For object detection:
 ```
 Got element message with name: edge-impulse-inference-result
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 1234567890,
     type: "object-detection",
-    result: "{\"bounding-boxes\":[{\"label\":\"person\",\"value\":0.95,\"x\":24,\"y\":145,\"width\":352,\"height\":239}]}"
+    result: {
+        "bounding_boxes": [
+            {
+                "label": "person",
+                "value": 0.95,
+                "x": 24,
+                "y": 145,
+                "width": 352,
+                "height": 239
+            }
+        ]
+    }
 }
 Detected: person (95.0%)
 ```
+
+For classification:
+```
+Got element message with name: edge-impulse-inference-result
+Message structure: edge-impulse-inference-result {
+    timestamp: (guint64) 1234567890,
+    type: "classification",
+    result: {
+        "classification": [
+            {"label": "cat", "value": 0.85},
+            {"label": "dog", "value": 0.15}
+        ]
+    }
+}
+Detected: cat (85.0%)
+```
+
+The element will automatically detect the model type (classification or object detection) and emit appropriate messages. For object detection models, bounding boxes will be visualized on the video output when using the `edgeimpulseoverlay` element.
 
 ## Message Format
 The elements emit "edge-impulse-inference-result" messages containing:

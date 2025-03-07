@@ -37,14 +37,15 @@ struct AudioClassifyParams {
     #[clap(short, long)]
     audio: Option<String>,
 
-    /// Confidence threshold (0.0 to 1.0) for showing results
-    #[clap(short, long, default_value = "0.8")]
-    threshold: f32,
+    /// Model block thresholds in format 'blockId.type=value' (e.g., '5.min_score=0.6')
+    #[clap(long)]
+    threshold: Vec<String>,
 }
 
 fn create_pipeline(
     model_path: &Path,
     audio_path: Option<&Path>,
+    thresholds: &[String],
 ) -> Result<gst::Pipeline, Box<dyn std::error::Error>> {
     let pipeline = gst::Pipeline::new();
 
@@ -67,7 +68,15 @@ fn create_pipeline(
     let audioconvert1 = gst::ElementFactory::make("audioconvert").build()?;
     let audioresample1 = gst::ElementFactory::make("audioresample").build()?;
     let capsfilter2 = gst::ElementFactory::make("capsfilter").build()?;
-    let edgeimpulseinfer = gst::ElementFactory::make("edgeimpulseaudioinfer").build()?;
+    let mut edgeimpulseinfer_factory = gst::ElementFactory::make("edgeimpulseaudioinfer")
+        .property("model-path", model_path.to_str().unwrap());
+
+    // Set thresholds if provided
+    for threshold in thresholds {
+        edgeimpulseinfer_factory = edgeimpulseinfer_factory.property("threshold", threshold);
+    }
+
+    let edgeimpulseinfer = edgeimpulseinfer_factory.build()?;
     let audioconvert2 = gst::ElementFactory::make("audioconvert").build()?;
     let audioresample2 = gst::ElementFactory::make("audioresample").build()?;
     let capsfilter3 = gst::ElementFactory::make("capsfilter").build()?;
@@ -93,8 +102,6 @@ fn create_pipeline(
         .field("rate", 44100)
         .build();
     capsfilter3.set_property("caps", &caps3);
-
-    edgeimpulseinfer.set_property("model-path", model_path.to_str().unwrap());
 
     // Add elements to pipeline
     pipeline.add_many(&[
@@ -149,7 +156,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create pipeline using model path and audio source
-    let pipeline = create_pipeline(&Path::new(&params.model), audio_path)?;
+    let pipeline = create_pipeline(
+        &Path::new(&params.model),
+        audio_path,
+        &params.threshold,
+    )?;
 
     // Start playing
     println!("Setting pipeline state to Playing...");
@@ -194,14 +205,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(classifications) = json["classification"].as_object() {
                                     for (label, value) in classifications {
                                         if let Some(confidence) = value.as_f64() {
-                                            // Only show detections with confidence > threshold
-                                            if confidence > params.threshold as f64 {
-                                                println!(
-                                                    "Detected {} with confidence {:.1}%",
-                                                    label,
-                                                    confidence * 100.0
-                                                );
-                                            }
+                                            println!(
+                                                "Detected {} with confidence {:.1}%",
+                                                label,
+                                                confidence * 100.0
+                                            );
                                         }
                                     }
                                 }

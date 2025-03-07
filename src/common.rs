@@ -4,6 +4,7 @@ use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
 use gstreamer::prelude::*;
 use std::sync::Mutex;
+use regex;
 
 /// Creates common GStreamer properties shared between Edge Impulse elements
 ///
@@ -24,10 +25,16 @@ use std::sync::Mutex;
 /// gst-launch-1.0 edgeimpulsevideoinfer model-path=/path/to/model.eim ! ...
 /// ```
 pub fn create_common_properties() -> Vec<glib::ParamSpec> {
-    vec![glib::ParamSpecString::builder("model-path")
-        .nick("Model Path")
-        .blurb("Path to Edge Impulse model file")
-        .build()]
+    vec![
+        glib::ParamSpecString::builder("model-path")
+            .nick("Model Path")
+            .blurb("Path to Edge Impulse model file")
+            .build(),
+        glib::ParamSpecString::builder("threshold")
+            .nick("Model Block Threshold")
+            .blurb("Threshold value for model blocks in format 'blockId.type=value'. Examples: '5.min_score=0.6' for object detection blocks, '4.min_anomaly_score=0.35' for anomaly detection blocks. Multiple thresholds can be set by calling the property multiple times.")
+            .build(),
+    ]
 }
 
 pub fn set_common_property<T>(
@@ -63,6 +70,96 @@ pub fn set_common_property<T>(
                 }
             }
         }
+        "threshold" => {
+            let mut state = state.lock().unwrap();
+            let threshold_str: Option<String> = value.get().expect("type checked upstream");
+
+            if let Some(threshold_str) = threshold_str {
+                if let Some(model) = state.as_mut() {
+                    // Parse threshold string in format "blockId.type=value"
+                    let re = regex::Regex::new(r"^(\d+)\.([a-zA-Z0-9_-]+)=([\d\.]+)$").unwrap();
+
+                    if let Some(captures) = re.captures(&threshold_str) {
+                        let id: u32 = match captures[1].parse() {
+                            Ok(id) => id,
+                            Err(_) => {
+                                gst::error!(
+                                    cat,
+                                    obj = obj,
+                                    "Invalid block ID '{}', must be a number",
+                                    &captures[1]
+                                );
+                                return;
+                            }
+                        };
+
+                        let key = captures[2].to_string();
+                        let value: f32 = match captures[3].parse() {
+                            Ok(val) => val,
+                            Err(_) => {
+                                gst::error!(
+                                    cat,
+                                    obj = obj,
+                                    "Invalid threshold value '{}', must be a number",
+                                    &captures[3]
+                                );
+                                return;
+                            }
+                        };
+
+                        // Create appropriate threshold config based on key
+                        let threshold_config = match key.as_str() {
+                            "min_score" => edge_impulse_runner::inference::messages::ThresholdConfig::ObjectDetection {
+                                id,
+                                min_score: value,
+                            },
+                            "min_anomaly_score" => edge_impulse_runner::inference::messages::ThresholdConfig::AnomalyGMM {
+                                id,
+                                min_anomaly_score: value,
+                            },
+                            _ => {
+                                gst::error!(
+                                    cat,
+                                    obj = obj,
+                                    "Invalid threshold type '{}', must be 'min_score' or 'min_anomaly_score'",
+                                    key
+                                );
+                                return;
+                            }
+                        };
+
+                        // Set the threshold asynchronously
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        match rt.block_on(model.set_learn_block_threshold(threshold_config)) {
+                            Ok(_) => {
+                                gst::debug!(
+                                    cat,
+                                    obj = obj,
+                                    "Successfully set threshold for block {} to {}",
+                                    id,
+                                    value
+                                );
+                            }
+                            Err(err) => {
+                                gst::error!(
+                                    cat,
+                                    obj = obj,
+                                    "Failed to set threshold: {}",
+                                    err
+                                );
+                            }
+                        }
+                    } else {
+                        gst::error!(
+                            cat,
+                            obj = obj,
+                            "Invalid threshold format. Expected 'blockId.type=value', got '{}'",
+                            threshold_str
+                        );
+                    }
+                }
+            }
+        }
         _ => unimplemented!(),
     }
 }
@@ -78,6 +175,34 @@ where
                 model.path().to_value()
             } else {
                 None::<String>.to_value()
+            }
+        }
+        "threshold" => {
+            let state = state.lock().unwrap();
+            if let Some(ref model) = *state.as_ref() {
+                // Try to get the current thresholds from model parameters
+                if let Ok(params) = model.parameters() {
+                    // Return a string representation of all thresholds
+                    let thresholds: Vec<String> = params.thresholds.iter().map(|t| match t {
+                        edge_impulse_runner::types::ModelThreshold::ObjectDetection { id, min_score } => {
+                            format!("{}.min_score={}", id, min_score)
+                        }
+                        edge_impulse_runner::types::ModelThreshold::AnomalyGMM { id, min_anomaly_score } => {
+                            format!("{}.min_anomaly_score={}", id, min_anomaly_score)
+                        }
+                        edge_impulse_runner::types::ModelThreshold::ObjectTracking { id, threshold, .. } => {
+                            format!("{}.threshold={}", id, threshold)
+                        }
+                    }).collect();
+
+                    if !thresholds.is_empty() {
+                        return thresholds.join(",").to_value();
+                    }
+                }
+                // Return empty string if no thresholds found
+                "".to_value()
+            } else {
+                "".to_value()
             }
         }
         _ => unimplemented!(),

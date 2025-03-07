@@ -91,7 +91,7 @@ static COLORS: Lazy<Vec<(u8, u8, u8)>> = Lazy::new(|| {
 // Settings for configuring the overlay appearance
 #[derive(Debug, Clone)]
 struct Settings {
-    stroke_width: u32,
+    stroke_width: i32,
     text_color: u32,
     text_font_size: u32,
     text_font: String,
@@ -102,7 +102,7 @@ impl Default for Settings {
         Self {
             stroke_width: 2,               // Default to 2 pixels
             text_color: 0xFFFFFF,          // Default to white
-            text_font_size: 16,            // Default font size
+            text_font_size: 14,            // Default font size
             text_font: "Sans".to_string(), // Default font
         }
     }
@@ -132,6 +132,8 @@ impl ObjectImpl for EdgeImpulseOverlay {
                 glib::ParamSpecInt::builder("stroke-width")
                     .nick("Stroke Width")
                     .blurb("Width of the bounding box lines in pixels")
+                    .minimum(1)
+                    .maximum(100)
                     .default_value(2)
                     .build(),
                 glib::ParamSpecUInt::builder("text-color")
@@ -532,8 +534,8 @@ impl EdgeImpulseOverlay {
         for i in x..x + w {
             // Top lines
             for s in 0..settings.stroke_width {
-                if (y + s as i32) >= 0 && (y + s as i32) < info.height() as i32 {
-                    let idx = ((y + s as i32) * y_stride + i) as usize;
+                if (y + s) >= 0 && (y + s) < info.height() as i32 {
+                    let idx = ((y + s) * y_stride + i) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
@@ -541,8 +543,8 @@ impl EdgeImpulseOverlay {
             }
             // Bottom lines
             for s in 0..settings.stroke_width {
-                if (y + h - s as i32) >= 0 && (y + h - s as i32) < info.height() as i32 {
-                    let idx = ((y + h - s as i32) * y_stride + i) as usize;
+                if (y + h - s) >= 0 && (y + h - s) < info.height() as i32 {
+                    let idx = ((y + h - s) * y_stride + i) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
@@ -555,7 +557,7 @@ impl EdgeImpulseOverlay {
             // Left lines
             for s in 0..settings.stroke_width {
                 if j >= 0 && j < info.height() as i32 {
-                    let idx = (j * y_stride + x + s as i32) as usize;
+                    let idx = (j * y_stride + x + s) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
@@ -564,7 +566,7 @@ impl EdgeImpulseOverlay {
             // Right lines
             for s in 0..settings.stroke_width {
                 if j >= 0 && j < info.height() as i32 {
-                    let idx = (j * y_stride + x + w - s as i32) as usize;
+                    let idx = (j * y_stride + x + w - s) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
@@ -760,7 +762,9 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             let text = format!("{} {:.1}%", roi_type, confidence * 100.0);
 
             // Draw text inside the bounding box at the top
-            if let Err(e) = self.draw_text(frame, &text, x as i32, y as i32 + 4, &settings_clone, color) {
+            if let Err(e) =
+                self.draw_text(frame, &text, x as i32, y as i32 + 4, &settings_clone, color)
+            {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
             }

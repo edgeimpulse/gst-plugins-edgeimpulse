@@ -759,8 +759,8 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             // Format text with label and confidence
             let text = format!("{} {:.1}%", roi_type, confidence * 100.0);
 
-            // Draw text at the top-left corner of the bounding box
-            if let Err(e) = self.draw_text(frame, &text, x as i32, y as i32 - 24, &settings_clone, color) {
+            // Draw text inside the bounding box at the top
+            if let Err(e) = self.draw_text(frame, &text, x as i32, y as i32 + 4, &settings_clone, color) {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
             }

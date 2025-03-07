@@ -3,8 +3,8 @@ use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
 use gstreamer::prelude::*;
-use std::sync::Mutex;
 use regex;
+use std::sync::Mutex;
 
 /// Creates common GStreamer properties shared between Edge Impulse elements
 ///
@@ -141,12 +141,7 @@ pub fn set_common_property<T>(
                                 );
                             }
                             Err(err) => {
-                                gst::error!(
-                                    cat,
-                                    obj = obj,
-                                    "Failed to set threshold: {}",
-                                    err
-                                );
+                                gst::error!(cat, obj = obj, "Failed to set threshold: {}", err);
                             }
                         }
                     } else {
@@ -183,17 +178,31 @@ where
                 // Try to get the current thresholds from model parameters
                 if let Ok(params) = model.parameters() {
                     // Return a string representation of all thresholds
-                    let thresholds: Vec<String> = params.thresholds.iter().map(|t| match t {
-                        edge_impulse_runner::types::ModelThreshold::ObjectDetection { id, min_score } => {
-                            format!("{}.min_score={}", id, min_score)
-                        }
-                        edge_impulse_runner::types::ModelThreshold::AnomalyGMM { id, min_anomaly_score } => {
-                            format!("{}.min_anomaly_score={}", id, min_anomaly_score)
-                        }
-                        edge_impulse_runner::types::ModelThreshold::ObjectTracking { id, threshold, .. } => {
-                            format!("{}.threshold={}", id, threshold)
-                        }
-                    }).collect();
+                    let thresholds: Vec<String> = params
+                        .thresholds
+                        .iter()
+                        .map(|t| match t {
+                            edge_impulse_runner::types::ModelThreshold::ObjectDetection {
+                                id,
+                                min_score,
+                            } => {
+                                format!("{}.min_score={}", id, min_score)
+                            }
+                            edge_impulse_runner::types::ModelThreshold::AnomalyGMM {
+                                id,
+                                min_anomaly_score,
+                            } => {
+                                format!("{}.min_anomaly_score={}", id, min_anomaly_score)
+                            }
+                            edge_impulse_runner::types::ModelThreshold::ObjectTracking {
+                                id,
+                                threshold,
+                                ..
+                            } => {
+                                format!("{}.threshold={}", id, threshold)
+                            }
+                        })
+                        .collect();
 
                     if !thresholds.is_empty() {
                         return thresholds.join(",").to_value();

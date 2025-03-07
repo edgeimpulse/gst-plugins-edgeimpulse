@@ -259,12 +259,46 @@ gst-launch-1.0 avfvideosrc ! \
 ```
 
 ### edgeimpulseoverlay
-Video overlay element that visualizes inference results from edgeimpulsevideoinfer.
+Video overlay element that visualizes inference results by drawing bounding boxes and labels on video frames.
+
+Element Details:
+- Long name: Edge Impulse Overlay
+- Class: Filter/Effect/Video
+- Description: Draws bounding boxes on video frames based on ROI metadata
+
+Pad Templates:
+- Sink/Source pads (Always available):
+  ```
+  video/x-raw
+    format: { RGB, BGR, RGBA, BGRA, UYVY, YUY2, YVYU, NV12, NV21, I420, YV12 }
+    width: [ 1, 2147483647 ]
+    height: [ 1, 2147483647 ]
+  ```
 
 Key features:
 - Draws bounding boxes for object detection results
 - Displays class labels with confidence scores
-- Customizable visualization options
+- Supports wide range of video formats
+
+Properties:
+1. `stroke-width` (integer):
+   - Width of the bounding box lines in pixels
+   - Range: 1 - 100
+   - Default: 2
+
+2. `text-color` (unsigned integer):
+   - Color of the text in RGB format
+   - Range: 0 - 4294967295
+   - Default: white (0xFFFFFF)
+
+3. `text-font` (string):
+   - Font family to use for text rendering
+   - Default: "Sans"
+
+4. `text-font-size` (unsigned integer):
+   - Size of the text font in pixels
+   - Range: 0 - 4294967295
+   - Default: 14
 
 Example pipeline:
 ```bash
@@ -273,9 +307,11 @@ gst-launch-1.0 avfvideosrc ! \
   videoscale ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  edgeimpulseoverlay ! \
+  edgeimpulseoverlay stroke-width=3 text-font-size=20 text-color=0x00FF00 ! \
   autovideosink sync=false
 ```
+
+The overlay element automatically processes VideoRegionOfInterestMeta from upstream elements (like edgeimpulsevideoinfer) and visualizes them with configurable styles.
 
 ## Examples
 

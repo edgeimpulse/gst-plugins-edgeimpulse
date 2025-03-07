@@ -156,11 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create pipeline using model path and audio source
-    let pipeline = create_pipeline(
-        &Path::new(&params.model),
-        audio_path,
-        &params.threshold,
-    )?;
+    let pipeline = create_pipeline(&Path::new(&params.model), audio_path, &params.threshold)?;
 
     // Start playing
     println!("Setting pipeline state to Playing...");

@@ -160,15 +160,16 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create queue element.");
 
-    let mut classifier_factory = gst::ElementFactory::make("edgeimpulsevideoinfer")
-        .property("model-path", &args.model);
+    let mut classifier_factory =
+        gst::ElementFactory::make("edgeimpulsevideoinfer").property("model-path", &args.model);
 
     // Set thresholds if provided
     for threshold in &args.threshold {
         classifier_factory = classifier_factory.property("threshold", threshold);
     }
 
-    let classifier = classifier_factory.build()
+    let classifier = classifier_factory
+        .build()
         .expect("Could not create edgeimpulsevideoinfer element.");
 
     let queue3 = gst::ElementFactory::make("queue")

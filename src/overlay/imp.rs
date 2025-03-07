@@ -102,7 +102,7 @@ impl Default for Settings {
         Self {
             stroke_width: 2,               // Default to 2 pixels
             text_color: 0xFFFFFF,          // Default to white
-            text_font_size: 20,            // Default font size
+            text_font_size: 16,            // Default font size
             text_font: "Sans".to_string(), // Default font
         }
     }
@@ -582,6 +582,7 @@ impl EdgeImpulseOverlay {
         x: i32,
         y: i32,
         settings: &Settings,
+        color: (u8, u8, u8),
     ) -> Result<(), gst::LoggableError> {
         let (width, height, stride) = {
             let video_info = self.video_info.lock().unwrap();
@@ -646,7 +647,8 @@ impl EdgeImpulseOverlay {
             // Draw text background for better visibility
             cr.save()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.6);
+            let (r, g, b) = color;
+            cr.set_source_rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 0.6);
             cr.rectangle(x as f64, y as f64, text_width as f64, text_height as f64);
             cr.fill()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo fill failed: {}", e))?;
@@ -758,7 +760,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             let text = format!("{} {:.1}%", roi_type, confidence * 100.0);
 
             // Draw text at the top-left corner of the bounding box
-            if let Err(e) = self.draw_text(frame, &text, x as i32, y as i32 - 24, &settings_clone) {
+            if let Err(e) = self.draw_text(frame, &text, x as i32, y as i32 - 24, &settings_clone, color) {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
             }

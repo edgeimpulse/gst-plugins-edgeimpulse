@@ -263,7 +263,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                 }
             };
 
-            let slice_size = params.slice_size;
+            let slice_size = params.slice_size as usize;
 
             // Add new samples to buffer
             let mut sample_buffer = self.sample_buffer.lock().unwrap();

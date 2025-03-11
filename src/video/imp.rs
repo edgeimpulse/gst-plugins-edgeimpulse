@@ -193,24 +193,12 @@ use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
-use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
+use gstreamer_video::{VideoInfo, VideoFrameRef, VideoFormat};
+use gstreamer_video::prelude::VideoFrameExt;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-
-#[cfg(feature = "dma-buf")]
-#[repr(C)]
-struct dma_buf_sync {
-    flags: u64,
-}
-
-#[cfg(feature = "dma-buf")]
-const DMA_BUF_SYNC_START: u64 = 0;
-#[cfg(feature = "dma-buf")]
-const DMA_BUF_SYNC_END: u64 = 1;
-#[cfg(feature = "dma-buf")]
-const DMA_BUF_SYNC_RW: u64 = 1 << 1;
-#[cfg(feature = "dma-buf")]
-const DMA_BUF_IOCTL_SYNC: libc::c_ulong = 0x40087b0d;
+use serde_json;
+use gstreamer_sys;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -402,153 +390,268 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         inbuf: &gst::Buffer,
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let state = self.state.lock().unwrap();
+        gst::debug!(CAT, imp = self, "Transform called!");
 
-        // Check if input buffer uses GBM memory
-        let is_gbm = inbuf.n_memory() > 0 && inbuf.peek_memory(0).flags().contains(gst::MemoryFlags::NO_SHARE);
+        // Map the input buffer for reading
+        let in_map = inbuf.map_readable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map input buffer readable");
+            gst::FlowError::Error
+        })?;
 
-        let width = state.width.unwrap();
-        let height = state.height.unwrap();
+        // Map the output buffer for writing
+        let mut out_map = outbuf.map_writable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map output buffer writable");
+            gst::FlowError::Error
+        })?;
 
-        // Create video info for frame mapping
-        let video_info = VideoInfo::builder(
-                gst_video::VideoFormat::Rgb,
+        // Copy the input buffer to the output buffer
+        out_map.copy_from_slice(&in_map);
+
+        // Drop the mappings before doing inference
+        drop(out_map);
+        drop(in_map);
+
+        // Run inference on the input buffer
+        let mut state = self.state.lock().unwrap();
+        if let Some(ref mut model) = state.model {
+            // Get all parameters upfront
+            let params = match model.parameters() {
+                Ok(p) => p,
+                Err(e) => {
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to get model parameters: {}",
+                        e
+                    );
+                    return Ok(gst::FlowSuccess::Ok);
+                }
+            };
+
+            let width = params.image_input_width;
+            let height = params.image_input_height;
+            let channels = params.image_channel_count;
+            let is_object_detection = params.model_type == "constrained_object_detection"
+                || params.model_type == "object_detection";
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Processing frame for {} model with dimensions {}x{} and {} channels",
+                params.model_type,
                 width,
-                height
-            )
-            .build()
-            .map_err(|_| {
-                gst::error!(CAT, imp = self, "Failed to create video info");
-                gst::FlowError::Error
-            })?;
+                height,
+                channels
+            );
 
-        if is_gbm {
-            // Handle GBM memory buffer
-            #[cfg(feature = "dma-buf")]
-            {
-                // Get FD from GBM memory
-                let fd = if let Ok(mem) = inbuf.peek_memory(0).map(|m| m.downcast_memory_ref::<gst::FdMemory>()) {
-                    mem.and_then(|fd_mem| Some(fd_mem.fd()))
-                } else {
-                    None
-                };
+            // Extract frame data for inference
+            let in_frame = match VideoFrameRef::from_buffer_ref_readable(
+                inbuf.as_ref(),
+                &VideoInfo::builder(VideoFormat::Rgb, width as u32, height as u32)
+                    .build()
+                    .unwrap(),
+            ) {
+                Ok(frame) => {
+                    gst::debug!(CAT, obj = self.obj(), "Successfully mapped input buffer");
+                    frame
+                }
+                Err(err) => {
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to map input buffer: {:?}",
+                        err
+                    );
+                    return Ok(gst::FlowSuccess::Ok);
+                }
+            };
 
-                if let Some(fd) = fd {
-                    // Sync start
-                    unsafe {
-                        let mut sync = dma_buf_sync {
-                            flags: DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW,
-                        };
-                        if libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &mut sync) != 0 {
-                            gst::warning!(CAT, "DMA buffer sync start failed");
+            // Get the raw frame data
+            let frame_data = match in_frame.plane_data(0) {
+                Ok(data) => {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Successfully got frame data of size {}",
+                        data.len()
+                    );
+                    data
+                }
+                Err(err) => {
+                    gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {:?}", err);
+                    return Ok(gst::FlowSuccess::Ok);
+                }
+            };
+
+            // Convert frame data to features based on channel count
+            let features = if channels == 3 {
+                // RGB: Pack RGB values into single numbers
+                let mut features = Vec::with_capacity((width * height) as usize);
+                for chunk in frame_data.chunks_exact(3) {
+                    if let [r, g, b] = chunk {
+                        // Pack RGB values into a single number: (r << 16) + (g << 8) + b
+                        let packed = (*r as u32) << 16 | (*g as u32) << 8 | (*b as u32);
+                        features.push(packed as f32);
+                    }
+                }
+                features
+            } else {
+                // Grayscale: Convert RGB to grayscale and pack
+                let mut features = Vec::with_capacity((width * height) as usize);
+                for chunk in frame_data.chunks_exact(3) {
+                    if let [r, g, b] = chunk {
+                        // Convert RGB to grayscale using standard weights
+                        let gray =
+                            (0.299 * (*r as f32) + 0.587 * (*g as f32) + 0.114 * (*b as f32)) as u8;
+                        // Pack grayscale value into RGB format
+                        let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
+                        features.push(packed as f32);
+                    }
+                }
+                features
+            };
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Running inference with {} features",
+                features.len()
+            );
+
+            // Run inference
+            match model.classify(features, None) {
+                Ok(result) => {
+                    let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {
+                        gst::warning!(CAT, obj = self.obj(), "Failed to serialize result: {}", e);
+                        String::from("{}")
+                    });
+
+                    let now = std::time::Instant::now();
+                    if is_object_detection {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
+                            gst::debug!(CAT, obj = self.obj(), "Parsed JSON result: {:?}", json);
+
+                            if let Some(boxes) =
+                                json.get("bounding_boxes").and_then(|b| b.as_array())
+                            {
+                                gst::debug!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "Processing {} detections",
+                                    boxes.len()
+                                );
+
+                                // Create detection metadata
+                                for bbox in boxes {
+                                    gst::debug!(
+                                        CAT,
+                                        obj = self.obj(),
+                                        "Processing bbox: {:?}",
+                                        bbox
+                                    );
+
+                                    if let (
+                                        Some(label),
+                                        Some(value),
+                                        Some(x),
+                                        Some(y),
+                                        Some(w),
+                                        Some(h),
+                                    ) = (
+                                        bbox.get("label").and_then(|v| v.as_str()),
+                                        bbox.get("value").and_then(|v| v.as_f64()),
+                                        bbox.get("x").and_then(|v| v.as_i64()),
+                                        bbox.get("y").and_then(|v| v.as_i64()),
+                                        bbox.get("width").and_then(|v| v.as_i64()),
+                                        bbox.get("height").and_then(|v| v.as_i64()),
+                                    ) {
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Creating ROI metadata for {} at ({}, {}, {}, {}) with confidence {}",
+                                            label, x, y, w, h, value
+                                        );
+
+                                        // Create ROI metadata
+                                        let mut roi_meta =
+                                            gst_video::VideoRegionOfInterestMeta::add(
+                                                outbuf,
+                                                label,
+                                                (x as u32, y as u32, w as u32, h as u32),
+                                            );
+
+                                        // Add detection parameters
+                                        let s = gst::Structure::builder("ObjectDetection")
+                                            .field("confidence", value)
+                                            .field("color", 0xFF0000FFu32)
+                                            .build();
+                                        roi_meta.add_param(s);
+
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Successfully added ROI metadata"
+                                        );
+                                    } else {
+                                        gst::warning!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Invalid bbox format: {:?}",
+                                            bbox
+                                        );
+                                    }
+                                }
+                            } else {
+                                gst::warning!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "No bounding_boxes array in result"
+                                );
+                            }
+
+                            let elapsed = now.elapsed();
+
+                            // Create and post inference message to the bus as well.
+                            let s = crate::common::create_inference_message(
+                                "video",
+                                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                                "object-detection",
+                                result_json,
+                                elapsed.as_millis() as u32,
+                            );
+
+                            // Post the message
+                            let _ = self.obj().post_message(gst::message::Element::new(s));
+                        } else {
+                            gst::warning!(CAT, obj = self.obj(), "Failed to parse JSON result");
                         }
+                    } else {
+                        let elapsed = now.elapsed();
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "classification",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
-
-                    // Map input frame
-                    let in_frame = gst_video::VideoFrameRef::from_buffer_ref_readable(inbuf.as_ref(), &video_info)
-                        .map_err(|_| {
-                            gst::error!(CAT, imp = self, "Failed to map input buffer");
-                            gst::FlowError::Error
-                        })?;
-
-                    // Map output frame
-                    let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(outbuf, &video_info)
-                        .map_err(|_| {
-                            gst::error!(CAT, imp = self, "Failed to map output buffer");
-                            gst::FlowError::Error
-                        })?;
-
-                    // Copy frame data
-                    let in_data = in_frame.plane_data(0).map_err(|_| {
-                        gst::error!(CAT, imp = self, "Failed to get input plane data");
-                        gst::FlowError::Error
-                    })?;
-
-                    let out_data = out_frame.plane_data_mut(0).map_err(|_| {
-                        gst::error!(CAT, imp = self, "Failed to get output plane data");
-                        gst::FlowError::Error
-                    })?;
-
-                    out_data.copy_from_slice(in_data);
-
-                    // Drop frame mappings
-                    drop(out_frame);
-                    drop(in_frame);
-
-                    // Process the buffer for inference
-                    if let Some(ref model) = state.model {
-                        let input_data: Vec<f32> = in_data.iter().map(|&x| x as f32).collect();
-                        model.classify(input_data, None).map_err(|_| {
-                            gst::error!(CAT, imp = self, "Failed to run inference");
-                            gst::FlowError::Error
-                        })?;
-                    }
-
-                    // Sync end
-                    unsafe {
-                        let mut sync = dma_buf_sync {
-                            flags: DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW,
-                        };
-                        if libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &mut sync) != 0 {
-                            gst::warning!(CAT, "DMA buffer sync end failed");
-                        }
-                    }
-
-                    Ok(gst::FlowSuccess::Ok)
-                } else {
-                    gst::error!(CAT, "Failed to get FD from GBM memory");
-                    Err(gst::FlowError::Error)
+                }
+                Err(e) => {
+                    gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
+                    let s = crate::common::create_error_message(
+                        "video",
+                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        e.to_string(),
+                    );
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
             }
-            #[cfg(not(feature = "dma-buf"))]
-            {
-                gst::error!(CAT, "GBM memory support not enabled");
-                Err(gst::FlowError::NotSupported)
-            }
         } else {
-            // Handle regular system memory buffer
-            // Map input frame
-            let in_frame = gst_video::VideoFrameRef::from_buffer_ref_readable(inbuf.as_ref(), &video_info)
-                .map_err(|_| {
-                    gst::error!(CAT, imp = self, "Failed to map input buffer");
-                    gst::FlowError::Error
-                })?;
-
-            // Map output frame
-            let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(outbuf, &video_info)
-                .map_err(|_| {
-                    gst::error!(CAT, imp = self, "Failed to map output buffer");
-                    gst::FlowError::Error
-                })?;
-
-            // Copy frame data
-            let in_data = in_frame.plane_data(0).map_err(|_| {
-                gst::error!(CAT, imp = self, "Failed to get input plane data");
-                gst::FlowError::Error
-            })?;
-
-            let out_data = out_frame.plane_data_mut(0).map_err(|_| {
-                gst::error!(CAT, imp = self, "Failed to get output plane data");
-                gst::FlowError::Error
-            })?;
-
-            out_data.copy_from_slice(in_data);
-
-            // Drop frame mappings
-            drop(out_frame);
-            drop(in_frame);
-
-            // Process the buffer for inference
-            if let Some(ref model) = state.model {
-                let input_data: Vec<f32> = in_data.iter().map(|&x| x as f32).collect();
-                model.classify(input_data, None).map_err(|_| {
-                    gst::error!(CAT, imp = self, "Failed to run inference");
-                    gst::FlowError::Error
-                })?;
-            }
-
-            Ok(gst::FlowSuccess::Ok)
+            gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
         }
+
+        Ok(gst::FlowSuccess::Ok)
     }
 
     /// Handle caps (format) negotiation
@@ -557,7 +660,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
     /// frame processing.
     fn set_caps(&self, incaps: &gst::Caps, outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
         gst::info!(
-            // Changed to info level for more visibility
             CAT,
             obj = self.obj(),
             "Set caps called with incaps: {:?}, outcaps: {:?}",
@@ -571,17 +673,42 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         let in_info = VideoInfo::from_caps(incaps)
             .map_err(|_| gst::loggable_error!(CAT, "Failed to parse input caps"))?;
 
+        // Verify format is RGB
+        if in_info.format() != gst_video::VideoFormat::Rgb {
+            return Err(gst::loggable_error!(
+                CAT,
+                "Unsupported format: {:?}, only RGB is supported",
+                in_info.format()
+            ));
+        }
+
         gst::info!(
             CAT,
             obj = self.obj(),
-            "Setting caps: width={}, height={}",
+            "Setting caps: width={}, height={}, format={:?}",
             in_info.width(),
-            in_info.height()
+            in_info.height(),
+            in_info.format()
         );
 
         // Store dimensions
         state.width = Some(in_info.width());
         state.height = Some(in_info.height());
+
+        // Parse output caps and verify they match
+        let out_info = VideoInfo::from_caps(outcaps)
+            .map_err(|_| gst::loggable_error!(CAT, "Failed to parse output caps"))?;
+
+        if in_info.width() != out_info.width() || in_info.height() != out_info.height() {
+            return Err(gst::loggable_error!(
+                CAT,
+                "Input and output dimensions must match: input={}x{}, output={}x{}",
+                in_info.width(),
+                in_info.height(),
+                out_info.width(),
+                out_info.height()
+            ));
+        }
 
         Ok(())
     }
@@ -596,12 +723,85 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         caps: &gst::Caps,
         filter: Option<&gst::Caps>,
     ) -> Option<gst::Caps> {
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Transforming caps {} in direction {:?}",
+            caps,
+            direction
+        );
+
+        // Handle empty caps
+        if caps.is_empty() {
+            // Return a new caps with our supported formats
+            let mut transformed_caps = gst::Caps::new_empty();
+
+            // Create base caps structure for RGB format
+            let base_structure = gst::Structure::builder("video/x-raw")
+                .field("format", "RGB")
+                .field("width", gst::IntRange::new(1, i32::MAX))
+                .field("height", gst::IntRange::new(1, i32::MAX))
+                .build();
+
+            // Add regular system memory caps
+            transformed_caps.get_mut().unwrap().append_structure(base_structure.clone());
+
+            // Add GBM memory caps
+            let gbm_features = gst::CapsFeatures::new(&[String::from("memory:GBM")]);
+            transformed_caps
+                .get_mut()
+                .unwrap()
+                .append_structure_full(base_structure, Some(gbm_features));
+
+            // If we have a filter, intersect with it
+            if let Some(filter) = filter {
+                transformed_caps = transformed_caps.intersect(filter);
+            }
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Transformed empty caps to {} in direction {:?}",
+                transformed_caps,
+                direction
+            );
+
+            return Some(transformed_caps);
+        }
+
+        // Get the structure from the caps
+        let structure = match caps.structure(0) {
+            Some(s) => s,
+            None => {
+                gst::error!(
+                    CAT,
+                    obj = self.obj(),
+                    "Failed to get structure from caps {}",
+                    caps
+                );
+                return None;
+            }
+        };
+
         // Create base caps structure for RGB format
-        let base_structure = gst::Structure::builder("video/x-raw")
-            .field("format", "RGB")
-            .field("width", gst::IntRange::new(1, i32::MAX))
-            .field("height", gst::IntRange::new(1, i32::MAX))
-            .build();
+        let mut base_structure = gst::Structure::builder("video/x-raw")
+            .field("format", "RGB");
+
+        // If we have fixed dimensions in the input caps, maintain them
+        if let Ok(width) = structure.get::<i32>("width") {
+            base_structure = base_structure.field("width", width);
+        } else {
+            base_structure = base_structure.field("width", gst::IntRange::new(1, i32::MAX));
+        }
+
+        if let Ok(height) = structure.get::<i32>("height") {
+            base_structure = base_structure.field("height", height);
+        } else {
+            base_structure = base_structure.field("height", gst::IntRange::new(1, i32::MAX));
+        }
+
+        // Build the structure
+        let base_structure = base_structure.build();
 
         // Create transformed caps that will hold both memory types
         let mut transformed_caps = gst::Caps::new_empty();
@@ -631,6 +831,332 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         );
 
         Some(transformed_caps)
+    }
+}
+
+impl EdgeImpulseVideoInfer {
+    fn handle_regular_memory(
+        &self,
+        inbuf: &gst::Buffer,
+        outbuf: &mut gst::BufferRef,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        // Map the input buffer for reading
+        let in_map = inbuf.map_readable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map input buffer readable");
+            gst::FlowError::Error
+        })?;
+
+        // Map the output buffer for writing
+        let mut out_map = outbuf.map_writable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map output buffer writable");
+            gst::FlowError::Error
+        })?;
+
+        // Copy the input buffer to the output buffer
+        out_map.copy_from_slice(&in_map);
+
+        // Drop the mappings before doing inference
+        drop(out_map);
+        drop(in_map);
+
+        // Run inference on the input buffer
+        let mut state = self.state.lock().unwrap();
+        if let Some(ref mut model) = state.model {
+            // Get all parameters upfront
+            let params = match model.parameters() {
+                Ok(p) => p,
+                Err(e) => {
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to get model parameters: {}",
+                        e
+                    );
+                    return Ok(gst::FlowSuccess::Ok);
+                }
+            };
+
+            let width = params.image_input_width;
+            let height = params.image_input_height;
+            let channels = params.image_channel_count;
+            let is_object_detection = params.model_type == "constrained_object_detection"
+                || params.model_type == "object_detection";
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Processing frame for {} model with dimensions {}x{} and {} channels",
+                params.model_type,
+                width,
+                height,
+                channels
+            );
+
+            // Extract frame data for inference
+            let in_frame = match VideoFrameRef::from_buffer_ref_readable(
+                inbuf.as_ref(),
+                &VideoInfo::builder(VideoFormat::Rgb, width as u32, height as u32)
+                    .build()
+                    .unwrap(),
+            ) {
+                Ok(frame) => {
+                    gst::debug!(CAT, obj = self.obj(), "Successfully mapped input buffer");
+                    frame
+                }
+                Err(err) => {
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to map input buffer: {:?}",
+                        err
+                    );
+                    return Ok(gst::FlowSuccess::Ok);
+                }
+            };
+
+            // Calculate scaling and padding to maintain aspect ratio
+            let input_width = in_frame.width() as f32;
+            let input_height = in_frame.height() as f32;
+            let target_width = width as f32;
+            let target_height = height as f32;
+
+            let input_aspect = input_width / input_height;
+            let target_aspect = target_width / target_height;
+
+            // Calculate scale to fit within target dimensions while preserving aspect ratio
+            let scale = if input_aspect > target_aspect {
+                // Width limited
+                target_width / input_width
+            } else {
+                // Height limited
+                target_height / input_height
+            };
+
+            // Calculate scaled dimensions
+            let scaled_width = (input_width * scale) as u32;
+            let scaled_height = (input_height * scale) as u32;
+
+            // Calculate padding to center the image
+            let pad_left = ((width as u32 - scaled_width) / 2) as u32;
+            let pad_top = ((height as u32 - scaled_height) / 2) as u32;
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Scaling frame: input={}x{}, scale={}, scaled={}x{}, padding left={}, top={}",
+                input_width,
+                input_height,
+                scale,
+                scaled_width,
+                scaled_height,
+                pad_left,
+                pad_top
+            );
+
+            // Get the raw frame data
+            let frame_data = match in_frame.plane_data(0) {
+                Ok(data) => {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Successfully got frame data of size {}",
+                        data.len()
+                    );
+                    data
+                }
+                Err(err) => {
+                    gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {:?}", err);
+                    return Ok(gst::FlowSuccess::Ok);
+                }
+            };
+
+            // Create a buffer for the scaled and padded image
+            let mut features = vec![0.0f32; (width * height) as usize];
+
+            // Fill the features buffer with scaled and padded image data
+            for y in 0..height as u32 {
+                for x in 0..width as u32 {
+                    let dst_idx = (y * width as u32 + x) as usize;
+
+                    let (r, g, b) = if x >= pad_left
+                        && x < pad_left + scaled_width
+                        && y >= pad_top
+                        && y < pad_top + scaled_height
+                    {
+                        // Map target coordinates back to source image
+                        let src_x = ((x - pad_left) as f32 / scale) as u32;
+                        let src_y = ((y - pad_top) as f32 / scale) as u32;
+
+                        // Ensure we don't exceed source dimensions
+                        let src_x = src_x.min(input_width as u32 - 1);
+                        let src_y = src_y.min(input_height as u32 - 1);
+
+                        let idx = ((src_y * in_frame.width() + src_x) * 3) as usize;
+                        (
+                            frame_data[idx],
+                            frame_data[idx + 1],
+                            frame_data[idx + 2],
+                        )
+                    } else {
+                        // Fill padding with black
+                        (0, 0, 0)
+                    };
+
+                    if channels == 3 {
+                        // Pack RGB values into a single number
+                        let packed = (r as u32) << 16 | (g as u32) << 8 | (b as u32);
+                        features[dst_idx] = packed as f32;
+                    } else {
+                        // Convert to grayscale
+                        let gray = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+                        let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
+                        features[dst_idx] = packed as f32;
+                    }
+                }
+            }
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Running inference with {} features",
+                features.len()
+            );
+
+            // Run inference
+            match model.classify(features, None) {
+                Ok(result) => {
+                    let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {
+                        gst::warning!(CAT, obj = self.obj(), "Failed to serialize result: {}", e);
+                        String::from("{}")
+                    });
+
+                    let now = std::time::Instant::now();
+                    if is_object_detection {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
+                            gst::debug!(CAT, obj = self.obj(), "Parsed JSON result: {:?}", json);
+
+                            if let Some(boxes) =
+                                json.get("bounding_boxes").and_then(|b| b.as_array())
+                            {
+                                gst::debug!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "Processing {} detections",
+                                    boxes.len()
+                                );
+
+                                // Create detection metadata
+                                for bbox in boxes {
+                                    gst::debug!(
+                                        CAT,
+                                        obj = self.obj(),
+                                        "Processing bbox: {:?}",
+                                        bbox
+                                    );
+
+                                    if let (
+                                        Some(label),
+                                        Some(value),
+                                        Some(x),
+                                        Some(y),
+                                        Some(w),
+                                        Some(h),
+                                    ) = (
+                                        bbox.get("label").and_then(|v| v.as_str()),
+                                        bbox.get("value").and_then(|v| v.as_f64()),
+                                        bbox.get("x").and_then(|v| v.as_i64()),
+                                        bbox.get("y").and_then(|v| v.as_i64()),
+                                        bbox.get("width").and_then(|v| v.as_i64()),
+                                        bbox.get("height").and_then(|v| v.as_i64()),
+                                    ) {
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Creating ROI metadata for {} at ({}, {}, {}, {}) with confidence {}",
+                                            label, x, y, w, h, value
+                                        );
+
+                                        // Create ROI metadata
+                                        let mut roi_meta =
+                                            gst_video::VideoRegionOfInterestMeta::add(
+                                                outbuf,
+                                                label,
+                                                (x as u32, y as u32, w as u32, h as u32),
+                                            );
+
+                                        // Add detection parameters
+                                        let s = gst::Structure::builder("ObjectDetection")
+                                            .field("confidence", value)
+                                            .field("color", 0xFF0000FFu32)
+                                            .build();
+                                        roi_meta.add_param(s);
+
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Successfully added ROI metadata"
+                                        );
+                                    } else {
+                                        gst::warning!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Invalid bbox format: {:?}",
+                                            bbox
+                                        );
+                                    }
+                                }
+                            } else {
+                                gst::warning!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "No bounding_boxes array in result"
+                                );
+                            }
+
+                            let elapsed = now.elapsed();
+
+                            // Create and post inference message to the bus as well.
+                            let s = crate::common::create_inference_message(
+                                "video",
+                                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                                "object-detection",
+                                result_json,
+                                elapsed.as_millis() as u32,
+                            );
+
+                            // Post the message
+                            let _ = self.obj().post_message(gst::message::Element::new(s));
+                        } else {
+                            gst::warning!(CAT, obj = self.obj(), "Failed to parse JSON result");
+                        }
+                    } else {
+                        let elapsed = now.elapsed();
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "classification",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
+                    }
+                    Ok(gst::FlowSuccess::Ok)
+                }
+                Err(e) => {
+                    gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
+                    let s = crate::common::create_error_message(
+                        "video",
+                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        e.to_string(),
+                    );
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                    Ok(gst::FlowSuccess::Ok)
+                }
+            }
+        } else {
+            gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
+            Ok(gst::FlowSuccess::Ok)
+        }
     }
 }
 

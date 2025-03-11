@@ -717,6 +717,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-audio",
  "gstreamer-base",
+ "gstreamer-sys",
  "gstreamer-video",
  "libc",
  "objc",

@@ -195,7 +195,6 @@ use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
-use serde_json;
 use std::sync::Mutex;
 
 #[cfg(feature = "dma-buf")]
@@ -221,6 +220,7 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
+#[derive(Default)]
 pub struct VideoState {
     /// The loaded Edge Impulse model instance
     pub model: Option<EimModel>,
@@ -230,16 +230,6 @@ pub struct VideoState {
 
     /// Height of the input frames (for video models)
     pub height: Option<u32>,
-}
-
-impl Default for VideoState {
-    fn default() -> Self {
-        Self {
-            model: None,
-            width: None,
-            height: None,
-        }
-    }
 }
 
 /// EdgeImpulseVideoInfer element
@@ -283,7 +273,7 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
         );
 
         static PROPERTIES: Lazy<Vec<glib::ParamSpec>> =
-            Lazy::new(|| crate::common::create_common_properties());
+            Lazy::new(crate::common::create_common_properties);
         PROPERTIES.as_ref()
     }
 
@@ -313,7 +303,7 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
             value,
             pspec,
             &*self.obj(),
-            &*CAT,
+            &CAT,
         );
     }
 

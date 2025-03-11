@@ -40,9 +40,9 @@ struct VideoClassifyParams {
     #[arg(short, long)]
     debug: bool,
 
-    /// Confidence threshold (0.0 to 1.0) for showing results
-    #[clap(short, long, default_value = "0.8")]
-    threshold: f32,
+    /// Model block thresholds in format 'blockId.type=value' (e.g., '5.min_score=0.6')
+    #[clap(long)]
+    threshold: Vec<String>,
 }
 
 // macOS specific run loop handling
@@ -160,8 +160,15 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create queue element.");
 
-    let classifier = gst::ElementFactory::make("edgeimpulsevideoinfer")
-        .property("model-path", &args.model)
+    let mut classifier_factory =
+        gst::ElementFactory::make("edgeimpulsevideoinfer").property("model-path", &args.model);
+
+    // Set thresholds if provided
+    for threshold in &args.threshold {
+        classifier_factory = classifier_factory.property("threshold", threshold);
+    }
+
+    let classifier = classifier_factory
         .build()
         .expect("Could not create edgeimpulsevideoinfer element.");
 
@@ -290,13 +297,11 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                                     if let (Some(label), Some(value)) =
                                         (bbox["label"].as_str(), bbox["value"].as_f64())
                                     {
-                                        // Only show detections with confidence > threshold
-                                        if value > args.threshold as f64 {
-                                            println!(
-                                                "Detected {} with confidence {}",
-                                                label, value
-                                            );
-                                        }
+                                        println!(
+                                            "Detected {} with confidence {:.1}%",
+                                            label,
+                                            value * 100.0
+                                        );
                                     }
                                 }
                             }

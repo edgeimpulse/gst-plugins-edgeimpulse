@@ -400,6 +400,10 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             gst::FlowError::Error
         })?;
 
+        // Check if we have GBM memory
+        let has_gbm = caps.features(0).map(|f| f.contains("memory:GBM")).unwrap_or(false);
+        gst::debug!(CAT, imp = self, "Using GBM memory: {}", has_gbm);
+
         // Create VideoFrame from input buffer
         let in_frame = VideoFrameRef::from_buffer_ref_readable(inbuf.as_ref(), &info)
             .map_err(|_| {
@@ -456,120 +460,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         drop(in_frame);
         drop(out_frame);
 
-        // Convert frame data to features based on channel count
-        let features = if channels == 3 {
-            // RGB: Pack RGB values into single numbers
-            let mut features = Vec::with_capacity(data_copy.len() / 3);
-            for chunk in data_copy.chunks_exact(3) {
-                if let [r, g, b] = chunk {
-                    // Pack RGB values into a single number: (r << 16) + (g << 8) + b
-                    let packed = (*r as u32) << 16 | (*g as u32) << 8 | (*b as u32);
-                    features.push(packed as f32);
-                }
-            }
-            features
-        } else {
-            // Grayscale: Convert RGB to grayscale and pack
-            let mut features = Vec::with_capacity(data_copy.len() / 3);
-            for chunk in data_copy.chunks_exact(3) {
-                if let [r, g, b] = chunk {
-                    // Convert RGB to grayscale using standard weights
-                    let gray =
-                        (0.299 * (*r as f32) + 0.587 * (*g as f32) + 0.114 * (*b as f32)) as u8;
-                    // Pack grayscale value into RGB format
-                    let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
-                    features.push(packed as f32);
-                }
-            }
-            features
-        };
-
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "Running inference with {} features",
-            features.len()
-        );
-
-        // Run inference
-        let now = std::time::Instant::now();
-        let result = {
-            let mut state = self.state.lock().unwrap();
-            let model = state.model.as_mut().unwrap();
-            match model.classify(features, None) {
-                Ok(result) => result,
-                Err(e) => {
-                    gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
-
-                    let s = crate::common::create_error_message(
-                        "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                        e.to_string(),
-                    );
-
-                    // Post the message
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
-                    return Ok(gst::FlowSuccess::Ok);
-                }
-            }
-        };
-
-        let result_json = serde_json::to_string(&result.result).unwrap();
-        let elapsed = now.elapsed();
-
-        if model_type == "constrained_object_detection" || model_type == "object_detection" {
-            // For object detection models, also add ROI metadata
-            if let Ok(result) = serde_json::from_str::<serde_json::Value>(&result_json) {
-                if let Some(boxes) = result.get("bounding_boxes") {
-                    if let Some(boxes) = boxes.as_array() {
-                        for bbox in boxes {
-                            if let (Some(x), Some(y), Some(w), Some(h), Some(label), Some(value)) = (
-                                bbox.get("x").and_then(|v| v.as_f64()),
-                                bbox.get("y").and_then(|v| v.as_f64()),
-                                bbox.get("width").and_then(|v| v.as_f64()),
-                                bbox.get("height").and_then(|v| v.as_f64()),
-                                bbox.get("label").and_then(|v| v.as_str()),
-                                bbox.get("value").and_then(|v| v.as_f64()),
-                            ) {
-                                let mut meta = gst_video::VideoRegionOfInterestMeta::add(
-                                    outbuf,
-                                    label,
-                                    (x as u32, y as u32, w as u32, h as u32),
-                                );
-
-                                meta.add_param(gst::Structure::builder("ObjectDetection")
-                                    .field("confidence", value)
-                                    .build());
-                            }
-                        }
-                    }
-                }
-            }
-
-            let s = crate::common::create_inference_message(
-                "video",
-                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                "object-detection",
-                result_json,
-                elapsed.as_millis() as u32,
-            );
-
-            // Post the message
-            let _ = self.obj().post_message(gst::message::Element::new(s));
-        } else {
-            let s = crate::common::create_inference_message(
-                "video",
-                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                "classification",
-                result_json,
-                elapsed.as_millis() as u32,
-            );
-
-            // Post the message
-            let _ = self.obj().post_message(gst::message::Element::new(s));
-        }
-
-        Ok(gst::FlowSuccess::Ok)
+        // Process the frame data and run inference
+        self.process_frame_data(data_copy, inbuf, outbuf)
     }
 
     /// Handle caps (format) negotiation
@@ -591,45 +483,29 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         let in_info = VideoInfo::from_caps(incaps)
             .map_err(|_| gst::loggable_error!(CAT, "Failed to parse input caps"))?;
 
-        // Check if we have DMA buffers
-        let has_dma = incaps
+        // Check if we have GBM buffers
+        let has_gbm = incaps
             .features(0)
-            .map(|f| f.contains("memory:DMABuf"))
+            .map(|f| f.contains("memory:GBM"))
             .unwrap_or(false);
 
-        // For DMA buffers, verify DRM format is RGB
-        if has_dma {
-            let drm_format = incaps
-                .structure(0)
-                .and_then(|s| s.get::<&str>("drm-format").ok())
-                .unwrap_or("");
-
-            if drm_format != "RGB" {
-                return Err(gst::loggable_error!(
-                    CAT,
-                    "Unsupported DRM format: {}, only RGB is supported",
-                    drm_format
-                ));
-            }
-        } else {
-            // For regular buffers, verify format is RGB
-            if in_info.format() != gst_video::VideoFormat::Rgb {
-                return Err(gst::loggable_error!(
-                    CAT,
-                    "Unsupported format: {:?}, only RGB is supported",
-                    in_info.format()
-                ));
-            }
+        // For regular buffers, verify format is RGB
+        if !has_gbm && in_info.format() != gst_video::VideoFormat::Rgb {
+            return Err(gst::loggable_error!(
+                CAT,
+                "Unsupported format: {:?}, only RGB is supported",
+                in_info.format()
+            ));
         }
 
         gst::info!(
             CAT,
             obj = self.obj(),
-            "Setting caps: width={}, height={}, format={:?}, is_dma={}",
+            "Setting caps: width={}, height={}, format={:?}, is_gbm={}",
             in_info.width(),
             in_info.height(),
             in_info.format(),
-            has_dma
+            has_gbm
         );
 
         // Store dimensions
@@ -687,16 +563,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Add regular system memory caps
             transformed_caps.get_mut().unwrap().append_structure(base_structure.clone());
 
-            // Add DMABuf memory caps
-            let dmabuf_features = gst::CapsFeatures::new(&[String::from("memory:DMABuf")]);
-            let mut dmabuf_structure = base_structure.clone();
-            // Add DRM format field for DMA buffers
-            dmabuf_structure.set("format", "DMA_DRM");
-            dmabuf_structure.set("drm-format", "RGB");
+            // Add GBM memory caps
+            let gbm_features = gst::CapsFeatures::new(&[String::from("memory:GBM")]);
             transformed_caps
                 .get_mut()
                 .unwrap()
-                .append_structure_full(dmabuf_structure, Some(dmabuf_features));
+                .append_structure_full(base_structure, Some(gbm_features));
 
             // If we have a filter, intersect with it
             if let Some(filter) = filter {
@@ -714,32 +586,34 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             return Some(transformed_caps);
         }
 
-        // Get the structure and features from the caps
-        let s = caps.structure(0).unwrap();
-        let features = caps.features(0);
-
         // Create new caps for the other pad
         let mut transformed = gst::Caps::new_empty();
 
-        // Handle DMABuf memory caps
-        if let Some(features) = features {
-            if features.contains("memory:DMABuf") {
-                let mut s_dmabuf = s.to_owned();
-                s_dmabuf.set("format", "DMA_DRM");
-                if !s_dmabuf.has_field("drm-format") {
-                    s_dmabuf.set("drm-format", "RGB");
+        // Process each structure in the input caps
+        for (i, s) in caps.iter().enumerate() {
+            // Create a new structure with RGB format
+            let mut s_new = s.to_owned();
+            s_new.set("format", "RGB");
+
+            // Get the features for this structure
+            let features = caps.features(i);
+
+            // If input has GBM memory feature, keep it
+            if let Some(features) = features {
+                if features.contains("memory:GBM") {
+                    transformed
+                        .get_mut()
+                        .unwrap()
+                        .append_structure_full(s_new.clone(), Some(features.to_owned()));
+                } else {
+                    // For non-GBM memory, add as regular caps
+                    transformed.get_mut().unwrap().append_structure(s_new.clone());
                 }
-                transformed
-                    .get_mut()
-                    .unwrap()
-                    .append_structure_full(s_dmabuf, Some(features.to_owned()));
+            } else {
+                // No features, add as regular caps
+                transformed.get_mut().unwrap().append_structure(s_new);
             }
         }
-
-        // Always add regular memory caps
-        let mut s_regular = s.to_owned();
-        s_regular.set("format", "RGB");
-        transformed.get_mut().unwrap().append_structure(s_regular);
 
         // If we have a filter, intersect with it
         if let Some(filter) = filter {
@@ -848,9 +722,7 @@ impl EdgeImpulseVideoInfer {
             let result_json = serde_json::to_string(&result.result).unwrap();
             let elapsed = now.elapsed();
 
-            if model_type == "constrained_object_detection"
-                || model_type == "object_detection"
-            {
+            if model_type == "constrained_object_detection" || model_type == "object_detection" {
                 // For object detection models, also add ROI metadata
                 if let Ok(result) = serde_json::from_str::<serde_json::Value>(&result_json) {
                     if let Some(boxes) = result.get("bounding_boxes") {

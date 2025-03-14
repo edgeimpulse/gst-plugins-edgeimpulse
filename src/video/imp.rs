@@ -197,7 +197,6 @@ use gstreamer_video::{VideoInfo, VideoFrameRef};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use serde_json;
-use gstreamer_sys;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -317,21 +316,28 @@ impl ElementImpl for EdgeImpulseVideoInfer {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-            // Create base caps structure
-            let base_caps = gst::Structure::builder("video/x-raw")
+            // Create base caps structure for system memory
+            let system_caps = gst::Structure::builder("video/x-raw")
                 .field("format", "RGB")
-                .field("width", gst::IntRange::new(1, i32::MAX))
-                .field("height", gst::IntRange::new(1, i32::MAX))
+                .field("width", gst::IntRange::<i32>::new(1, i32::MAX))
+                .field("height", gst::IntRange::<i32>::new(1, i32::MAX))
+                .build();
+
+            // Create base caps structure for GBM memory
+            let gbm_caps = gst::Structure::builder("video/x-raw")
+                .field("format", "RGB")
+                .field("width", gst::IntRange::<i32>::new(1, i32::MAX))
+                .field("height", gst::IntRange::<i32>::new(1, i32::MAX))
                 .build();
 
             // Create caps for both regular and GBM memory
             let caps = gst::Caps::builder_full()
                 // Add regular memory caps
-                .structure(base_caps.clone())
+                .structure(system_caps)
                 // Add GBM memory caps
                 .structure_with_features(
-                    base_caps,
-                    gst::CapsFeatures::new([String::from("memory:GBM")]),
+                    gbm_caps,
+                    gst::CapsFeatures::new(&[String::from("memory:GBM")]),
                 )
                 .build();
 
@@ -404,14 +410,14 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         let has_gbm = caps.features(0).map(|f| f.contains("memory:GBM")).unwrap_or(false);
         gst::debug!(CAT, imp = self, "Using GBM memory: {}", has_gbm);
 
-        // Create VideoFrame from input buffer
+        // Create VideoFrame from input buffer - no need for flags here
         let in_frame = VideoFrameRef::from_buffer_ref_readable(inbuf.as_ref(), &info)
             .map_err(|_| {
                 gst::error!(CAT, obj = self.obj(), "Failed to map input buffer");
                 gst::FlowError::Error
             })?;
 
-        // Create VideoFrame from output buffer
+        // Create VideoFrame from output buffer - no need for flags here
         let mut out_frame = VideoFrameRef::from_buffer_ref_writable(outbuf, &info)
             .map_err(|_| {
                 gst::error!(CAT, obj = self.obj(), "Failed to map output buffer");
@@ -425,7 +431,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         })?;
 
         // Check if we have a model loaded and get model parameters
-        let (model_type, channels) = {
+        let (_model_type, _channels) = {
             let state = self.state.lock().unwrap();
             if state.model.is_none() {
                 // No model loaded, just pass through the buffer
@@ -493,7 +499,16 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         if !has_gbm && in_info.format() != gst_video::VideoFormat::Rgb {
             return Err(gst::loggable_error!(
                 CAT,
-                "Unsupported format: {:?}, only RGB is supported",
+                "Unsupported format: {:?}, only RGB is supported for regular memory",
+                in_info.format()
+            ));
+        }
+
+        // For GBM buffers, verify format is RGB
+        if has_gbm && in_info.format() != gst_video::VideoFormat::Rgb {
+            return Err(gst::loggable_error!(
+                CAT,
+                "Unsupported format: {:?}, only RGB is supported for GBM memory",
                 in_info.format()
             ));
         }
@@ -516,6 +531,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         let out_info = VideoInfo::from_caps(outcaps)
             .map_err(|_| gst::loggable_error!(CAT, "Failed to parse output caps"))?;
 
+        // Verify dimensions match
         if in_info.width() != out_info.width() || in_info.height() != out_info.height() {
             return Err(gst::loggable_error!(
                 CAT,
@@ -524,6 +540,21 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 in_info.height(),
                 out_info.width(),
                 out_info.height()
+            ));
+        }
+
+        // Verify memory types match
+        let out_has_gbm = outcaps
+            .features(0)
+            .map(|f| f.contains("memory:GBM"))
+            .unwrap_or(false);
+
+        if has_gbm != out_has_gbm {
+            return Err(gst::loggable_error!(
+                CAT,
+                "Input and output memory types must match: input_gbm={}, output_gbm={}",
+                has_gbm,
+                out_has_gbm
             ));
         }
 
@@ -542,94 +573,96 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
     ) -> Option<gst::Caps> {
         gst::debug!(
             CAT,
-            obj = self.obj(),
-            "Transforming caps {} in direction {:?}",
-            caps,
-            direction
+            imp = self,
+            "Transform caps called with direction {:?} and caps {:?}",
+            direction,
+            caps
         );
 
-        // Handle empty caps
-        if caps.is_empty() {
-            // Return a new caps with our supported formats
-            let mut transformed_caps = gst::Caps::new_empty();
+        let mut builder = gst::Caps::builder_full();
+        let mut has_structures = false;
 
-            // Create base caps structure for RGB format
-            let base_structure = gst::Structure::builder("video/x-raw")
+        // Iterate through each structure in the input caps
+        for structure in caps.iter() {
+            has_structures = true;
+
+            // Get width and height, handling both fixed values and ranges
+            let width = match structure.get::<gst::IntRange<i32>>("width") {
+                Ok(range) => range,
+                Err(_) => {
+                    // If not a range, try to get as a fixed value
+                    match structure.get::<i32>("width") {
+                        Ok(w) => gst::IntRange::new(w, w + 1), // Create a range that includes the fixed value
+                        Err(_) => gst::IntRange::new(1, 2), // Default to a valid range
+                    }
+                }
+            };
+
+            let height = match structure.get::<gst::IntRange<i32>>("height") {
+                Ok(range) => range,
+                Err(_) => {
+                    // If not a range, try to get as a fixed value
+                    match structure.get::<i32>("height") {
+                        Ok(h) => gst::IntRange::new(h, h + 1), // Create a range that includes the fixed value
+                        Err(_) => gst::IntRange::new(1, 2), // Default to a valid range
+                    }
+                }
+            };
+
+            // Create a new structure with RGB format
+            let new_structure = gst::Structure::builder("video/x-raw")
                 .field("format", "RGB")
-                .field("width", gst::IntRange::new(1, i32::MAX))
-                .field("height", gst::IntRange::new(1, i32::MAX))
+                .field("width", width)
+                .field("height", height)
                 .build();
 
-            // Add regular system memory caps
-            transformed_caps.get_mut().unwrap().append_structure(base_structure.clone());
-
-            // Add GBM memory caps
-            let gbm_features = gst::CapsFeatures::new(&[String::from("memory:GBM")]);
-            transformed_caps
-                .get_mut()
-                .unwrap()
-                .append_structure_full(base_structure, Some(gbm_features));
-
-            // If we have a filter, intersect with it
-            if let Some(filter) = filter {
-                transformed_caps = transformed_caps.intersect(filter);
-            }
-
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Transformed empty caps to {} in direction {:?}",
-                transformed_caps,
-                direction
-            );
-
-            return Some(transformed_caps);
-        }
-
-        // Create new caps for the other pad
-        let mut transformed = gst::Caps::new_empty();
-
-        // Process each structure in the input caps
-        for (i, s) in caps.iter().enumerate() {
-            // Create a new structure with RGB format
-            let mut s_new = s.to_owned();
-            s_new.set("format", "RGB");
-
-            // Get the features for this structure
-            let features = caps.features(i);
-
-            // If input has GBM memory feature, keep it
-            if let Some(features) = features {
+            // Check if this structure has GBM memory feature
+            if let Ok(features) = structure.get::<gst::CapsFeatures>("features") {
                 if features.contains("memory:GBM") {
-                    transformed
-                        .get_mut()
-                        .unwrap()
-                        .append_structure_full(s_new.clone(), Some(features.to_owned()));
+                    // If it has GBM, add it with GBM feature
+                    builder = builder.structure_with_features(
+                        new_structure,
+                        gst::CapsFeatures::new(["memory:GBM"]),
+                    );
                 } else {
-                    // For non-GBM memory, add as regular caps
-                    transformed.get_mut().unwrap().append_structure(s_new.clone());
+                    // If it doesn't have GBM, add it without features
+                    builder = builder.structure(new_structure);
                 }
             } else {
-                // No features, add as regular caps
-                transformed.get_mut().unwrap().append_structure(s_new);
+                // If no features, add without features
+                builder = builder.structure(new_structure);
             }
         }
 
-        // If we have a filter, intersect with it
+        // If no structures were added, create a default one with GBM memory
+        if !has_structures {
+            let default_structure = gst::Structure::builder("video/x-raw")
+                .field("format", "RGB")
+                .field("width", gst::IntRange::new(1, 2))
+                .field("height", gst::IntRange::new(1, 2))
+                .build();
+            builder = builder.structure_with_features(
+                default_structure,
+                gst::CapsFeatures::new(["memory:GBM"]),
+            );
+        }
+
+        let mut new_caps = builder.build();
+
+        // Apply filter if provided
         if let Some(filter) = filter {
-            transformed = transformed.intersect(filter);
+            new_caps = new_caps.intersect(filter);
         }
 
         gst::debug!(
             CAT,
-            obj = self.obj(),
-            "Transformed caps {} to {} in direction {:?}",
+            imp = self,
+            "Transformed caps from {:?} to {:?}",
             caps,
-            transformed,
-            direction
+            new_caps
         );
 
-        Some(transformed)
+        Some(new_caps)
     }
 }
 

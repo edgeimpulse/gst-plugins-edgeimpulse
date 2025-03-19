@@ -10,6 +10,8 @@ use gstreamer_video::prelude::*;
 use gstreamer_video::subclass::prelude::*;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
+use pango::prelude::*;
+use pangocairo::prelude::*;
 use pangocairo::functions::*;
 use std::sync::Mutex;
 
@@ -644,7 +646,7 @@ impl EdgeImpulseOverlay {
         x: i32,
         y: i32,
         settings: &Settings,
-        _color: (u8, u8, u8),
+        color: (u8, u8, u8),
     ) -> Result<(), gst::LoggableError> {
         let (width, height, stride) = {
             let video_info = self.video_info.lock().unwrap();
@@ -658,29 +660,7 @@ impl EdgeImpulseOverlay {
         let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, width, height)
             .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo surface: {}", e))?;
 
-        let surface_stride = surface.stride();
-
-        // Copy frame data to the temporary surface
-        {
-            let frame_data = frame.plane_data(0).unwrap();
-            let mut surface_data = surface.data().unwrap();
-
-            for y in 0..height {
-                for x in 0..width {
-                    let frame_idx = (y * stride + x * 3) as usize;
-                    let surface_idx = (y * surface_stride + x * 4) as usize;
-
-                    if frame_idx + 2 < frame_data.len() && surface_idx + 3 < surface_data.len() {
-                        surface_data[surface_idx] = frame_data[frame_idx + 2]; // B
-                        surface_data[surface_idx + 1] = frame_data[frame_idx + 1]; // G
-                        surface_data[surface_idx + 2] = frame_data[frame_idx]; // R
-                        surface_data[surface_idx + 3] = 255; // A
-                    }
-                }
-            }
-        }
-
-        // Get text dimensions first
+        // Create Cairo context and get text dimensions
         let (text_width, text_height) = {
             let cr = cairo::Context::new(&surface)
                 .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo context: {}", e))?;
@@ -693,32 +673,20 @@ impl EdgeImpulseOverlay {
             layout.pixel_size()
         };
 
-        // Create Cairo context and draw text
+        // Draw text and background
         {
             let cr = cairo::Context::new(&surface)
                 .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo context: {}", e))?;
 
-            // Create Pango context and layout
-            let pango_context = pango::Context::new();
-            let layout = pango::Layout::new(&pango_context);
-            layout.set_text(text);
-            layout.set_font_description(Some(&pango::FontDescription::from_string(
-                &settings.text_font,
-            )));
-            let font_size = settings.text_font_size as i32 * pango::SCALE;
-            let attr_list = pango::AttrList::new();
-            let size_attr = pango::AttrSize::new(font_size);
-            attr_list.insert(size_attr);
-            layout.set_attributes(Some(&attr_list));
-
-            let (text_width, text_height) = layout.pixel_size();
-            let text_width = text_width as i32;
-            let text_height = text_height as i32;
-
-            // Draw text background
+            // Draw text background using the bounding box color with some transparency
             cr.save()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.5);
+            cr.set_source_rgba(
+                color.0 as f64 / 255.0,
+                color.1 as f64 / 255.0,
+                color.2 as f64 / 255.0,
+                0.7, // 70% opacity for better readability
+            );
             cr.rectangle(
                 x as f64 - 5.0,
                 y as f64 - text_height as f64 - 5.0,
@@ -730,55 +698,70 @@ impl EdgeImpulseOverlay {
             cr.restore()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo restore failed: {}", e))?;
 
-            // Draw text
+            // Draw text in white or black depending on background color brightness
             cr.save()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
-            cr.set_source_rgba(
-                ((settings.text_color >> 16) & 0xFF) as f64 / 255.0,
-                ((settings.text_color >> 8) & 0xFF) as f64 / 255.0,
-                (settings.text_color & 0xFF) as f64 / 255.0,
-                1.0,
-            );
+
+            // Calculate perceived brightness of background color
+            let brightness = (0.299 * color.0 as f64 + 0.587 * color.1 as f64 + 0.114 * color.2 as f64) / 255.0;
+
+            // Use white text for dark backgrounds, black text for light backgrounds
+            if brightness < 0.5 {
+                cr.set_source_rgb(1.0, 1.0, 1.0); // White text
+            } else {
+                cr.set_source_rgb(0.0, 0.0, 0.0); // Black text
+            }
+
             cr.move_to(x as f64, y as f64 - text_height as f64);
+
+            let layout = create_layout(&cr);
+            let mut font_desc = pango::FontDescription::new();
+            font_desc.set_family(&settings.text_font);
+            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
+            layout.set_font_description(Some(&font_desc));
+            layout.set_text(text);
+
             show_layout(&cr, &layout);
             cr.restore()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo restore failed: {}", e))?;
         }
 
-        // Copy the rendered text to the video frame
-        let stride = surface.stride() as usize;
-        let surface_data = match surface.data() {
-            Ok(data) => data,
-            Err(e) => {
-                gst::error!(CAT, obj = self.obj(), "Failed to get surface data: {}", e);
-                return Err(gst::loggable_error!(
-                    CAT,
-                    "Failed to get surface data: {}",
-                    e
-                ));
-            }
-        };
+        // Ensure surface is finished before accessing data
+        surface.flush();
 
-        let comp_stride = frame.comp_stride(0) as usize;
-        let frame_data = match frame.plane_data_mut(0) {
-            Ok(data) => data,
-            Err(e) => {
-                gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {}", e);
-                return Err(gst::loggable_error!(CAT, "Failed to get frame data: {}", e));
-            }
-        };
-
-        // Copy only the region where we drew the text
+        // Calculate bounds for the region we need to copy
         let y_start = (y - text_height - 5).max(0) as usize;
         let y_end = (y + 5).min(height) as usize;
         let x_start = (x - 5).max(0) as usize;
         let x_end = (x + text_width + 5).min(width) as usize;
 
+        let surface_stride = surface.stride() as usize;
+
+        // Get surface data after all drawing is complete
+        let surface_data = surface
+            .data()
+            .map_err(|e| gst::loggable_error!(CAT, "Failed to get surface data: {}", e))?;
+
+        // Get frame data
+        let frame_data = frame
+            .plane_data_mut(0)
+            .map_err(|_| gst::loggable_error!(CAT, "Failed to get frame data"))?;
+
+        // Copy the rendered text to the video frame with bounds checking
         for y in y_start..y_end {
-            let src_offset = y * stride + x_start * 4;
-            let dst_offset = y * comp_stride + x_start * 4;
-            frame_data[dst_offset..dst_offset + (x_end - x_start) * 4]
-                .copy_from_slice(&surface_data[src_offset..src_offset + (x_end - x_start) * 4]);
+            let src_offset = y * surface_stride + x_start * 4;
+            let dst_offset = y * stride as usize + x_start * 3;
+
+            for x in 0..(x_end - x_start) {
+                let src_idx = src_offset + x * 4;
+                let dst_idx = dst_offset + x * 3;
+
+                if dst_idx + 2 < frame_data.len() && src_idx + 2 < surface_data.len() {
+                    frame_data[dst_idx] = surface_data[src_idx + 2];     // R
+                    frame_data[dst_idx + 1] = surface_data[src_idx + 1]; // G
+                    frame_data[dst_idx + 2] = surface_data[src_idx];     // B
+                }
+            }
         }
 
         Ok(())
@@ -793,7 +776,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         gst::debug!(CAT, obj = self.obj(), "Processing frame");
 
-        // Get video dimensions
+        // Get video dimensions and settings upfront to avoid holding locks during processing
         let (width, height) = {
             let video_info = self.video_info.lock().unwrap();
             let info = video_info.as_ref().ok_or_else(|| {
@@ -803,8 +786,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             (info.width() as i32, info.height() as i32)
         };
 
-        // Get settings
-        let settings = self.settings.lock().unwrap();
+        let settings = self.settings.lock().unwrap().clone();
 
         // Check for classification metadata
         if let Some(meta) = frame.buffer().meta::<VideoClassificationMeta>() {
@@ -885,14 +867,16 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     text_width as f64 + 10.0,
                     text_height as f64 + 10.0,
                 );
-                context.fill().map_err(|e| {
-                    gst::error!(CAT, "Cairo fill failed: {}", e);
-                    gst::FlowError::Error
-                })?;
-                context.restore().map_err(|e| {
-                    gst::error!(CAT, "Cairo restore failed: {}", e);
-                    gst::FlowError::Error
-                })?;
+                context.fill()
+                    .map_err(|e| {
+                        gst::error!(CAT, "Cairo fill failed: {}", e);
+                        gst::FlowError::Error
+                    })?;
+                context.restore()
+                    .map_err(|e| {
+                        gst::error!(CAT, "Cairo restore failed: {}", e);
+                        gst::FlowError::Error
+                    })?;
 
                 // Draw text
                 context.save().map_err(|e| {
@@ -907,10 +891,11 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 );
                 context.move_to(text_x as f64, text_y as f64 - text_height as f64);
                 show_layout(&context, &layout);
-                context.restore().map_err(|e| {
-                    gst::error!(CAT, "Cairo restore failed: {}", e);
-                    gst::FlowError::Error
-                })?;
+                context.restore()
+                    .map_err(|e| {
+                        gst::error!(CAT, "Cairo restore failed: {}", e);
+                        gst::FlowError::Error
+                    })?;
 
                 // Copy the rendered text to the video frame
                 let stride = surface.stride() as usize;
@@ -1007,7 +992,10 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw text if enabled
             if settings.show_labels {
-                match self.draw_text(frame, &text, x as i32, y as i32 + 4, &settings, color) {
+                // Position the text inside the box at the top-left corner with a small padding
+                let text_x = x as i32 + 2; // 2 pixels padding from left edge
+                let text_y = y as i32 + settings.text_font_size as i32 + 2; // text height + 2 pixels padding from top
+                match self.draw_text(frame, &text, text_x, text_y, &settings, color) {
                     Ok(_) => {}
                     Err(e) => {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);

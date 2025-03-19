@@ -3,7 +3,6 @@ use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
 use gstreamer::prelude::*;
-use regex;
 use std::sync::Mutex;
 
 /// Creates common GStreamer properties shared between Edge Impulse elements

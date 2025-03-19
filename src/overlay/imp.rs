@@ -65,8 +65,6 @@ use crate::video::VideoClassificationMeta;
 ///   edgeimpulseoverlay stroke-width=3 ! \
 ///   autovideosink
 /// ```
-///
-
 // Static category for logging
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -131,7 +129,56 @@ impl Default for Settings {
     }
 }
 
-// State struct to hold element properties and runtime data
+/// A GStreamer element that draws bounding boxes on video frames based on ROI metadata.
+///
+/// The EdgeImpulseOverlay element is designed to visualize regions of interest (ROIs)
+/// in video streams by drawing bounding boxes around them. It processes video frames
+/// in RGB format and draws boxes based on VideoRegionOfInterestMeta metadata
+/// attached to the video buffers.
+///
+/// # Features
+/// - Draws bounding boxes around regions specified by VideoRegionOfInterestMeta
+/// - Automatic color assignment per object class
+/// - Configurable stroke width and text properties
+/// - Supports RGB and NV12/NV21 video formats
+/// - In-place buffer modification for efficient processing
+/// - Safe bounds checking for all drawing operations
+///
+/// # Properties
+/// - `stroke-width`: Width of the bounding box lines in pixels (default: 2, minimum: 1)
+/// - `text-color`: Color of the text in RGB format (default: white 0xFFFFFF)
+/// - `text-font-size`: Size of the text font in pixels (default: 20)
+/// - `text-font`: Font family to use for text rendering (default: Sans)
+/// - `text-x`: X position for classification text (-1 for right-aligned)
+/// - `text-y`: Y position for classification text (-1 for bottom-aligned)
+/// - `show-labels`: Whether to draw labels on the video frames (default: true)
+///
+/// # Color Assignment
+/// The element automatically assigns distinct colors to different object classes.
+/// Each unique label (roi_type) gets assigned a color from a predefined palette,
+/// ensuring consistent coloring across frames for the same object class.
+///
+/// # Formats
+/// - Input: RGB, NV12, NV21
+/// - Output: Same as input (in-place modification)
+///
+/// # Metadata
+/// Reads VideoRegionOfInterestMeta from input buffers to determine where to draw boxes.
+/// Each ROI meta contains:
+/// - x, y: Top-left corner coordinates
+/// - width, height: Dimensions of the region
+/// - roi_type: Type identifier for the region
+/// - confidence: Detection confidence value (0.0 - 1.0)
+///
+/// # Example Pipeline
+/// ```text
+/// gst-launch-1.0 \
+///   videotestsrc ! \
+///   video/x-raw,format=RGB,width=384,height=384 ! \
+///   edgeimpulsevideoinfer ! \
+///   edgeimpulseoverlay stroke-width=3 ! \
+///   autovideosink
+/// ```
 #[derive(Default)]
 pub struct EdgeImpulseOverlay {
     settings: Mutex<Settings>,
@@ -772,7 +819,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             // Find the highest confidence classification
             if let Some((label, confidence)) = meta
                 .params()
-                .into_iter()
+                .iter()
                 .filter_map(|param| {
                     let label = param.get::<String>("label").ok()?;
                     let confidence = param.get::<f64>("confidence").ok()?;
@@ -828,7 +875,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 // Get label and confidence
                 let (label, confidence) = roi
                     .params()
-                    .into_iter()
                     .filter_map(|param| {
                         Some((
                             param.get::<String>("label").ok()?,

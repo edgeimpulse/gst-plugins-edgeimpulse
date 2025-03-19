@@ -197,6 +197,8 @@ use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
+use super::VideoClassificationMeta;
+
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
         "edgeimpulsevideoinfer",
@@ -589,6 +591,38 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     } else {
                         let elapsed = now.elapsed();
 
+                        // Parse the classification results
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
+                            if let Some(classification) =
+                                json.get("classification").and_then(|c| c.as_array())
+                            {
+                                // Create classification metadata
+                                let mut classification_meta = VideoClassificationMeta::add(outbuf);
+
+                                // Add each classification result
+                                for entry in classification {
+                                    if let (Some(label), Some(value)) = (
+                                        entry.get("label").and_then(|l| l.as_str()),
+                                        entry.get("value").and_then(|v| v.as_f64()),
+                                    ) {
+                                        let s = gst::Structure::builder("Classification")
+                                            .field("label", label)
+                                            .field("confidence", value)
+                                            .field("color", 0xFF0000FFu32)
+                                            .build();
+                                        classification_meta.add_param(s);
+                                    }
+                                }
+
+                                gst::debug!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "Successfully added classification metadata"
+                                );
+                            }
+                        }
+
+                        // Create and post inference message to the bus as well.
                         let s = crate::common::create_inference_message(
                             "video",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),

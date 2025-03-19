@@ -482,11 +482,26 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Run inference
             match model.classify(features, None) {
                 Ok(result) => {
+                    // Add debug logging for the raw result
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Raw inference result: {:?}",
+                        result.result
+                    );
+
                     // Convert result to JSON string
                     let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {
                         gst::warning!(CAT, obj = self.obj(), "Failed to serialize result: {}", e);
                         String::from("{}")
                     });
+
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Serialized result JSON: {}",
+                        result_json
+                    );
 
                     let now = std::time::Instant::now();
                     if is_object_detection {
@@ -593,18 +608,21 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
 
                         // Parse the classification results
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
-                            if let Some(classification) =
-                                json.get("classification").and_then(|c| c.as_array())
-                            {
+                            if let Some(classification) = json.get("classification").and_then(|c| c.as_object()) {
                                 // Create classification metadata
                                 let mut classification_meta = VideoClassificationMeta::add(outbuf);
 
                                 // Add each classification result
-                                for entry in classification {
-                                    if let (Some(label), Some(value)) = (
-                                        entry.get("label").and_then(|l| l.as_str()),
-                                        entry.get("value").and_then(|v| v.as_f64()),
-                                    ) {
+                                for (label, value) in classification {
+                                    if let Some(value) = value.as_f64() {
+                                        gst::debug!(
+                                            CAT,
+                                            obj = self.obj(),
+                                            "Adding classification result: {} = {:.2}",
+                                            label,
+                                            value
+                                        );
+
                                         let s = gst::Structure::builder("Classification")
                                             .field("label", label)
                                             .field("confidence", value)

@@ -772,231 +772,127 @@ impl EdgeImpulseOverlay {
 impl VideoFilterImpl for EdgeImpulseOverlay {
     fn transform_frame_ip(
         &self,
-        frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
+        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         gst::debug!(CAT, obj = self.obj(), "Processing frame");
+        let settings = self.settings.lock().unwrap();
 
-        // Get video dimensions and settings upfront to avoid holding locks during processing
-        let (width, height) = {
-            let video_info = self.video_info.lock().unwrap();
-            let info = video_info.as_ref().ok_or_else(|| {
-                gst::error!(CAT, obj = self.obj(), "Video info not available");
-                gst::FlowError::Error
-            })?;
-            (info.width() as i32, info.height() as i32)
-        };
-
-        let settings = self.settings.lock().unwrap().clone();
-
-        // Check for classification metadata
+        // Check for classification metadata first
         if let Some(meta) = frame.buffer().meta::<VideoClassificationMeta>() {
+            gst::debug!(CAT, obj = self.obj(), "Found classification metadata");
+
             // Find the highest confidence classification
             if let Some((label, confidence)) = meta
                 .params()
-                .iter()
+                .into_iter()
                 .filter_map(|param| {
-                    Some((
-                        param.get::<String>("label").ok()?,
-                        param.get::<f64>("confidence").ok()?,
-                    ))
+                    let label = param.get::<String>("label").ok()?;
+                    let confidence = param.get::<f64>("confidence").ok()?;
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Found classification result: {} ({:.1}%)",
+                        label,
+                        confidence * 100.0
+                    );
+                    Some((label, confidence))
                 })
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             {
-                // Draw the classification text
-                let text = format!("{} ({:.1}%)", label, confidence * 100.0);
-                let text_x = if settings.text_x >= 0 {
-                    settings.text_x
-                } else {
-                    width - 10 // Right-aligned
-                };
-                let text_y = if settings.text_y >= 0 {
-                    settings.text_y
-                } else {
-                    height - 10 // Bottom-aligned
-                };
-
-                // Create a temporary surface for text rendering
-                let mut surface =
-                    cairo::ImageSurface::create(cairo::Format::Rgb24, width as i32, height as i32)
-                        .map_err(|e| {
-                            gst::error!(
-                                CAT,
-                                obj = self.obj(),
-                                "Failed to create Cairo surface: {}",
-                                e
-                            );
-                            gst::FlowError::Error
-                        })?;
-
-                let context = cairo::Context::new(&surface).map_err(|e| {
-                    gst::error!(
-                        CAT,
-                        obj = self.obj(),
-                        "Failed to create Cairo context: {}",
-                        e
-                    );
-                    gst::FlowError::Error
-                })?;
-
-                // Create Pango context and layout
-                let pango_context = pango::Context::new();
-                let layout = pango::Layout::new(&pango_context);
-                layout.set_text(&text);
-                layout.set_font_description(Some(&pango::FontDescription::from_string(
-                    &settings.text_font,
-                )));
-                let font_size = settings.text_font_size as i32 * pango::SCALE;
-                let attr_list = pango::AttrList::new();
-                let size_attr = pango::AttrSize::new(font_size);
-                attr_list.insert(size_attr);
-                layout.set_attributes(Some(&attr_list));
-
-                let (text_width, text_height) = layout.pixel_size();
-                let text_width = text_width as i32;
-                let text_height = text_height as i32;
-
-                // Draw text background
-                context.save().map_err(|e| {
-                    gst::error!(CAT, "Cairo save failed: {}", e);
-                    gst::FlowError::Error
-                })?;
-                context.set_source_rgba(0.0, 0.0, 0.0, 0.5);
-                context.rectangle(
-                    text_x as f64 - 5.0,
-                    text_y as f64 - text_height as f64 - 5.0,
-                    text_width as f64 + 10.0,
-                    text_height as f64 + 10.0,
-                );
-                context.fill()
-                    .map_err(|e| {
-                        gst::error!(CAT, "Cairo fill failed: {}", e);
-                        gst::FlowError::Error
-                    })?;
-                context.restore()
-                    .map_err(|e| {
-                        gst::error!(CAT, "Cairo restore failed: {}", e);
-                        gst::FlowError::Error
-                    })?;
-
-                // Draw text
-                context.save().map_err(|e| {
-                    gst::error!(CAT, "Cairo save failed: {}", e);
-                    gst::FlowError::Error
-                })?;
-                context.set_source_rgba(
-                    ((settings.text_color >> 16) & 0xFF) as f64 / 255.0,
-                    ((settings.text_color >> 8) & 0xFF) as f64 / 255.0,
-                    (settings.text_color & 0xFF) as f64 / 255.0,
-                    1.0,
-                );
-                context.move_to(text_x as f64, text_y as f64 - text_height as f64);
-                show_layout(&context, &layout);
-                context.restore()
-                    .map_err(|e| {
-                        gst::error!(CAT, "Cairo restore failed: {}", e);
-                        gst::FlowError::Error
-                    })?;
-
-                // Copy the rendered text to the video frame
-                let stride = surface.stride() as usize;
-                let surface_data = match surface.data() {
-                    Ok(data) => data,
-                    Err(e) => {
-                        gst::error!(CAT, obj = self.obj(), "Failed to get surface data: {}", e);
-                        return Err(gst::FlowError::Error);
+                // Get or assign color for this label
+                let color = {
+                    let mut label_colors = self.label_colors.lock().unwrap();
+                    if !label_colors.contains_key(&label) {
+                        let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
+                        label_colors.insert(label.clone(), *next_color);
                     }
+                    *label_colors.get(&label).unwrap()
                 };
 
-                let comp_stride = frame.comp_stride(0) as usize;
-                let frame_data = match frame.plane_data_mut(0) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {}", e);
-                        return Err(gst::FlowError::Error);
+                // Format text with label and confidence
+                let text = format!("{} {:.1}%", label, confidence * 100.0);
+
+                // Position text in top-left corner with padding
+                let text_x = 10; // 10 pixels from left edge
+                let text_y = settings.text_font_size as i32 + 10; // text height + 10 pixels from top
+
+                if settings.show_labels {
+                    match self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                        Ok(_) => {
+                            gst::debug!(CAT, obj = self.obj(), "Successfully drew classification text");
+                        }
+                        Err(e) => {
+                            gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                            return Err(gst::FlowError::Error);
+                        }
                     }
-                };
-
-                // Copy only the region where we drew the text
-                let y_start = (text_y - text_height - 5).max(0) as usize;
-                let y_end = (text_y + 5).min(height as i32) as usize;
-                let x_start = (text_x - 5).max(0) as usize;
-                let x_end = (text_x + text_width + 5).min(width as i32) as usize;
-
-                for y in y_start..y_end {
-                    let src_offset = y * stride + x_start * 4;
-                    let dst_offset = y * comp_stride + x_start * 4;
-                    frame_data[dst_offset..dst_offset + (x_end - x_start) * 4].copy_from_slice(
-                        &surface_data[src_offset..src_offset + (x_end - x_start) * 4],
-                    );
                 }
+            } else {
+                gst::debug!(CAT, obj = self.obj(), "No valid classification results found in metadata");
             }
+        } else {
+            gst::debug!(CAT, obj = self.obj(), "No classification metadata found");
         }
 
-        // Process object detection ROIs
-        let roi_data: Vec<_> = frame
+        // Collect ROI data first
+        let rois: Vec<_> = frame
             .buffer()
             .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
-            .map(|meta| {
-                let rect = meta.rect();
-                let roi_type = meta.roi_type().to_string();
-                let confidence = meta
-                    .param("ObjectDetection")
-                    .and_then(|v| v.get::<f64>("confidence").ok())
-                    .unwrap_or(0.0) as f32;
-                (rect, roi_type, confidence)
+            .filter_map(|roi| {
+                // Access the raw metadata fields
+                let meta = unsafe { &*roi.as_ptr() };
+                let x = meta.x as i32;
+                let y = meta.y as i32;
+                let width = meta.w as i32;
+                let height = meta.h as i32;
+
+                // Get label and confidence
+                let (label, confidence) = roi
+                    .params()
+                    .into_iter()
+                    .filter_map(|param| {
+                        Some((
+                            param.get::<String>("label").ok()?,
+                            param.get::<f64>("confidence").ok()?,
+                        ))
+                    })
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())?;
+
+                Some((x, y, width, height, label, confidence))
             })
             .collect();
 
-        gst::debug!(CAT, obj = self.obj(), "Found {} regions", roi_data.len());
-
-        // Process object detection ROIs
-        for ((x, y, w, h), roi_type, confidence) in roi_data {
-            // Get or assign color for this label
+        // Now process the collected ROI data
+        for (x, y, width, height, label, confidence) in rois {
             let color = {
                 let mut label_colors = self.label_colors.lock().unwrap();
-                if !label_colors.contains_key(&roi_type) {
+                if !label_colors.contains_key(&label) {
                     let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                    label_colors.insert(roi_type.clone(), *next_color);
+                    label_colors.insert(label.clone(), *next_color);
                 }
-                *label_colors.get(&roi_type).unwrap()
+                *label_colors.get(&label).unwrap()
             };
 
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Drawing bbox at ({}, {}) size {}x{} type {:?} with color {:?}",
-                x,
-                y,
-                w,
-                h,
-                roi_type,
-                color
-            );
-
-            let params = BBoxParams {
-                x: x as i32,
-                y: y as i32,
-                width: w as i32,
-                height: h as i32,
-                roi_type: roi_type.clone(),
-                color,
-            };
-
-            if let Err(e) = self.draw_bbox(frame, &params) {
-                gst::error!(CAT, obj = self.obj(), "Failed to draw bbox: {}", e);
-                return Err(gst::FlowError::Error);
+            if settings.stroke_width > 0 {
+                if let Err(e) = self.draw_bbox(frame, &BBoxParams {
+                    x,
+                    y,
+                    width,
+                    height,
+                    roi_type: label.clone(),
+                    color,
+                }) {
+                    gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
+                    return Err(gst::FlowError::Error);
+                }
             }
 
-            // Format text with label and confidence
-            let text = format!("{} {:.1}%", roi_type, confidence * 100.0);
-
-            // Draw text if enabled
             if settings.show_labels {
-                // Position the text inside the box at the top-left corner with a small padding
-                let text_x = x as i32 + 2; // 2 pixels padding from left edge
-                let text_y = y as i32 + settings.text_font_size as i32 + 2; // text height + 2 pixels padding from top
+                let text = format!("{} {:.1}%", label, confidence * 100.0);
+                let text_x = x + 2; // 2 pixels padding from left edge of box
+                let text_y = y + settings.text_font_size as i32 + 2; // text height + 2 pixels padding from top
                 match self.draw_text(frame, &text, text_x, text_y, &settings, color) {
-                    Ok(_) => {}
+                    Ok(_) => (),
                     Err(e) => {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                         return Err(gst::FlowError::Error);
@@ -1006,7 +902,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
         }
 
         gst::debug!(CAT, obj = self.obj(), "Frame processing complete");
-
         Ok(gst::FlowSuccess::Ok)
     }
 

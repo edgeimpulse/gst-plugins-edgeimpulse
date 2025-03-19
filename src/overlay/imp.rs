@@ -10,8 +10,6 @@ use gstreamer_video::prelude::*;
 use gstreamer_video::subclass::prelude::*;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
-use pango::prelude::*;
-use pangocairo::prelude::*;
 use pangocairo::functions::*;
 use std::sync::Mutex;
 
@@ -333,15 +331,7 @@ impl BaseTransformImpl for EdgeImpulseOverlay {
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, obj = self.obj(), "transform_ip called");
-        let res = self.parent_transform_ip(buf);
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "transform_ip completed with result: {:?}",
-            res
-        );
-        res
+        self.parent_transform_ip(buf)
     }
 
     fn start(&self) -> Result<(), gst::ErrorMessage> {
@@ -703,7 +693,8 @@ impl EdgeImpulseOverlay {
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
 
             // Calculate perceived brightness of background color
-            let brightness = (0.299 * color.0 as f64 + 0.587 * color.1 as f64 + 0.114 * color.2 as f64) / 255.0;
+            let brightness =
+                (0.299 * color.0 as f64 + 0.587 * color.1 as f64 + 0.114 * color.2 as f64) / 255.0;
 
             // Use white text for dark backgrounds, black text for light backgrounds
             if brightness < 0.5 {
@@ -757,9 +748,9 @@ impl EdgeImpulseOverlay {
                 let dst_idx = dst_offset + x * 3;
 
                 if dst_idx + 2 < frame_data.len() && src_idx + 2 < surface_data.len() {
-                    frame_data[dst_idx] = surface_data[src_idx + 2];     // R
+                    frame_data[dst_idx] = surface_data[src_idx + 2]; // R
                     frame_data[dst_idx + 1] = surface_data[src_idx + 1]; // G
-                    frame_data[dst_idx + 2] = surface_data[src_idx];     // B
+                    frame_data[dst_idx + 2] = surface_data[src_idx]; // B
                 }
             }
         }
@@ -774,13 +765,10 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
         &self,
         frame: &mut VideoFrameRef<&mut gst::BufferRef>,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, obj = self.obj(), "Processing frame");
         let settings = self.settings.lock().unwrap();
 
         // Check for classification metadata first
         if let Some(meta) = frame.buffer().meta::<VideoClassificationMeta>() {
-            gst::debug!(CAT, obj = self.obj(), "Found classification metadata");
-
             // Find the highest confidence classification
             if let Some((label, confidence)) = meta
                 .params()
@@ -788,17 +776,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 .filter_map(|param| {
                     let label = param.get::<String>("label").ok()?;
                     let confidence = param.get::<f64>("confidence").ok()?;
-                    gst::debug!(
-                        CAT,
-                        obj = self.obj(),
-                        "Found classification result: {} ({:.1}%)",
-                        label,
-                        confidence * 100.0
-                    );
                     Some((label, confidence))
                 })
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Rendering classification: {} ({:.1}%)",
+                    label,
+                    confidence * 100.0
+                );
                 // Get or assign color for this label
                 let color = {
                     let mut label_colors = self.label_colors.lock().unwrap();
@@ -813,25 +801,16 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 let text = format!("{} {:.1}%", label, confidence * 100.0);
 
                 // Position text in top-left corner with padding
-                let text_x = 10; // 10 pixels from left edge
-                let text_y = settings.text_font_size as i32 + 10; // text height + 10 pixels from top
+                let text_x = 10;
+                let text_y = settings.text_font_size as i32 + 10;
 
                 if settings.show_labels {
-                    match self.draw_text(frame, &text, text_x, text_y, &settings, color) {
-                        Ok(_) => {
-                            gst::debug!(CAT, obj = self.obj(), "Successfully drew classification text");
-                        }
-                        Err(e) => {
-                            gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
-                            return Err(gst::FlowError::Error);
-                        }
+                    if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                        gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                        return Err(gst::FlowError::Error);
                     }
                 }
-            } else {
-                gst::debug!(CAT, obj = self.obj(), "No valid classification results found in metadata");
             }
-        } else {
-            gst::debug!(CAT, obj = self.obj(), "No classification metadata found");
         }
 
         // Collect ROI data first
@@ -862,8 +841,29 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             })
             .collect();
 
+        // For ROIs, after collecting them:
+        if !rois.is_empty() {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Rendering {} regions of interest",
+                rois.len()
+            );
+        }
+
         // Now process the collected ROI data
         for (x, y, width, height, label, confidence) in rois {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Rendering ROI: {} ({:.1}%) at ({}, {}) {}x{}",
+                label,
+                confidence * 100.0,
+                x,
+                y,
+                width,
+                height
+            );
             let color = {
                 let mut label_colors = self.label_colors.lock().unwrap();
                 if !label_colors.contains_key(&label) {
@@ -874,14 +874,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             };
 
             if settings.stroke_width > 0 {
-                if let Err(e) = self.draw_bbox(frame, &BBoxParams {
-                    x,
-                    y,
-                    width,
-                    height,
-                    roi_type: label.clone(),
-                    color,
-                }) {
+                if let Err(e) = self.draw_bbox(
+                    frame,
+                    &BBoxParams {
+                        x,
+                        y,
+                        width,
+                        height,
+                        roi_type: label.clone(),
+                        color,
+                    },
+                ) {
                     gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
                     return Err(gst::FlowError::Error);
                 }
@@ -901,7 +904,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             }
         }
 
-        gst::debug!(CAT, obj = self.obj(), "Frame processing complete");
         Ok(gst::FlowSuccess::Ok)
     }
 

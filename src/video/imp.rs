@@ -493,9 +493,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                             );
 
                                         // Add detection parameters
-                                        let s = gst::Structure::builder("ObjectDetection")
+                                        let s = gst::Structure::builder("detection")
+                                            .field("label", label)
                                             .field("confidence", value)
-                                            .field("color", 0xFF0000FFu32)
                                             .build();
                                         roi_meta.add_param(s);
                                     }

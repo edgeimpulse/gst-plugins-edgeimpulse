@@ -15,57 +15,6 @@ use std::sync::Mutex;
 
 use crate::video::VideoClassificationMeta;
 
-/// A GStreamer element that draws bounding boxes on video frames based on ROI metadata.
-///
-/// The EdgeImpulseOverlay element is designed to visualize regions of interest (ROIs)
-/// in video streams by drawing bounding boxes around them. It processes video frames
-/// in RGB format and draws boxes based on VideoRegionOfInterestMeta metadata
-/// attached to the video buffers.
-///
-/// # Features
-/// - Draws bounding boxes around regions specified by VideoRegionOfInterestMeta
-/// - Automatic color assignment per object class
-/// - Configurable stroke width and text properties
-/// - Supports RGB and NV12/NV21 video formats
-/// - In-place buffer modification for efficient processing
-/// - Safe bounds checking for all drawing operations
-///
-/// # Properties
-/// - `stroke-width`: Width of the bounding box lines in pixels (default: 2, minimum: 1)
-/// - `text-color`: Color of the text in RGB format (default: white 0xFFFFFF)
-/// - `text-font-size`: Size of the text font in pixels (default: 20)
-/// - `text-font`: Font family to use for text rendering (default: Sans)
-/// - `text-x`: X position for classification text (-1 for right-aligned)
-/// - `text-y`: Y position for classification text (-1 for bottom-aligned)
-/// - `show-labels`: Whether to draw labels on the video frames (default: true)
-///
-/// # Color Assignment
-/// The element automatically assigns distinct colors to different object classes.
-/// Each unique label (roi_type) gets assigned a color from a predefined palette,
-/// ensuring consistent coloring across frames for the same object class.
-///
-/// # Formats
-/// - Input: RGB, NV12, NV21
-/// - Output: Same as input (in-place modification)
-///
-/// # Metadata
-/// Reads VideoRegionOfInterestMeta from input buffers to determine where to draw boxes.
-/// Each ROI meta contains:
-/// - x, y: Top-left corner coordinates
-/// - width, height: Dimensions of the region
-/// - roi_type: Type identifier for the region
-/// - confidence: Detection confidence value (0.0 - 1.0)
-///
-/// # Example Pipeline
-/// ```text
-/// gst-launch-1.0 \
-///   videotestsrc ! \
-///   video/x-raw,format=RGB,width=384,height=384 ! \
-///   edgeimpulsevideoinfer ! \
-///   edgeimpulseoverlay stroke-width=3 ! \
-///   autovideosink
-/// ```
-// Static category for logging
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
         "edgeimpulseoverlay",
@@ -93,15 +42,14 @@ static COLORS: Lazy<Vec<(u8, u8, u8)>> = Lazy::new(|| {
     ]
 });
 
-// Settings for configuring the overlay appearance
 #[derive(Debug, Clone)]
 struct Settings {
     stroke_width: i32,
     text_color: u32,
     text_font_size: u32,
     text_font: String,
-    text_x: i32, // X position for classification text
-    text_y: i32, // Y position for classification text
+    text_x: i32,
+    text_y: i32,
     show_labels: bool,
 }
 
@@ -118,67 +66,17 @@ struct BBoxParams {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            stroke_width: 2,               // Default to 2 pixels
-            text_color: 0xFFFFFF,          // Default to white
-            text_font_size: 14,            // Default font size
-            text_font: "Sans".to_string(), // Default font
-            text_x: -1,                    // Default to right-aligned (-1 means right)
-            text_y: -1,                    // Default to bottom-aligned (-1 means bottom)
+            stroke_width: 2,
+            text_color: 0xFFFFFF,
+            text_font_size: 14,
+            text_font: "Sans".to_string(),
+            text_x: -1,
+            text_y: -1,
             show_labels: true,
         }
     }
 }
 
-/// A GStreamer element that draws bounding boxes on video frames based on ROI metadata.
-///
-/// The EdgeImpulseOverlay element is designed to visualize regions of interest (ROIs)
-/// in video streams by drawing bounding boxes around them. It processes video frames
-/// in RGB format and draws boxes based on VideoRegionOfInterestMeta metadata
-/// attached to the video buffers.
-///
-/// # Features
-/// - Draws bounding boxes around regions specified by VideoRegionOfInterestMeta
-/// - Automatic color assignment per object class
-/// - Configurable stroke width and text properties
-/// - Supports RGB and NV12/NV21 video formats
-/// - In-place buffer modification for efficient processing
-/// - Safe bounds checking for all drawing operations
-///
-/// # Properties
-/// - `stroke-width`: Width of the bounding box lines in pixels (default: 2, minimum: 1)
-/// - `text-color`: Color of the text in RGB format (default: white 0xFFFFFF)
-/// - `text-font-size`: Size of the text font in pixels (default: 20)
-/// - `text-font`: Font family to use for text rendering (default: Sans)
-/// - `text-x`: X position for classification text (-1 for right-aligned)
-/// - `text-y`: Y position for classification text (-1 for bottom-aligned)
-/// - `show-labels`: Whether to draw labels on the video frames (default: true)
-///
-/// # Color Assignment
-/// The element automatically assigns distinct colors to different object classes.
-/// Each unique label (roi_type) gets assigned a color from a predefined palette,
-/// ensuring consistent coloring across frames for the same object class.
-///
-/// # Formats
-/// - Input: RGB, NV12, NV21
-/// - Output: Same as input (in-place modification)
-///
-/// # Metadata
-/// Reads VideoRegionOfInterestMeta from input buffers to determine where to draw boxes.
-/// Each ROI meta contains:
-/// - x, y: Top-left corner coordinates
-/// - width, height: Dimensions of the region
-/// - roi_type: Type identifier for the region
-/// - confidence: Detection confidence value (0.0 - 1.0)
-///
-/// # Example Pipeline
-/// ```text
-/// gst-launch-1.0 \
-///   videotestsrc ! \
-///   video/x-raw,format=RGB,width=384,height=384 ! \
-///   edgeimpulsevideoinfer ! \
-///   edgeimpulseoverlay stroke-width=3 ! \
-///   autovideosink
-/// ```
 #[derive(Default)]
 pub struct EdgeImpulseOverlay {
     settings: Mutex<Settings>,
@@ -186,7 +84,6 @@ pub struct EdgeImpulseOverlay {
     label_colors: Mutex<std::collections::HashMap<String, (u8, u8, u8)>>,
 }
 
-// Implementation of GObject virtual methods
 #[glib::object_subclass]
 impl ObjectSubclass for EdgeImpulseOverlay {
     const NAME: &'static str = "EdgeImpulseOverlay";
@@ -194,7 +91,7 @@ impl ObjectSubclass for EdgeImpulseOverlay {
     type ParentType = gst_video::VideoFilter;
 }
 
-// Implementation of Object virtual methods
+// Implementation of GObject virtual methods
 impl ObjectImpl for EdgeImpulseOverlay {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
@@ -209,7 +106,7 @@ impl ObjectImpl for EdgeImpulseOverlay {
                 glib::ParamSpecUInt::builder("text-color")
                     .nick("Text Color")
                     .blurb("Color of the text in RGB format (default: white 0xFFFFFF)")
-                    .default_value(0xFFFFFF) // White
+                    .default_value(0xFFFFFF)
                     .build(),
                 glib::ParamSpecUInt::builder("text-font-size")
                     .nick("Text Font Size")
@@ -312,16 +209,10 @@ impl ObjectImpl for EdgeImpulseOverlay {
             _ => unimplemented!(),
         }
     }
-
-    fn constructed(&self) {
-        self.parent_constructed();
-    }
 }
 
-// Implementation of GstObject virtual methods
 impl GstObjectImpl for EdgeImpulseOverlay {}
 
-// Implementation of Element virtual methods
 impl ElementImpl for EdgeImpulseOverlay {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static ELEMENT_METADATA: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
@@ -370,7 +261,6 @@ impl ElementImpl for EdgeImpulseOverlay {
     }
 }
 
-// Implementation of BaseTransform virtual methods
 impl BaseTransformImpl for EdgeImpulseOverlay {
     const MODE: gst_base::subclass::BaseTransformMode =
         gst_base::subclass::BaseTransformMode::AlwaysInPlace;
@@ -401,6 +291,196 @@ impl BaseTransformImpl for EdgeImpulseOverlay {
     }
 }
 
+impl VideoFilterImpl for EdgeImpulseOverlay {
+    fn transform_frame_ip(
+        &self,
+        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        // Get all settings upfront and clone what we need
+        let settings = {
+            let settings = self.settings.lock().unwrap();
+            settings.clone()
+        };
+
+        // Debug log the frame info
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Processing frame: {}x{} format={:?}",
+            frame.width(),
+            frame.height(),
+            frame.format()
+        );
+
+        // First check for classification metadata
+        let classification_meta = frame.buffer().meta::<VideoClassificationMeta>();
+        if let Some(meta) = classification_meta {
+            // Get all parameters and find the one with highest confidence
+            let mut best_result: Option<(String, f64)> = None;
+            for param in meta.params() {
+                if param.name() != "Classification" {
+                    continue;
+                }
+
+                if let (Ok(label), Ok(confidence)) =
+                    (param.get::<String>("label"), param.get::<f64>("confidence"))
+                {
+                    match best_result {
+                        None => best_result = Some((label, confidence)),
+                        Some((_, prev_conf)) if confidence > prev_conf => {
+                            best_result = Some((label, confidence))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // If we found a classification result, render it
+            if let Some((label, confidence)) = best_result {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Rendering classification: {} ({:.1}%)",
+                    label,
+                    confidence * 100.0
+                );
+
+                // Draw classification text
+                let text = format!("{} {:.1}%", label, confidence * 100.0);
+                let text_x = if settings.text_x < 0 {
+                    10
+                } else {
+                    settings.text_x
+                };
+                let text_y = if settings.text_y < 0 {
+                    frame.height() as i32 - settings.text_font_size as i32 - 10
+                } else {
+                    settings.text_y
+                };
+
+                // Get or assign color for this label
+                let color = {
+                    let mut label_colors = self.label_colors.lock().unwrap();
+                    if !label_colors.contains_key(&label as &str) {
+                        let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
+                        label_colors.insert(label.clone(), *next_color);
+                    }
+                    *label_colors.get(&label as &str).unwrap()
+                };
+
+                if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                    gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                    return Err(gst::FlowError::Error);
+                }
+            }
+        }
+
+        // Then check for ROI metadata (object detection)
+        let rois: Vec<_> = frame
+            .buffer()
+            .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
+            .filter_map(|roi| {
+                let meta = unsafe { &*roi.as_ptr() };
+                let x = meta.x as i32;
+                let y = meta.y as i32;
+                let width = meta.w as i32;
+                let height = meta.h as i32;
+
+                // Get label and confidence from parameters
+                let params_result = roi.params().find_map(|param| {
+                    if param.name() != "detection" {
+                        return None;
+                    }
+
+                    let label = param.get::<String>("label").ok()?;
+                    let confidence = param.get::<f64>("confidence").ok()?;
+                    Some((label, confidence))
+                });
+
+                params_result.map(|(label, confidence)| (x, y, width, height, label, confidence))
+            })
+            .collect();
+
+        if !rois.is_empty() {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Rendering {} regions of interest",
+                rois.len()
+            );
+
+            // Process each ROI
+            for (x, y, width, height, label, confidence) in rois {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Rendering ROI: {} ({:.1}%) at ({}, {}) {}x{}",
+                    label,
+                    confidence * 100.0,
+                    x,
+                    y,
+                    width,
+                    height
+                );
+
+                // Get or assign color for this label
+                let color = {
+                    let mut label_colors = self.label_colors.lock().unwrap();
+                    if !label_colors.contains_key(&label) {
+                        let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
+                        label_colors.insert(label.clone(), *next_color);
+                    }
+                    *label_colors.get(&label).unwrap()
+                };
+
+                // Draw bounding box if stroke width > 0
+                if settings.stroke_width > 0 {
+                    let bbox_params = BBoxParams {
+                        x,
+                        y,
+                        width,
+                        height,
+                        roi_type: label.clone(),
+                        color,
+                    };
+
+                    if let Err(e) = self.draw_bbox(frame, &bbox_params) {
+                        gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
+                        return Err(gst::FlowError::Error);
+                    }
+                }
+
+                // Draw label if enabled
+                if settings.show_labels {
+                    let text = format!("{} {:.1}%", label, confidence * 100.0);
+                    let text_x = x + 2;
+                    let text_y = y + settings.text_font_size as i32 + 2;
+
+                    if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                        gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                        return Err(gst::FlowError::Error);
+                    }
+                }
+            }
+        }
+
+        Ok(gst::FlowSuccess::Ok)
+    }
+
+    fn set_info(
+        &self,
+        _incaps: &gst::Caps,
+        in_info: &gst_video::VideoInfo,
+        _outcaps: &gst::Caps,
+        _out_info: &gst_video::VideoInfo,
+    ) -> Result<(), gst::LoggableError> {
+        gst::debug!(CAT, obj = self.obj(), "Setting info");
+        let mut video_info = self.video_info.lock().unwrap();
+        *video_info = Some(in_info.clone());
+        Ok(())
+    }
+}
+
 // Implementation of element specific methods
 impl EdgeImpulseOverlay {
     fn draw_bbox(
@@ -408,14 +488,25 @@ impl EdgeImpulseOverlay {
         frame: &mut VideoFrameRef<&mut gst::BufferRef>,
         params: &BBoxParams,
     ) -> Result<(), gst::LoggableError> {
-        let format;
-        {
+        // Get all video info upfront
+        let (format, stride, width, height) = {
             let video_info = self.video_info.lock().unwrap();
             let info = video_info
                 .as_ref()
                 .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
-            format = info.format();
-        }
+            (
+                info.format(),
+                info.stride()[0],
+                info.width() as i32,
+                info.height() as i32,
+            )
+        };
+
+        // Get settings upfront
+        let stroke_width = {
+            let settings = self.settings.lock().unwrap();
+            std::cmp::max(1, settings.stroke_width)
+        };
 
         gst::debug!(
             CAT,
@@ -425,7 +516,6 @@ impl EdgeImpulseOverlay {
             format
         );
 
-        let settings = self.settings.lock().unwrap();
         match format {
             VideoFormat::Rgb => {
                 gst::debug!(
@@ -434,7 +524,7 @@ impl EdgeImpulseOverlay {
                     "Using RGB drawing for {}",
                     params.roi_type
                 );
-                self.draw_bbox_rgb(frame, params, &settings)
+                self.draw_bbox_rgb(frame, params, stroke_width, stride, width, height)
             }
             VideoFormat::Nv12 | VideoFormat::Nv21 => {
                 gst::debug!(
@@ -443,7 +533,7 @@ impl EdgeImpulseOverlay {
                     "Using NV12/21 drawing for {}",
                     params.roi_type
                 );
-                self.draw_bbox_nv12(frame, params, &settings)
+                self.draw_bbox_nv12(frame, params, stroke_width, stride, height)
             }
             _ => {
                 gst::warning!(CAT, obj = self.obj(), "Unsupported format: {:?}", format);
@@ -456,25 +546,11 @@ impl EdgeImpulseOverlay {
         &self,
         frame: &mut VideoFrameRef<&mut gst::BufferRef>,
         params: &BBoxParams,
-        settings: &Settings,
+        stroke_width: i32,
+        stride: i32,
+        width: i32,
+        height: i32,
     ) -> Result<(), gst::LoggableError> {
-        // Get the info we need first, then release the mutex
-        let stride;
-        let width;
-        let height;
-        {
-            let info = self.video_info.lock().unwrap();
-            let info = info
-                .as_ref()
-                .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
-            stride = info.stride()[0];
-            width = info.width() as i32;
-            height = info.height() as i32;
-        }
-
-        // Ensure stroke width is at least 1
-        let stroke_width = std::cmp::max(1, settings.stroke_width);
-
         gst::debug!(
             CAT,
             obj = self.obj(),
@@ -484,29 +560,9 @@ impl EdgeImpulseOverlay {
             height,
             frame.plane_data(0).unwrap().len()
         );
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "Drawing bbox at ({}, {}) with size {}x{} and stroke_width={}",
-            params.x,
-            params.y,
-            params.width,
-            params.height,
-            stroke_width
-        );
 
         let data = frame.plane_data_mut(0).unwrap();
-
         let (r, g, b) = params.color;
-
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "Using RGB color: ({}, {}, {})",
-            r,
-            g,
-            b
-        );
 
         let mut pixels_drawn = 0;
 
@@ -545,13 +601,6 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "Completed horizontal lines ({} pixels), starting vertical",
-            pixels_drawn
-        );
-
         // Draw vertical lines with specified stroke width
         for j in params.y..params.y + params.height {
             if j < 0 || j >= height {
@@ -587,13 +636,6 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "Completed RGB bbox drawing: {} total pixels drawn",
-            pixels_drawn
-        );
-
         if pixels_drawn == 0 {
             gst::warning!(
                 CAT,
@@ -610,14 +652,10 @@ impl EdgeImpulseOverlay {
         &self,
         frame: &mut VideoFrameRef<&mut gst::BufferRef>,
         params: &BBoxParams,
-        settings: &Settings,
+        stroke_width: i32,
+        stride: i32,
+        height: i32,
     ) -> Result<(), gst::LoggableError> {
-        let info = self.video_info.lock().unwrap();
-        let info = info.as_ref().unwrap();
-
-        // Draw rectangle for bounding box
-        // For now just draw on Y plane for NV12/NV21
-        let y_stride = info.stride()[0];
         let y_data = frame.plane_data_mut(0).unwrap();
 
         // Convert RGB color to Y (luminance)
@@ -630,20 +668,18 @@ impl EdgeImpulseOverlay {
         // Draw horizontal lines with specified stroke width
         for i in params.x..params.x + params.width {
             // Top lines
-            for s in 0..settings.stroke_width {
-                if (params.y + s) >= 0 && (params.y + s) < info.height() as i32 {
-                    let idx = ((params.y + s) * y_stride + i) as usize;
+            for s in 0..stroke_width {
+                if (params.y + s) >= 0 && (params.y + s) < height {
+                    let idx = ((params.y + s) * stride + i) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
                 }
             }
             // Bottom lines
-            for s in 0..settings.stroke_width {
-                if (params.y + params.height - s) >= 0
-                    && (params.y + params.height - s) < info.height() as i32
-                {
-                    let idx = ((params.y + params.height - s) * y_stride + i) as usize;
+            for s in 0..stroke_width {
+                if (params.y + params.height - s) >= 0 && (params.y + params.height - s) < height {
+                    let idx = ((params.y + params.height - s) * stride + i) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
@@ -654,18 +690,18 @@ impl EdgeImpulseOverlay {
         // Draw vertical lines with specified stroke width
         for j in params.y..params.y + params.height {
             // Left lines
-            for s in 0..settings.stroke_width {
-                if j >= 0 && j < info.height() as i32 {
-                    let idx = (j * y_stride + params.x + s) as usize;
+            for s in 0..stroke_width {
+                if j >= 0 && j < height {
+                    let idx = (j * stride + params.x + s) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
                 }
             }
             // Right lines
-            for s in 0..settings.stroke_width {
-                if j >= 0 && j < info.height() as i32 {
-                    let idx = (j * y_stride + params.x + params.width - s) as usize;
+            for s in 0..stroke_width {
+                if j >= 0 && j < height {
+                    let idx = (j * stride + params.x + params.width - s) as usize;
                     if idx < y_data.len() {
                         y_data[idx] = y_value;
                     }
@@ -685,6 +721,7 @@ impl EdgeImpulseOverlay {
         settings: &Settings,
         color: (u8, u8, u8),
     ) -> Result<(), gst::LoggableError> {
+        // Get all video info upfront
         let (width, height, stride) = {
             let video_info = self.video_info.lock().unwrap();
             let info = video_info
@@ -722,7 +759,7 @@ impl EdgeImpulseOverlay {
                 color.0 as f64 / 255.0,
                 color.1 as f64 / 255.0,
                 color.2 as f64 / 255.0,
-                0.7, // 70% opacity for better readability
+                0.7,
             );
             cr.rectangle(
                 x as f64 - 5.0,
@@ -802,167 +839,6 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        Ok(())
-    }
-}
-
-// Implementation of VideoFilter virtual methods
-impl VideoFilterImpl for EdgeImpulseOverlay {
-    fn transform_frame_ip(
-        &self,
-        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
-    ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let settings = self.settings.lock().unwrap();
-
-        // Check for classification metadata first
-        if let Some(meta) = frame.buffer().meta::<VideoClassificationMeta>() {
-            // Find the highest confidence classification
-            if let Some((label, confidence)) = meta
-                .params()
-                .iter()
-                .filter_map(|param| {
-                    let label = param.get::<String>("label").ok()?;
-                    let confidence = param.get::<f64>("confidence").ok()?;
-                    Some((label, confidence))
-                })
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            {
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Rendering classification: {} ({:.1}%)",
-                    label,
-                    confidence * 100.0
-                );
-                // Get or assign color for this label
-                let color = {
-                    let mut label_colors = self.label_colors.lock().unwrap();
-                    if !label_colors.contains_key(&label) {
-                        let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                        label_colors.insert(label.clone(), *next_color);
-                    }
-                    *label_colors.get(&label).unwrap()
-                };
-
-                // Format text with label and confidence
-                let text = format!("{} {:.1}%", label, confidence * 100.0);
-
-                // Position text in top-left corner with padding
-                let text_x = 10;
-                let text_y = settings.text_font_size as i32 + 10;
-
-                if settings.show_labels {
-                    if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
-                        gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
-                        return Err(gst::FlowError::Error);
-                    }
-                }
-            }
-        }
-
-        // Collect ROI data first
-        let rois: Vec<_> = frame
-            .buffer()
-            .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
-            .filter_map(|roi| {
-                // Access the raw metadata fields
-                let meta = unsafe { &*roi.as_ptr() };
-                let x = meta.x as i32;
-                let y = meta.y as i32;
-                let width = meta.w as i32;
-                let height = meta.h as i32;
-
-                // Get label and confidence
-                let (label, confidence) = roi
-                    .params()
-                    .filter_map(|param| {
-                        Some((
-                            param.get::<String>("label").ok()?,
-                            param.get::<f64>("confidence").ok()?,
-                        ))
-                    })
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())?;
-
-                Some((x, y, width, height, label, confidence))
-            })
-            .collect();
-
-        // For ROIs, after collecting them:
-        if !rois.is_empty() {
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Rendering {} regions of interest",
-                rois.len()
-            );
-        }
-
-        // Now process the collected ROI data
-        for (x, y, width, height, label, confidence) in rois {
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Rendering ROI: {} ({:.1}%) at ({}, {}) {}x{}",
-                label,
-                confidence * 100.0,
-                x,
-                y,
-                width,
-                height
-            );
-            let color = {
-                let mut label_colors = self.label_colors.lock().unwrap();
-                if !label_colors.contains_key(&label) {
-                    let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                    label_colors.insert(label.clone(), *next_color);
-                }
-                *label_colors.get(&label).unwrap()
-            };
-
-            if settings.stroke_width > 0 {
-                if let Err(e) = self.draw_bbox(
-                    frame,
-                    &BBoxParams {
-                        x,
-                        y,
-                        width,
-                        height,
-                        roi_type: label.clone(),
-                        color,
-                    },
-                ) {
-                    gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
-                    return Err(gst::FlowError::Error);
-                }
-            }
-
-            if settings.show_labels {
-                let text = format!("{} {:.1}%", label, confidence * 100.0);
-                let text_x = x + 2; // 2 pixels padding from left edge of box
-                let text_y = y + settings.text_font_size as i32 + 2; // text height + 2 pixels padding from top
-                match self.draw_text(frame, &text, text_x, text_y, &settings, color) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
-                        return Err(gst::FlowError::Error);
-                    }
-                }
-            }
-        }
-
-        Ok(gst::FlowSuccess::Ok)
-    }
-
-    fn set_info(
-        &self,
-        _incaps: &gst::Caps,
-        in_info: &gst_video::VideoInfo,
-        _outcaps: &gst::Caps,
-        _out_info: &gst_video::VideoInfo,
-    ) -> Result<(), gst::LoggableError> {
-        gst::debug!(CAT, obj = self.obj(), "Setting info");
-        let mut video_info = self.video_info.lock().unwrap();
-        *video_info = Some(in_info.clone());
         Ok(())
     }
 }

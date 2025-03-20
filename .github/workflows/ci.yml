@@ -52,7 +52,7 @@ jobs:
         components: rustfmt
 
     - name: Check formatting
-      run: cargo fmt --edition 2021 -- --check
+      run: cargo fmt -- --check
 
     - name: Build
       run: cargo build --verbose

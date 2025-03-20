@@ -393,7 +393,7 @@ dependencies = [
 [[package]]
 name = "edge_impulse_runner"
 version = "0.1.0"
-source = "git+ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git#77271c59ccc6b6393b8ac016f8e80d9c2d35f186"
+source = "git+ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git#9969d1c7973076e656026080aa852d31f2374e83"
 dependencies = [
  "hex",
  "hmac",

@@ -450,7 +450,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             };
 
             // Run inference
-            match model.classify(features, None) {
+            match model.infer(features, None) {
                 Ok(result) => {
                     // Convert result to JSON string
                     let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {

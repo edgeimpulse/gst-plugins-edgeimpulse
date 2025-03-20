@@ -284,7 +284,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                 );
 
                 // Run inference
-                match model.classify(features, None) {
+                match model.infer(features, None) {
                     Ok(result) => {
                         let elapsed = now.elapsed();
 

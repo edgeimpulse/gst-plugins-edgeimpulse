@@ -197,6 +197,8 @@ use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
+use super::VideoClassificationMeta;
+
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
         "edgeimpulsevideoinfer",
@@ -349,8 +351,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         inbuf: &gst::Buffer,
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, imp = self, "Transform called!");
-
         // Map the input buffer for reading
         let in_map = inbuf.map_readable().map_err(|_| {
             gst::error!(CAT, imp = self, "Failed to map input buffer readable");
@@ -393,16 +393,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let is_object_detection = params.model_type == "constrained_object_detection"
                 || params.model_type == "object_detection";
 
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Processing frame for {} model with dimensions {}x{} and {} channels",
-                params.model_type,
-                width,
-                height,
-                channels
-            );
-
             // Extract frame data for inference
             let in_frame = match VideoFrameRef::from_buffer_ref_readable(
                 inbuf.as_ref(),
@@ -410,10 +400,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     .build()
                     .unwrap(),
             ) {
-                Ok(frame) => {
-                    gst::debug!(CAT, obj = self.obj(), "Successfully mapped input buffer");
-                    frame
-                }
+                Ok(frame) => frame,
                 Err(err) => {
                     gst::error!(
                         CAT,
@@ -427,15 +414,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
 
             // Get the raw frame data
             let frame_data = match in_frame.plane_data(0) {
-                Ok(data) => {
-                    gst::debug!(
-                        CAT,
-                        obj = self.obj(),
-                        "Successfully got frame data of size {}",
-                        data.len()
-                    );
-                    data
-                }
+                Ok(data) => data,
                 Err(err) => {
                     gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {:?}", err);
                     return Err(gst::FlowError::Error);
@@ -470,15 +449,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 features
             };
 
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Running inference with {} features",
-                features.len()
-            );
-
             // Run inference
-            match model.classify(features, None) {
+            match model.infer(features, None) {
                 Ok(result) => {
                     // Convert result to JSON string
                     let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {
@@ -486,31 +458,17 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         String::from("{}")
                     });
 
+                    gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
+
                     let now = std::time::Instant::now();
                     if is_object_detection {
                         // Parse the detection results
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
-                            gst::debug!(CAT, obj = self.obj(), "Parsed JSON result: {:?}", json);
-
                             if let Some(boxes) =
                                 json.get("bounding_boxes").and_then(|b| b.as_array())
                             {
-                                gst::debug!(
-                                    CAT,
-                                    obj = self.obj(),
-                                    "Processing {} detections",
-                                    boxes.len()
-                                );
-
                                 // Create detection metadata
                                 for bbox in boxes {
-                                    gst::debug!(
-                                        CAT,
-                                        obj = self.obj(),
-                                        "Processing bbox: {:?}",
-                                        bbox
-                                    );
-
                                     if let (
                                         Some(label),
                                         Some(value),
@@ -526,13 +484,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         bbox.get("width").and_then(|v| v.as_i64()),
                                         bbox.get("height").and_then(|v| v.as_i64()),
                                     ) {
-                                        gst::debug!(
-                                            CAT,
-                                            obj = self.obj(),
-                                            "Creating ROI metadata for {} at ({}, {}, {}, {}) with confidence {}",
-                                            label, x, y, w, h, value
-                                        );
-
                                         // Create ROI metadata
                                         let mut roi_meta =
                                             gst_video::VideoRegionOfInterestMeta::add(
@@ -542,53 +493,49 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                             );
 
                                         // Add detection parameters
-                                        let s = gst::Structure::builder("ObjectDetection")
+                                        let s = gst::Structure::builder("detection")
+                                            .field("label", label)
+                                            .field("confidence", value)
+                                            .build();
+                                        roi_meta.add_param(s);
+                                    }
+                                }
+                            }
+                        }
+
+                        let elapsed = now.elapsed();
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "object-detection",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
+                    } else {
+                        // Parse the classification results
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
+                            if let Some(classification) =
+                                json.get("classification").and_then(|c| c.as_object())
+                            {
+                                // Create classification metadata
+                                let mut classification_meta = VideoClassificationMeta::add(outbuf);
+
+                                // Add each classification result
+                                for (label, value) in classification {
+                                    if let Some(value) = value.as_f64() {
+                                        let s = gst::Structure::builder("Classification")
+                                            .field("label", label)
                                             .field("confidence", value)
                                             .field("color", 0xFF0000FFu32)
                                             .build();
-                                        roi_meta.add_param(s);
-
-                                        gst::debug!(
-                                            CAT,
-                                            obj = self.obj(),
-                                            "Successfully added ROI metadata"
-                                        );
-                                    } else {
-                                        gst::warning!(
-                                            CAT,
-                                            obj = self.obj(),
-                                            "Invalid bbox format: {:?}",
-                                            bbox
-                                        );
+                                        classification_meta.add_param(s);
                                     }
                                 }
-                            } else {
-                                gst::warning!(
-                                    CAT,
-                                    obj = self.obj(),
-                                    "No bounding_boxes array in result"
-                                );
                             }
-
-                            let elapsed = now.elapsed();
-
-                            // Create and post inference message to the bus as well.
-                            let s = crate::common::create_inference_message(
-                                "video",
-                                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                                "object-detection",
-                                result_json,
-                                elapsed.as_millis() as u32,
-                            );
-
-                            // Post the message
-                            let _ = self.obj().post_message(gst::message::Element::new(s));
-                        } else {
-                            gst::warning!(CAT, obj = self.obj(), "Failed to parse JSON result");
                         }
-                    } else {
-                        let elapsed = now.elapsed();
 
+                        let elapsed = now.elapsed();
                         let s = crate::common::create_inference_message(
                             "video",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
@@ -596,21 +543,16 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             result_json,
                             elapsed.as_millis() as u32,
                         );
-
-                        // Post the message
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
                 }
                 Err(e) => {
                     gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
-
                     let s = crate::common::create_error_message(
                         "video",
                         inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
                         e.to_string(),
                     );
-
-                    // Post the message
                     let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
             }
@@ -618,7 +560,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
         }
 
-        gst::debug!(CAT, imp = self, "Transform completed successfully");
         Ok(gst::FlowSuccess::Ok)
     }
 

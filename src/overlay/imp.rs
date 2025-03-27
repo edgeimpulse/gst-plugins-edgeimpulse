@@ -730,51 +730,59 @@ impl EdgeImpulseOverlay {
             (info.width() as i32, info.height() as i32, info.stride()[0])
         };
 
-        // Create a temporary surface with proper stride alignment
-        let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, width, height)
-            .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo surface: {}", e))?;
+        // Create a temporary surface at 2x resolution for better text quality
+        let scale = 2.0; // Use f64 for Cairo scaling
+        let surface_width = (width as f64 * scale) as i32;
+        let surface_height = (height as f64 * scale) as i32;
 
-        // Create Cairo context and get text dimensions
-        let (text_width, text_height) = {
-            let cr = cairo::Context::new(&surface)
-                .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo context: {}", e))?;
-            let layout = create_layout(&cr);
-            let mut font_desc = pango::FontDescription::new();
-            font_desc.set_family(&settings.text_font);
-            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
-            layout.set_font_description(Some(&font_desc));
-            layout.set_text(text);
-            layout.pixel_size()
-        };
+        let mut surface =
+            cairo::ImageSurface::create(cairo::Format::Rgb24, surface_width, surface_height)
+                .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo surface: {}", e))?;
+
+        // Variables for copy region and dimensions
+        let (copy_y_start, copy_y_end, copy_x_start, copy_x_end);
+        let (text_width, text_height, total_width, total_height);
 
         // Draw text and background
         {
             let cr = cairo::Context::new(&surface)
                 .map_err(|e| gst::loggable_error!(CAT, "Failed to create Cairo context: {}", e))?;
 
-            // Draw text background using the bounding box color with some transparency
-            cr.save()
-                .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
+            // Scale the context for high resolution rendering
+            cr.scale(scale, scale);
+
+            // Create and configure text layout
+            let layout = create_layout(&cr);
+            let mut font_desc = pango::FontDescription::new();
+            font_desc.set_family(&settings.text_font);
+            // Scale up the font size for high resolution
+            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
+            if height < 200 {
+                font_desc.set_weight(pango::Weight::Bold);
+            }
+            layout.set_font_description(Some(&font_desc));
+            layout.set_text(text);
+
+            // Get the exact text dimensions including any descent
+            let (w, h) = layout.pixel_size();
+            text_width = w as f64;
+            text_height = h as f64;
+
+            // Add padding around text for better visibility
+            let bg_padding = 4.0;
+            total_width = text_width + (bg_padding * 2.0);
+            total_height = text_height + (bg_padding * 2.0);
+
+            // Draw background rectangle at high resolution
+            cr.rectangle(x as f64, y as f64, total_width, total_height);
             cr.set_source_rgba(
                 color.0 as f64 / 255.0,
                 color.1 as f64 / 255.0,
                 color.2 as f64 / 255.0,
                 0.7,
             );
-            cr.rectangle(
-                x as f64 - 5.0,
-                y as f64 - text_height as f64 - 5.0,
-                text_width as f64 + 10.0,
-                text_height as f64 + 10.0,
-            );
             cr.fill()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo fill failed: {}", e))?;
-            cr.restore()
-                .map_err(|e| gst::loggable_error!(CAT, "Cairo restore failed: {}", e))?;
-
-            // Draw text in white or black depending on background color brightness
-            cr.save()
-                .map_err(|e| gst::loggable_error!(CAT, "Cairo save failed: {}", e))?;
 
             // Calculate perceived brightness of background color
             let brightness =
@@ -787,30 +795,22 @@ impl EdgeImpulseOverlay {
                 cr.set_source_rgb(0.0, 0.0, 0.0); // Black text
             }
 
-            cr.move_to(x as f64, y as f64 - text_height as f64);
-
-            let layout = create_layout(&cr);
-            let mut font_desc = pango::FontDescription::new();
-            font_desc.set_family(&settings.text_font);
-            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
-            layout.set_font_description(Some(&font_desc));
-            layout.set_text(text);
-
+            // Position text inside the background box with padding
+            cr.move_to(x as f64 + bg_padding, y as f64 + bg_padding);
             show_layout(&cr, &layout);
-            cr.restore()
-                .map_err(|e| gst::loggable_error!(CAT, "Cairo restore failed: {}", e))?;
+
+            // Calculate the region to copy, ensuring we stay within bounds
+            copy_y_start = y.max(0) as usize;
+            copy_y_end = ((y as f64 + total_height) as i32).min(height) as usize;
+            copy_x_start = x.max(0) as usize;
+            copy_x_end = ((x as f64 + total_width) as i32).min(width) as usize;
         }
+
+        // Get stride before dropping context
+        let surface_stride = surface.stride() as usize;
 
         // Ensure surface is finished before accessing data
         surface.flush();
-
-        // Calculate bounds for the region we need to copy
-        let y_start = (y - text_height - 5).max(0) as usize;
-        let y_end = (y + 5).min(height) as usize;
-        let x_start = (x - 5).max(0) as usize;
-        let x_end = (x + text_width + 5).min(width) as usize;
-
-        let surface_stride = surface.stride() as usize;
 
         // Get surface data after all drawing is complete
         let surface_data = surface
@@ -822,15 +822,17 @@ impl EdgeImpulseOverlay {
             .plane_data_mut(0)
             .map_err(|_| gst::loggable_error!(CAT, "Failed to get frame data"))?;
 
-        // Copy the rendered text to the video frame with bounds checking
-        for y in y_start..y_end {
-            let src_offset = y * surface_stride + x_start * 4;
-            let dst_offset = y * stride as usize + x_start * 3;
+        // Copy only the affected region from surface to frame, with downscaling
+        for y in copy_y_start..copy_y_end {
+            let src_y = (y as f64 * scale) as usize;
+            let src_offset = src_y * surface_stride + (copy_x_start as f64 * scale) as usize * 4;
+            let dst_offset = y * stride as usize + copy_x_start * 3;
 
-            for x in 0..(x_end - x_start) {
-                let src_idx = src_offset + x * 4;
+            for x in 0..(copy_x_end - copy_x_start) {
+                let src_idx = src_offset + (x as f64 * scale) as usize * 4;
                 let dst_idx = dst_offset + x * 3;
 
+                // Ensure we don't exceed buffer boundaries
                 if dst_idx + 2 < frame_data.len() && src_idx + 2 < surface_data.len() {
                     frame_data[dst_idx] = surface_data[src_idx + 2]; // R
                     frame_data[dst_idx + 1] = surface_data[src_idx + 1]; // G

@@ -391,9 +391,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "edge_impulse_runner"
-version = "0.1.0"
-source = "git+ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git#9969d1c7973076e656026080aa852d31f2374e83"
+name = "edge-impulse-runner"
+version = "1.0.0"
+source = "git+ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git#fc7db77136c3532785d6c60613c394f67a67f902"
 dependencies = [
  "hex",
  "hmac",
@@ -711,7 +711,7 @@ dependencies = [
  "cairo-rs",
  "clap",
  "cocoa",
- "edge_impulse_runner",
+ "edge-impulse-runner",
  "glib",
  "gst-plugin-version-helper",
  "gstreamer",

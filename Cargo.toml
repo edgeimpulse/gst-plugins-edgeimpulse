@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cairo-rs = "0.20.7"
-edge_impulse_runner = { git = "ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git" }
+edge-impulse-runner = { git = "ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git" }
 glib = "0.20.7"
 gstreamer = "0.23.4"
 gstreamer-audio = "0.23.4"

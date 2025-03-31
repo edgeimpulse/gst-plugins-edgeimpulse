@@ -8,6 +8,8 @@ RUN dpkg --add-architecture arm64 && \
     g++-aarch64-linux-gnu \
     libgstreamer1.0-dev:arm64 \
     libgstreamer-plugins-base1.0-dev:arm64 \
+    libpango1.0-dev:arm64 \
+    libcairo2-dev:arm64 \
     build-essential \
     pkg-config
 

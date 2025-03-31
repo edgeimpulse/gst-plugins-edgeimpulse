@@ -76,7 +76,7 @@ mod imp {
     pub(super) fn video_classification_meta_api_get_type() -> glib::Type {
         static TYPE: Lazy<glib::Type> = Lazy::new(|| unsafe {
             let t = from_glib(gst::ffi::gst_meta_api_type_register(
-                b"VideoClassificationMetaAPI\0".as_ptr() as *const _,
+                c"VideoClassificationMetaAPI".as_ptr() as *const _,
                 // No tags as our meta is just parameters
                 [ptr::null::<std::os::raw::c_char>()].as_ptr() as *mut *const _,
             ));
@@ -141,7 +141,7 @@ mod imp {
             MetaInfo(
                 ptr::NonNull::new(gst::ffi::gst_meta_register(
                     video_classification_meta_api_get_type().into_glib(),
-                    b"VideoClassificationMeta\0".as_ptr() as *const _,
+                    c"VideoClassificationMeta".as_ptr() as *const _,
                     mem::size_of::<VideoClassificationMeta>(),
                     Some(video_classification_meta_init),
                     Some(video_classification_meta_free),

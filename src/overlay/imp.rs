@@ -454,7 +454,8 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 if settings.show_labels {
                     let text = format!("{} {:.1}%", label, confidence * 100.0);
                     let text_x = x + 2;
-                    let text_y = y + settings.text_font_size as i32 + 2;
+                    // Position the text just slightly below the top of the bounding box
+                    let text_y = y + 2;
 
                     if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);

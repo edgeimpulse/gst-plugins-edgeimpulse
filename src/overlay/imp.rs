@@ -13,7 +13,7 @@ use once_cell::sync::Lazy;
 use pangocairo::functions::*;
 use std::sync::Mutex;
 
-use crate::video::VideoClassificationMeta;
+use crate::video::{VideoClassificationMeta, VideoAnomalyMeta};
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -302,7 +302,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             settings.clone()
         };
 
-        // Debug log the frame info
+        // Debug log the frame info and metadata
         gst::debug!(
             CAT,
             obj = self.obj(),
@@ -312,10 +312,20 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             frame.format()
         );
 
-        // First check for classification metadata
-        let classification_meta = frame.buffer().meta::<VideoClassificationMeta>();
-        if let Some(meta) = classification_meta {
-            // Get all parameters and find the one with highest confidence
+        // Log all metadata types present on the buffer
+        let mut meta_types = Vec::new();
+        frame.buffer().iter_meta::<gst::Meta>().for_each(|meta| {
+            meta_types.push(meta.api().name());
+        });
+        gst::debug!(
+            CAT,
+            obj = self.obj(),
+            "Metadata types present: {:?}",
+            meta_types
+        );
+
+        // Collect all metadata and data upfront to avoid borrow checker issues
+        let classification_data = frame.buffer().meta::<VideoClassificationMeta>().and_then(|meta| {
             let mut best_result: Option<(String, f64)> = None;
             for param in meta.params() {
                 if param.name() != "Classification" {
@@ -334,48 +344,31 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     }
                 }
             }
+            best_result
+        });
 
-            // If we found a classification result, render it
-            if let Some((label, confidence)) = best_result {
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Rendering classification: {} ({:.1}%)",
-                    label,
-                    confidence * 100.0
-                );
+        let anomaly_data = frame.buffer().meta::<VideoAnomalyMeta>().map(|meta| {
+            let anomaly = meta.anomaly();
+            let grid: Vec<(i32, i32, i32, i32, f64)> = meta
+                .visual_anomaly_grid()
+                .iter()
+                .map(|roi| {
+                    let score = roi.label.parse::<f64>().unwrap_or(0.0);
+                    // Scale coordinates based on input and output dimensions
+                    let scale_x = frame.width() as f64 / 160.0;
+                    let scale_y = frame.height() as f64 / 160.0;
+                    (
+                        (roi.x as f64 * scale_x) as i32,
+                        (roi.y as f64 * scale_y) as i32,
+                        (roi.width as f64 * scale_x) as i32,
+                        (roi.height as f64 * scale_y) as i32,
+                        score,
+                    )
+                })
+                .collect();
+            (anomaly, grid)
+        });
 
-                // Draw classification text
-                let text = format!("{} {:.1}%", label, confidence * 100.0);
-                let text_x = if settings.text_x < 0 {
-                    10
-                } else {
-                    settings.text_x
-                };
-                let text_y = if settings.text_y < 0 {
-                    frame.height() as i32 - settings.text_font_size as i32 - 10
-                } else {
-                    settings.text_y
-                };
-
-                // Get or assign color for this label
-                let color = {
-                    let mut label_colors = self.label_colors.lock().unwrap();
-                    if !label_colors.contains_key(&label as &str) {
-                        let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                        label_colors.insert(label.clone(), *next_color);
-                    }
-                    *label_colors.get(&label as &str).unwrap()
-                };
-
-                if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
-                    gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
-                    return Err(gst::FlowError::Error);
-                }
-            }
-        }
-
-        // Then check for ROI metadata (object detection)
         let rois: Vec<_> = frame
             .buffer()
             .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
@@ -401,6 +394,117 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             })
             .collect();
 
+        // First handle classification data
+        if let Some((label, confidence)) = classification_data {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Rendering classification: {} ({:.1}%)",
+                label,
+                confidence * 100.0
+            );
+
+            // Draw classification text
+            let text = format!("{} {:.1}%", label, confidence * 100.0);
+            let text_x = if settings.text_x < 0 {
+                10
+            } else {
+                settings.text_x
+            };
+            let text_y = if settings.text_y < 0 {
+                frame.height() as i32 - settings.text_font_size as i32 - 10
+            } else {
+                settings.text_y
+            };
+
+            // Get or assign color for this label
+            let color = {
+                let mut label_colors = self.label_colors.lock().unwrap();
+                if !label_colors.contains_key(&label as &str) {
+                    let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
+                    label_colors.insert(label.clone(), *next_color);
+                }
+                *label_colors.get(&label as &str).unwrap()
+            };
+
+            if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                return Err(gst::FlowError::Error);
+            }
+        }
+
+        // Then handle anomaly detection data
+        if let Some((anomaly, grid)) = anomaly_data {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Rendering anomaly detection: {:.1}%",
+                anomaly * 100.0
+            );
+
+            // Draw anomaly score
+            let text = format!("Anomaly: {:.1}%", anomaly * 100.0);
+            let text_x = if settings.text_x < 0 {
+                10
+            } else {
+                settings.text_x
+            };
+            let text_y = if settings.text_y < 0 {
+                frame.height() as i32 - settings.text_font_size as i32 - 10
+            } else {
+                settings.text_y
+            };
+
+            // Use red color for anomaly score
+            let color = (255, 0, 0);
+
+            if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                return Err(gst::FlowError::Error);
+            }
+
+            // Draw visual anomaly grid
+            for (x, y, width, height, score) in grid {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Drawing anomaly grid cell: ({}, {}) {}x{} score={:.1}%",
+                    x, y, width, height, score * 100.0
+                );
+                let color = self.get_color_for_score(score);
+
+                // Draw bounding box if stroke width > 0
+                if settings.stroke_width > 0 {
+                    let bbox_params = BBoxParams {
+                        x,
+                        y,
+                        width,
+                        height,
+                        roi_type: format!("anomaly {:.1}%", score * 100.0),
+                        color,
+                    };
+
+                    if let Err(e) = self.draw_bbox(frame, &bbox_params) {
+                        gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
+                        return Err(gst::FlowError::Error);
+                    }
+                }
+
+                // Draw label if enabled
+                if settings.show_labels {
+                    let text = format!("{:.1}%", score * 100.0);
+                    let text_x = x + 2;
+                    let text_y = y + 2;
+
+                    if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                        gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
+                        return Err(gst::FlowError::Error);
+                    }
+                }
+            }
+        }
+
+        // Finally handle ROI data (object detection)
         if !rois.is_empty() {
             gst::debug!(
                 CAT,
@@ -843,5 +947,13 @@ impl EdgeImpulseOverlay {
         }
 
         Ok(())
+    }
+
+    fn get_color_for_score(&self, score: f64) -> (u8, u8, u8) {
+        // Convert score to color gradient from green (0.0) to red (1.0)
+        let r = (score * 255.0) as u8;
+        let g = ((1.0 - score) * 255.0) as u8;
+        let b = 0;
+        (r, g, b)
     }
 }

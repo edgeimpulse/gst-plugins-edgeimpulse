@@ -196,8 +196,10 @@ use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use serde_json::Value;
 
 use super::VideoClassificationMeta;
+use crate::video::meta::{VideoAnomalyMeta, VideoRegionOfInterestMeta};
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -392,6 +394,16 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let channels = params.image_channel_count;
             let is_object_detection = params.model_type == "constrained_object_detection"
                 || params.model_type == "object_detection";
+            let is_anomaly_detection = params.model_type == "anomaly_detection";
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Model type: {}, is_object_detection: {}, is_anomaly_detection: {}",
+                params.model_type,
+                is_object_detection,
+                is_anomaly_detection
+            );
 
             // Extract frame data for inference
             let in_frame = match VideoFrameRef::from_buffer_ref_readable(
@@ -450,60 +462,89 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             };
 
             // Run inference
+            let start = std::time::Instant::now();
             match model.infer(features, None) {
                 Ok(result) => {
-                    // Convert result to JSON string
-                    let result_json = serde_json::to_string(&result.result).unwrap_or_else(|e| {
-                        gst::warning!(CAT, obj = self.obj(), "Failed to serialize result: {}", e);
-                        String::from("{}")
-                    });
+                    let elapsed = start.elapsed();
+                    let result_json = serde_json::to_string(&result.result).unwrap();
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Inference result: {}",
+                        result_json
+                    );
 
-                    gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
+                    if is_anomaly_detection {
+                        // Parse the JSON result to get anomaly scores
+                        if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                            if let (Some(anomaly), Some(visual_anomaly_max), Some(visual_anomaly_mean)) = (
+                                json["anomaly"].as_f64(),
+                                json["visual_anomaly_max"].as_f64(),
+                                json["visual_anomaly_mean"].as_f64(),
+                            ) {
+                                // Add anomaly meta
+                                let mut meta = VideoAnomalyMeta::add(outbuf);
+                                meta.set_anomaly(anomaly as f32);
+                                meta.set_visual_anomaly_max(visual_anomaly_max as f32);
+                                meta.set_visual_anomaly_mean(visual_anomaly_mean as f32);
 
-                    let now = std::time::Instant::now();
-                    if is_object_detection {
-                        // Parse the detection results
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
-                            if let Some(boxes) =
-                                json.get("bounding_boxes").and_then(|b| b.as_array())
-                            {
-                                // Create detection metadata
+                                // Add visual anomaly grid if available
+                                if let Some(grid) = json["visual_anomaly_grid"].as_array() {
+                                    let mut visual_grid = Vec::new();
+                                    for cell in grid {
+                                        if let (Some(x), Some(y), Some(width), Some(height), Some(value)) = (
+                                            cell["x"].as_u64(),
+                                            cell["y"].as_u64(),
+                                            cell["width"].as_u64(),
+                                            cell["height"].as_u64(),
+                                            cell["value"].as_f64(),
+                                        ) {
+                                            visual_grid.push(VideoRegionOfInterestMeta {
+                                                x: x as u32,
+                                                y: y as u32,
+                                                width: width as u32,
+                                                height: height as u32,
+                                                label: format!("{:.3}", value),
+                                            });
+                                        }
+                                    }
+                                    meta.set_visual_anomaly_grid(visual_grid);
+                                }
+                            }
+                        }
+
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "anomaly-detection",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
+                    } else if is_object_detection {
+                        // Parse the JSON result to get bounding boxes
+                        if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                            if let Some(boxes) = json["bounding_boxes"].as_array() {
                                 for bbox in boxes {
-                                    if let (
-                                        Some(label),
-                                        Some(value),
-                                        Some(x),
-                                        Some(y),
-                                        Some(w),
-                                        Some(h),
-                                    ) = (
-                                        bbox.get("label").and_then(|v| v.as_str()),
-                                        bbox.get("value").and_then(|v| v.as_f64()),
-                                        bbox.get("x").and_then(|v| v.as_i64()),
-                                        bbox.get("y").and_then(|v| v.as_i64()),
-                                        bbox.get("width").and_then(|v| v.as_i64()),
-                                        bbox.get("height").and_then(|v| v.as_i64()),
+                                    if let (Some(label), Some(value), Some(x), Some(y), Some(width), Some(height)) = (
+                                        bbox["label"].as_str(),
+                                        bbox["value"].as_f64(),
+                                        bbox["x"].as_u64(),
+                                        bbox["y"].as_u64(),
+                                        bbox["width"].as_u64(),
+                                        bbox["height"].as_u64(),
                                     ) {
-                                        // Create ROI metadata
-                                        let mut roi_meta =
-                                            gst_video::VideoRegionOfInterestMeta::add(
-                                                outbuf,
-                                                label,
-                                                (x as u32, y as u32, w as u32, h as u32),
-                                            );
-
-                                        // Add detection parameters
-                                        let s = gst::Structure::builder("detection")
-                                            .field("label", label)
-                                            .field("confidence", value)
-                                            .build();
-                                        roi_meta.add_param(s);
+                                        // Add ROI meta for each bounding box
+                                        let _ = gst_video::VideoRegionOfInterestMeta::add(
+                                            outbuf,
+                                            label,
+                                            (x as u32, y as u32, width as u32, height as u32),
+                                        );
                                     }
                                 }
                             }
                         }
 
-                        let elapsed = now.elapsed();
                         let s = crate::common::create_inference_message(
                             "video",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
@@ -513,29 +554,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         );
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
-                        // Parse the classification results
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result_json) {
-                            if let Some(classification) =
-                                json.get("classification").and_then(|c| c.as_object())
-                            {
-                                // Create classification metadata
-                                let mut classification_meta = VideoClassificationMeta::add(outbuf);
-
-                                // Add each classification result
-                                for (label, value) in classification {
-                                    if let Some(value) = value.as_f64() {
-                                        let s = gst::Structure::builder("Classification")
-                                            .field("label", label)
-                                            .field("confidence", value)
-                                            .field("color", 0xFF0000FFu32)
-                                            .build();
-                                        classification_meta.add_param(s);
-                                    }
-                                }
-                            }
-                        }
-
-                        let elapsed = now.elapsed();
+                        // Classification model
                         let s = crate::common::create_inference_message(
                             "video",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),

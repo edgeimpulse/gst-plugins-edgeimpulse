@@ -80,6 +80,14 @@ struct BBoxParams {
     color: (u8, u8, u8),
 }
 
+struct TextParams {
+    text: String,
+    x: i32,
+    y: i32,
+    settings: Settings,
+    color: (u8, u8, u8),
+}
+
 #[derive(Default)]
 pub struct EdgeImpulseOverlay {
     settings: Mutex<Settings>,
@@ -451,25 +459,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw classification text
             let text = format!("{} {:.1}%", label, confidence * 100.0);
-            let text_x = if settings.text_position == "top-left" {
+            let text_x = if settings.text_position == "top-left" || settings.text_position == "bottom-left" {
                 10
-            } else if settings.text_position == "top-right" {
-                frame.width() as i32 - settings.font_size as i32 - 10
-            } else if settings.text_position == "bottom-left" {
-                10
-            } else if settings.text_position == "bottom-right" {
-                frame.width() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "top-right" || settings.text_position == "bottom-right" {
+                frame.width() as i32 - settings.font_size - 10
             } else {
                 -1
             };
-            let text_y = if settings.text_position == "top-left" {
+            let text_y = if settings.text_position == "top-left" || settings.text_position == "top-right" {
                 10
-            } else if settings.text_position == "top-right" {
-                10
-            } else if settings.text_position == "bottom-left" {
-                frame.height() as i32 - settings.font_size as i32 - 10
-            } else if settings.text_position == "bottom-right" {
-                frame.height() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "bottom-left" || settings.text_position == "bottom-right" {
+                frame.height() as i32 - settings.font_size - 10
             } else {
                 -1
             };
@@ -485,7 +485,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             };
 
             if let Err(e) =
-                self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+                self.draw_text(frame, TextParams {
+                    text,
+                    x: text_x,
+                    y: text_y,
+                    settings: settings.clone(),
+                    color,
+                }, &video_info)
             {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
@@ -506,25 +512,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw anomaly score
             let text = format!("Anomaly: {:.1}%", anomaly * 100.0);
-            let text_x = if settings.text_position == "top-left" {
+            let text_x = if settings.text_position == "top-left" || settings.text_position == "bottom-left" {
                 10
-            } else if settings.text_position == "top-right" {
-                frame.width() as i32 - settings.font_size as i32 - 10
-            } else if settings.text_position == "bottom-left" {
-                10
-            } else if settings.text_position == "bottom-right" {
-                frame.width() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "top-right" || settings.text_position == "bottom-right" {
+                frame.width() as i32 - settings.font_size - 10
             } else {
                 -1
             };
-            let text_y = if settings.text_position == "top-left" {
+            let text_y = if settings.text_position == "top-left" || settings.text_position == "top-right" {
                 10
-            } else if settings.text_position == "top-right" {
-                10
-            } else if settings.text_position == "bottom-left" {
-                frame.height() as i32 - settings.font_size as i32 - 10
-            } else if settings.text_position == "bottom-right" {
-                frame.height() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "bottom-left" || settings.text_position == "bottom-right" {
+                frame.height() as i32 - settings.font_size - 10
             } else {
                 -1
             };
@@ -542,7 +540,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             );
 
             if let Err(e) =
-                self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+                self.draw_text(frame, TextParams {
+                    text,
+                    x: text_x,
+                    y: text_y,
+                    settings: settings.clone(),
+                    color,
+                }, &video_info)
             {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
@@ -604,7 +608,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     let text_y = y + 2;
 
                     if let Err(e) =
-                        self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+                        self.draw_text(frame, TextParams {
+                            text,
+                            x: text_x,
+                            y: text_y,
+                            settings: settings.clone(),
+                            color,
+                        }, &video_info)
                     {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                         return Err(gst::FlowError::Error);
@@ -671,7 +681,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     let text_y = y + 2;
 
                     if let Err(e) =
-                        self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+                        self.draw_text(frame, TextParams {
+                            text,
+                            x: text_x,
+                            y: text_y,
+                            settings: settings.clone(),
+                            color,
+                        }, &video_info)
                     {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                         return Err(gst::FlowError::Error);
@@ -777,11 +793,7 @@ impl EdgeImpulseOverlay {
     fn draw_text(
         &self,
         frame: &mut VideoFrameRef<&mut gst::BufferRef>,
-        text: &str,
-        x: i32,
-        y: i32,
-        settings: &Settings,
-        color: (u8, u8, u8),
+        params: TextParams,
         video_info: &Option<VideoInfo>,
     ) -> Result<(), gst::LoggableError> {
         // Get all video info upfront
@@ -814,14 +826,14 @@ impl EdgeImpulseOverlay {
             // Create and configure text layout
             let layout = create_layout(&cr);
             let mut font_desc = pango::FontDescription::new();
-            font_desc.set_family(&settings.font_type);
+            font_desc.set_family(&params.settings.font_type);
             // Scale up the font size for high resolution
-            font_desc.set_absolute_size(settings.font_size as f64 * pango::SCALE as f64);
+            font_desc.set_absolute_size(params.settings.font_size as f64 * pango::SCALE as f64);
             if height < 200 {
                 font_desc.set_weight(pango::Weight::Bold);
             }
             layout.set_font_description(Some(&font_desc));
-            layout.set_text(text);
+            layout.set_text(&params.text);
 
             // Get the exact text dimensions including any descent
             let (w, h) = layout.pixel_size();
@@ -834,11 +846,11 @@ impl EdgeImpulseOverlay {
             total_height = text_height + (bg_padding * 2.0);
 
             // Draw background rectangle at high resolution
-            cr.rectangle(x as f64, y as f64, total_width, total_height);
+            cr.rectangle(params.x as f64, params.y as f64, total_width, total_height);
             cr.set_source_rgba(
-                color.0 as f64 / 255.0,
-                color.1 as f64 / 255.0,
-                color.2 as f64 / 255.0,
+                params.color.0 as f64 / 255.0,
+                params.color.1 as f64 / 255.0,
+                params.color.2 as f64 / 255.0,
                 0.7,
             );
             cr.fill()
@@ -846,7 +858,7 @@ impl EdgeImpulseOverlay {
 
             // Calculate perceived brightness of background color
             let brightness =
-                (0.299 * color.0 as f64 + 0.587 * color.1 as f64 + 0.114 * color.2 as f64) / 255.0;
+                (0.299 * params.color.0 as f64 + 0.587 * params.color.1 as f64 + 0.114 * params.color.2 as f64) / 255.0;
 
             // Use white text for dark backgrounds, black text for light backgrounds
             if brightness < 0.5 {
@@ -856,14 +868,14 @@ impl EdgeImpulseOverlay {
             }
 
             // Position text inside the background box with padding
-            cr.move_to(x as f64 + bg_padding, y as f64 + bg_padding);
+            cr.move_to(params.x as f64 + bg_padding, params.y as f64 + bg_padding);
             show_layout(&cr, &layout);
 
             // Calculate the region to copy, ensuring we stay within bounds
-            copy_y_start = y.max(0) as usize;
-            copy_y_end = ((y as f64 + total_height) as i32).min(height) as usize;
-            copy_x_start = x.max(0) as usize;
-            copy_x_end = ((x as f64 + total_width) as i32).min(width) as usize;
+            copy_y_start = params.y.max(0) as usize;
+            copy_y_end = ((params.y as f64 + total_height) as i32).min(height) as usize;
+            copy_x_start = params.x.max(0) as usize;
+            copy_x_end = ((params.x as f64 + total_width) as i32).min(width) as usize;
         }
 
         // Get stride before dropping context

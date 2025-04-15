@@ -1,9 +1,15 @@
 use gstreamer as gst;
+use gstreamer::glib;
 use gstreamer::prelude::*;
+use gstreamer::subclass::prelude::*;
+use gstreamer::Meta;
+use gstreamer_base as gst_base;
+use gstreamer_base::subclass::prelude::*;
+use gstreamer_video as gst_video;
+use once_cell::sync::Lazy;
 use std::fmt;
 use std::ptr;
-use gstreamer::Meta;
-use gstreamer_video as gst_video;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct VideoRegionOfInterestMeta {
@@ -151,13 +157,13 @@ impl fmt::Debug for VideoAnomalyMeta {
 
 // Actual unsafe implementation of the meta
 mod imp {
+    use super::*;
     use glib::translate::*;
     use gstreamer as gst;
+    use gstreamer_video as gst_video;
     use once_cell::sync::Lazy;
     use std::mem;
     use std::ptr;
-    use gstreamer_video as gst_video;
-    use super::*;
 
     // This is the C type that is actually stored as meta inside the buffers
     #[repr(C)]

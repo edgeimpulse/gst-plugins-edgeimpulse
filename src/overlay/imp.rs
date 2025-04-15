@@ -13,7 +13,7 @@ use once_cell::sync::Lazy;
 use pangocairo::functions::*;
 use std::sync::Mutex;
 
-use crate::video::{VideoClassificationMeta, VideoAnomalyMeta};
+use crate::video::{VideoAnomalyMeta, VideoClassificationMeta};
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -43,14 +43,30 @@ static COLORS: Lazy<Vec<(u8, u8, u8)>> = Lazy::new(|| {
 });
 
 #[derive(Debug, Clone)]
-struct Settings {
-    stroke_width: i32,
-    text_color: u32,
-    text_font_size: u32,
-    text_font: String,
-    text_x: i32,
-    text_y: i32,
-    show_labels: bool,
+pub struct Settings {
+    pub stroke_width: i32,
+    pub text_color: u32,
+    pub font_size: i32,
+    pub font_type: String,
+    pub text_position: String,
+    pub show_labels: bool,
+    pub model_input_width: i32,
+    pub model_input_height: i32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            stroke_width: 2,
+            text_color: 0xFFFFFF,
+            font_size: 12,
+            font_type: "Sans".to_string(),
+            text_position: "top-left".to_string(),
+            show_labels: true,
+            model_input_width: 160,
+            model_input_height: 160,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -59,22 +75,9 @@ struct BBoxParams {
     y: i32,
     width: i32,
     height: i32,
+    #[allow(dead_code)]
     roi_type: String,
     color: (u8, u8, u8),
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            stroke_width: 2,
-            text_color: 0xFFFFFF,
-            text_font_size: 14,
-            text_font: "Sans".to_string(),
-            text_x: -1,
-            text_y: -1,
-            show_labels: true,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -98,44 +101,47 @@ impl ObjectImpl for EdgeImpulseOverlay {
             vec![
                 glib::ParamSpecInt::builder("stroke-width")
                     .nick("Stroke Width")
-                    .blurb("Width of the bounding box lines in pixels")
-                    .minimum(1)
-                    .maximum(100)
+                    .blurb("Width of the bounding box stroke")
+                    .minimum(0)
                     .default_value(2)
                     .build(),
                 glib::ParamSpecUInt::builder("text-color")
                     .nick("Text Color")
-                    .blurb("Color of the text in RGB format (default: white 0xFFFFFF)")
+                    .blurb("Color of the text in RGB format (0xRRGGBB)")
                     .default_value(0xFFFFFF)
                     .build(),
-                glib::ParamSpecUInt::builder("text-font-size")
-                    .nick("Text Font Size")
-                    .blurb("Size of the text font in pixels")
-                    .default_value(20)
+                glib::ParamSpecInt::builder("font-size")
+                    .nick("Font Size")
+                    .blurb("Size of the font")
+                    .minimum(1)
+                    .default_value(12)
                     .build(),
-                glib::ParamSpecString::builder("text-font")
-                    .nick("Text Font")
-                    .blurb("Font family to use for text rendering (default: Sans)")
+                glib::ParamSpecString::builder("font-type")
+                    .nick("Font Type")
+                    .blurb("Type of font to use")
                     .default_value(Some("Sans"))
                     .build(),
-                glib::ParamSpecInt::builder("text-x")
-                    .nick("Text X Position")
-                    .blurb("X position for classification text (-1 for right-aligned)")
-                    .minimum(-1)
-                    .maximum(10000)
-                    .default_value(-1)
-                    .build(),
-                glib::ParamSpecInt::builder("text-y")
-                    .nick("Text Y Position")
-                    .blurb("Y position for classification text (-1 for bottom-aligned)")
-                    .minimum(-1)
-                    .maximum(10000)
-                    .default_value(-1)
+                glib::ParamSpecString::builder("text-position")
+                    .nick("Text Position")
+                    .blurb("Position of the text")
+                    .default_value(Some("top-left"))
                     .build(),
                 glib::ParamSpecBoolean::builder("show-labels")
                     .nick("Show Labels")
-                    .blurb("Whether to draw labels on the video frames")
+                    .blurb("Whether to show labels")
                     .default_value(true)
+                    .build(),
+                glib::ParamSpecInt::builder("model-input-width")
+                    .nick("Model Input Width")
+                    .blurb("Width of the model input")
+                    .minimum(1)
+                    .default_value(160)
+                    .build(),
+                glib::ParamSpecInt::builder("model-input-height")
+                    .nick("Model Input Height")
+                    .blurb("Height of the model input")
+                    .minimum(1)
+                    .default_value(160)
                     .build(),
             ]
         });
@@ -143,69 +149,47 @@ impl ObjectImpl for EdgeImpulseOverlay {
     }
 
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        let mut settings = self.settings.lock().unwrap();
         match pspec.name() {
             "stroke-width" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.stroke_width = value.get().expect("type checked upstream");
+                settings.stroke_width = value.get().unwrap();
             }
             "text-color" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.text_color = value.get().expect("type checked upstream");
+                settings.text_color = value.get().unwrap();
             }
-            "text-font-size" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.text_font_size = value.get().expect("type checked upstream");
+            "font-size" => {
+                settings.font_size = value.get().unwrap();
             }
-            "text-font" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.text_font = value.get().expect("type checked upstream");
+            "font-type" => {
+                settings.font_type = value.get().unwrap();
             }
-            "text-x" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.text_x = value.get().expect("type checked upstream");
-            }
-            "text-y" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.text_y = value.get().expect("type checked upstream");
+            "text-position" => {
+                settings.text_position = value.get().unwrap();
             }
             "show-labels" => {
-                let mut settings = self.settings.lock().unwrap();
-                settings.show_labels = value.get().expect("type checked upstream");
+                settings.show_labels = value.get().unwrap();
+            }
+            "model-input-width" => {
+                settings.model_input_width = value.get().unwrap();
+            }
+            "model-input-height" => {
+                settings.model_input_height = value.get().unwrap();
             }
             _ => unimplemented!(),
         }
     }
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        let settings = self.settings.lock().unwrap();
         match pspec.name() {
-            "stroke-width" => {
-                let settings = self.settings.lock().unwrap();
-                settings.stroke_width.to_value()
-            }
-            "text-color" => {
-                let settings = self.settings.lock().unwrap();
-                settings.text_color.to_value()
-            }
-            "text-font-size" => {
-                let settings = self.settings.lock().unwrap();
-                settings.text_font_size.to_value()
-            }
-            "text-font" => {
-                let settings = self.settings.lock().unwrap();
-                settings.text_font.to_value()
-            }
-            "text-x" => {
-                let settings = self.settings.lock().unwrap();
-                settings.text_x.to_value()
-            }
-            "text-y" => {
-                let settings = self.settings.lock().unwrap();
-                settings.text_y.to_value()
-            }
-            "show-labels" => {
-                let settings = self.settings.lock().unwrap();
-                settings.show_labels.to_value()
-            }
+            "stroke-width" => settings.stroke_width.to_value(),
+            "text-color" => settings.text_color.to_value(),
+            "font-size" => settings.font_size.to_value(),
+            "font-type" => settings.font_type.to_value(),
+            "text-position" => settings.text_position.to_value(),
+            "show-labels" => settings.show_labels.to_value(),
+            "model-input-width" => settings.model_input_width.to_value(),
+            "model-input-height" => settings.model_input_height.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -302,6 +286,18 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             settings.clone()
         };
 
+        // Get all label colors upfront
+        let label_colors = {
+            let label_colors = self.label_colors.lock().unwrap();
+            label_colors.clone()
+        };
+
+        // Get video info upfront
+        let video_info = {
+            let video_info = self.video_info.lock().unwrap();
+            video_info.clone()
+        };
+
         // Debug log the frame info and metadata
         gst::debug!(
             CAT,
@@ -316,6 +312,12 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
         let mut meta_types = Vec::new();
         frame.buffer().iter_meta::<gst::Meta>().for_each(|meta| {
             meta_types.push(meta.api().name());
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Found metadata type: {}",
+                meta.api().name()
+            );
         });
         gst::debug!(
             CAT,
@@ -326,15 +328,36 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
         // Collect all metadata and data upfront to avoid borrow checker issues
         let classification_data = frame.buffer().meta::<VideoClassificationMeta>().and_then(|meta| {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Found VideoClassificationMeta with {} params",
+                meta.params().len()
+            );
             let mut best_result: Option<(String, f64)> = None;
             for param in meta.params() {
-                if param.name() != "Classification" {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Processing classification param: name={}, has_field_label={}, has_field_confidence={}",
+                    param.name(),
+                    param.has_field("label"),
+                    param.has_field("confidence")
+                );
+                if param.name() != "classification" {
                     continue;
                 }
 
                 if let (Ok(label), Ok(confidence)) =
                     (param.get::<String>("label"), param.get::<f64>("confidence"))
                 {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Found classification result: {} ({:.1}%)",
+                        label,
+                        confidence * 100.0
+                    );
                     match best_result {
                         None => best_result = Some((label, confidence)),
                         Some((_, prev_conf)) if confidence > prev_conf => {
@@ -348,22 +371,25 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
         });
 
         let anomaly_data = frame.buffer().meta::<VideoAnomalyMeta>().map(|meta| {
-            let anomaly = meta.anomaly();
             gst::debug!(
                 CAT,
                 obj = self.obj(),
-                "Received anomaly meta: score={:.1}%, grid_size={}",
-                anomaly * 100.0,
-                meta.visual_anomaly_grid().len()
+                "Found VideoAnomalyMeta: anomaly={:.1}%, grid_size={}, frame_size={}x{}",
+                meta.anomaly() * 100.0,
+                meta.visual_anomaly_grid().len(),
+                frame.width(),
+                frame.height()
             );
+            let anomaly = meta.anomaly();
+
             let grid: Vec<(i32, i32, i32, i32, f64)> = meta
                 .visual_anomaly_grid()
                 .iter()
                 .map(|roi| {
                     let score = roi.label.parse::<f64>().unwrap_or(0.0);
                     // Scale coordinates based on input and output dimensions
-                    let scale_x = frame.width() as f64 / 160.0;
-                    let scale_y = frame.height() as f64 / 160.0;
+                    let scale_x = frame.width() as f64 / settings.model_input_width as f64;
+                    let scale_y = frame.height() as f64 / settings.model_input_height as f64;
                     let scaled_x = (roi.x as f64 * scale_x) as i32;
                     let scaled_y = (roi.y as f64 * scale_y) as i32;
                     let scaled_w = (roi.width as f64 * scale_x) as i32;
@@ -371,15 +397,22 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     gst::debug!(
                         CAT,
                         obj = self.obj(),
-                        "Scaling ROI: ({}, {}) {}x{} -> ({}, {}) {}x{}",
+                        "Processing grid cell: original=({}, {}) {}x{} -> scaled=({}, {}) {}x{} score={:.1}% (scale_x={:.2}, scale_y={:.2}, model_size={}x{})",
                         roi.x, roi.y, roi.width, roi.height,
-                        scaled_x, scaled_y, scaled_w, scaled_h
+                        scaled_x, scaled_y, scaled_w, scaled_h,
+                        score * 100.0,
+                        scale_x, scale_y,
+                        settings.model_input_width, settings.model_input_height
                     );
                     (scaled_x, scaled_y, scaled_w, scaled_h, score)
                 })
                 .collect();
             (anomaly, grid)
         });
+
+        if anomaly_data.is_none() {
+            gst::debug!(CAT, obj = self.obj(), "No VideoAnomalyMeta found in frame");
+        }
 
         let rois: Vec<_> = frame
             .buffer()
@@ -418,28 +451,42 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw classification text
             let text = format!("{} {:.1}%", label, confidence * 100.0);
-            let text_x = if settings.text_x < 0 {
+            let text_x = if settings.text_position == "top-left" {
                 10
+            } else if settings.text_position == "top-right" {
+                frame.width() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "bottom-left" {
+                10
+            } else if settings.text_position == "bottom-right" {
+                frame.width() as i32 - settings.font_size as i32 - 10
             } else {
-                settings.text_x
+                -1
             };
-            let text_y = if settings.text_y < 0 {
-                frame.height() as i32 - settings.text_font_size as i32 - 10
+            let text_y = if settings.text_position == "top-left" {
+                10
+            } else if settings.text_position == "top-right" {
+                10
+            } else if settings.text_position == "bottom-left" {
+                frame.height() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "bottom-right" {
+                frame.height() as i32 - settings.font_size as i32 - 10
             } else {
-                settings.text_y
+                -1
             };
 
             // Get or assign color for this label
-            let color = {
+            let color = if let Some(color) = label_colors.get(&label) {
+                *color
+            } else {
+                let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
                 let mut label_colors = self.label_colors.lock().unwrap();
-                if !label_colors.contains_key(&label as &str) {
-                    let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                    label_colors.insert(label.clone(), *next_color);
-                }
-                *label_colors.get(&label as &str).unwrap()
+                label_colors.insert(label.clone(), *next_color);
+                *next_color
             };
 
-            if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+            if let Err(e) =
+                self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+            {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
             }
@@ -450,29 +497,53 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             gst::debug!(
                 CAT,
                 obj = self.obj(),
-                "Processing anomaly grid: {} cells, frame size: {}x{}",
+                "Processing anomaly grid: {} cells, frame size: {}x{}, anomaly: {:.1}%",
                 grid.len(),
                 frame.width(),
-                frame.height()
+                frame.height(),
+                anomaly * 100.0
             );
 
             // Draw anomaly score
             let text = format!("Anomaly: {:.1}%", anomaly * 100.0);
-            let text_x = if settings.text_x < 0 {
+            let text_x = if settings.text_position == "top-left" {
                 10
+            } else if settings.text_position == "top-right" {
+                frame.width() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "bottom-left" {
+                10
+            } else if settings.text_position == "bottom-right" {
+                frame.width() as i32 - settings.font_size as i32 - 10
             } else {
-                settings.text_x
+                -1
             };
-            let text_y = if settings.text_y < 0 {
-                frame.height() as i32 - settings.text_font_size as i32 - 10
+            let text_y = if settings.text_position == "top-left" {
+                10
+            } else if settings.text_position == "top-right" {
+                10
+            } else if settings.text_position == "bottom-left" {
+                frame.height() as i32 - settings.font_size as i32 - 10
+            } else if settings.text_position == "bottom-right" {
+                frame.height() as i32 - settings.font_size as i32 - 10
             } else {
-                settings.text_y
+                -1
             };
 
             // Use red color for anomaly score
             let color = (255, 0, 0);
 
-            if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Drawing anomaly score text at ({}, {}): {}",
+                text_x,
+                text_y,
+                text
+            );
+
+            if let Err(e) =
+                self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+            {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
             }
@@ -486,8 +557,14 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
-                    "Processing grid cell: ({}, {}) {}x{} score={:.1}% color={:?}",
-                    x, y, width, height, normalized_score * 100.0, color
+                    "Processing grid cell: ({}, {}) {}x{} score={:.1}% color={:?} stroke_width={}",
+                    x,
+                    y,
+                    width,
+                    height,
+                    normalized_score * 100.0,
+                    color,
+                    settings.stroke_width
                 );
 
                 // Draw bounding box if stroke width > 0
@@ -508,10 +585,16 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                         bbox_params
                     );
 
-                    if let Err(e) = self.draw_bbox(frame, &bbox_params) {
+                    if let Err(e) = self.draw_bbox(frame, &bbox_params, &settings, &video_info) {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
                         return Err(gst::FlowError::Error);
                     }
+                } else {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Skipping bounding box drawing because stroke_width is 0"
+                    );
                 }
 
                 // Draw label if enabled
@@ -520,7 +603,9 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     let text_x = x + 2;
                     let text_y = y + 2;
 
-                    if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                    if let Err(e) =
+                        self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+                    {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                         return Err(gst::FlowError::Error);
                     }
@@ -552,13 +637,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 );
 
                 // Get or assign color for this label
-                let color = {
+                let color = if let Some(color) = label_colors.get(&label) {
+                    *color
+                } else {
+                    let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
                     let mut label_colors = self.label_colors.lock().unwrap();
-                    if !label_colors.contains_key(&label) {
-                        let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                        label_colors.insert(label.clone(), *next_color);
-                    }
-                    *label_colors.get(&label).unwrap()
+                    label_colors.insert(label.clone(), *next_color);
+                    *next_color
                 };
 
                 // Draw bounding box if stroke width > 0
@@ -572,7 +657,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                         color,
                     };
 
-                    if let Err(e) = self.draw_bbox(frame, &bbox_params) {
+                    if let Err(e) = self.draw_bbox(frame, &bbox_params, &settings, &video_info) {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
                         return Err(gst::FlowError::Error);
                     }
@@ -585,7 +670,9 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     // Position the text just slightly below the top of the bounding box
                     let text_y = y + 2;
 
-                    if let Err(e) = self.draw_text(frame, &text, text_x, text_y, &settings, color) {
+                    if let Err(e) =
+                        self.draw_text(frame, &text, text_x, text_y, &settings, color, &video_info)
+                    {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                         return Err(gst::FlowError::Error);
                     }
@@ -614,230 +701,72 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 impl EdgeImpulseOverlay {
     fn draw_bbox(
         &self,
-        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
+        frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
         params: &BBoxParams,
+        settings: &Settings,
+        video_info: &Option<VideoInfo>,
     ) -> Result<(), gst::LoggableError> {
-        // Get all video info upfront
-        let (format, stride, width, height) = {
-            let video_info = self.video_info.lock().unwrap();
-            let info = video_info
-                .as_ref()
-                .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
-            (
-                info.format(),
-                info.stride()[0],
-                info.width() as i32,
-                info.height() as i32,
-            )
-        };
-
-        // Get settings upfront
-        let stroke_width = {
-            let settings = self.settings.lock().unwrap();
-            std::cmp::max(1, settings.stroke_width)
-        };
+        // The coordinates are already scaled, no need to scale them again
+        let x = params.x;
+        let y = params.y;
+        let width = params.width;
+        let height = params.height;
 
         gst::debug!(
             CAT,
-            obj = self.obj(),
-            "Drawing bbox for {}: format={:?}, stride={}, frame={}x{}, bbox={:?}",
-            params.roi_type,
-            format,
-            stride,
+            "Drawing bbox at ({}, {}) with size {}x{}",
+            x,
+            y,
             width,
             height,
-            params
         );
 
-        match format {
-            VideoFormat::Rgb => {
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Using RGB drawing for {}",
-                    params.roi_type
-                );
-                self.draw_bbox_rgb(frame, params, stroke_width, stride, width, height)
-            }
-            VideoFormat::Nv12 | VideoFormat::Nv21 => {
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Using NV12/21 drawing for {}",
-                    params.roi_type
-                );
-                self.draw_bbox_nv12(frame, params, stroke_width, stride, height)
-            }
-            _ => {
-                gst::warning!(CAT, obj = self.obj(), "Unsupported format: {:?}", format);
-                Err(gst::loggable_error!(CAT, "Unsupported format"))
-            }
-        }
-    }
+        // Draw horizontal lines
+        for i in 0..settings.stroke_width {
+            for j in 0..width {
+                let x_pos = x + j;
+                let y_pos_top = y + i;
+                let y_pos_bottom = y + height - settings.stroke_width + i;
 
-    fn draw_bbox_rgb(
-        &self,
-        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
-        params: &BBoxParams,
-        stroke_width: i32,
-        stride: i32,
-        width: i32,
-        height: i32,
-    ) -> Result<(), gst::LoggableError> {
-        gst::debug!(
-            CAT,
-            obj = self.obj(),
-            "Starting RGB bbox drawing: stride={}, width={}, height={}, data_len={}",
-            stride,
-            width,
-            height,
-            frame.plane_data(0).unwrap().len()
-        );
-
-        let data = frame.plane_data_mut(0).unwrap();
-        let (r, g, b) = params.color;
-
-        let mut pixels_drawn = 0;
-
-        // Draw horizontal lines with specified stroke width
-        for i in params.x..params.x + params.width {
-            if i < 0 || i >= width {
-                continue;
-            }
-
-            // Top lines
-            for s in 0..stroke_width {
-                let y_pos = params.y + s;
-                if y_pos >= 0 && y_pos < height {
-                    let idx = (y_pos * stride + i * 3) as usize;
-                    if idx + 2 < data.len() {
-                        data[idx] = r;
-                        data[idx + 1] = g;
-                        data[idx + 2] = b;
-                        pixels_drawn += 1;
-                    }
+                if x_pos >= 0
+                    && x_pos < frame.width() as i32
+                    && y_pos_top >= 0
+                    && y_pos_top < frame.height() as i32
+                {
+                    self.set_pixel(frame, x_pos, y_pos_top, params.color, video_info);
                 }
-            }
 
-            // Bottom lines
-            for s in 0..stroke_width {
-                let y_pos = params.y + params.height - s - 1;
-                if y_pos >= 0 && y_pos < height {
-                    let idx = (y_pos * stride + i * 3) as usize;
-                    if idx + 2 < data.len() {
-                        data[idx] = r;
-                        data[idx + 1] = g;
-                        data[idx + 2] = b;
-                        pixels_drawn += 1;
-                    }
+                if x_pos >= 0
+                    && x_pos < frame.width() as i32
+                    && y_pos_bottom >= 0
+                    && y_pos_bottom < frame.height() as i32
+                {
+                    self.set_pixel(frame, x_pos, y_pos_bottom, params.color, video_info);
                 }
             }
         }
 
-        // Draw vertical lines with specified stroke width
-        for j in params.y..params.y + params.height {
-            if j < 0 || j >= height {
-                continue;
-            }
+        // Draw vertical lines
+        for i in 0..settings.stroke_width {
+            for j in 0..height {
+                let x_pos_left = x + i;
+                let x_pos_right = x + width - settings.stroke_width + i;
+                let y_pos = y + j;
 
-            // Left lines
-            for s in 0..stroke_width {
-                let x_pos = params.x + s;
-                if x_pos >= 0 && x_pos < width {
-                    let idx = (j * stride + x_pos * 3) as usize;
-                    if idx + 2 < data.len() {
-                        data[idx] = r;
-                        data[idx + 1] = g;
-                        data[idx + 2] = b;
-                        pixels_drawn += 1;
-                    }
+                if x_pos_left >= 0
+                    && x_pos_left < frame.width() as i32
+                    && y_pos >= 0
+                    && y_pos < frame.height() as i32
+                {
+                    self.set_pixel(frame, x_pos_left, y_pos, params.color, video_info);
                 }
-            }
 
-            // Right lines
-            for s in 0..stroke_width {
-                let x_pos = params.x + params.width - s - 1;
-                if x_pos >= 0 && x_pos < width {
-                    let idx = (j * stride + x_pos * 3) as usize;
-                    if idx + 2 < data.len() {
-                        data[idx] = r;
-                        data[idx + 1] = g;
-                        data[idx + 2] = b;
-                        pixels_drawn += 1;
-                    }
-                }
-            }
-        }
-
-        if pixels_drawn == 0 {
-            gst::warning!(
-                CAT,
-                obj = self.obj(),
-                "No pixels were drawn - check coordinates and bounds"
-            );
-            return Err(gst::loggable_error!(CAT, "No pixels were drawn"));
-        }
-
-        Ok(())
-    }
-
-    fn draw_bbox_nv12(
-        &self,
-        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
-        params: &BBoxParams,
-        stroke_width: i32,
-        stride: i32,
-        height: i32,
-    ) -> Result<(), gst::LoggableError> {
-        let y_data = frame.plane_data_mut(0).unwrap();
-
-        // Convert RGB color to Y (luminance)
-        let (r, g, b) = params.color;
-        let r = r as f32;
-        let g = g as f32;
-        let b = b as f32;
-        let y_value = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-
-        // Draw horizontal lines with specified stroke width
-        for i in params.x..params.x + params.width {
-            // Top lines
-            for s in 0..stroke_width {
-                if (params.y + s) >= 0 && (params.y + s) < height {
-                    let idx = ((params.y + s) * stride + i) as usize;
-                    if idx < y_data.len() {
-                        y_data[idx] = y_value;
-                    }
-                }
-            }
-            // Bottom lines
-            for s in 0..stroke_width {
-                if (params.y + params.height - s) >= 0 && (params.y + params.height - s) < height {
-                    let idx = ((params.y + params.height - s) * stride + i) as usize;
-                    if idx < y_data.len() {
-                        y_data[idx] = y_value;
-                    }
-                }
-            }
-        }
-
-        // Draw vertical lines with specified stroke width
-        for j in params.y..params.y + params.height {
-            // Left lines
-            for s in 0..stroke_width {
-                if j >= 0 && j < height {
-                    let idx = (j * stride + params.x + s) as usize;
-                    if idx < y_data.len() {
-                        y_data[idx] = y_value;
-                    }
-                }
-            }
-            // Right lines
-            for s in 0..stroke_width {
-                if j >= 0 && j < height {
-                    let idx = (j * stride + params.x + params.width - s) as usize;
-                    if idx < y_data.len() {
-                        y_data[idx] = y_value;
-                    }
+                if x_pos_right >= 0
+                    && x_pos_right < frame.width() as i32
+                    && y_pos >= 0
+                    && y_pos < frame.height() as i32
+                {
+                    self.set_pixel(frame, x_pos_right, y_pos, params.color, video_info);
                 }
             }
         }
@@ -853,14 +782,12 @@ impl EdgeImpulseOverlay {
         y: i32,
         settings: &Settings,
         color: (u8, u8, u8),
+        video_info: &Option<VideoInfo>,
     ) -> Result<(), gst::LoggableError> {
         // Get all video info upfront
-        let (width, height, stride) = {
-            let video_info = self.video_info.lock().unwrap();
-            let info = video_info
-                .as_ref()
-                .ok_or_else(|| gst::loggable_error!(CAT, "Video info not available"))?;
-            (info.width() as i32, info.height() as i32, info.stride()[0])
+        let (width, height, stride) = match video_info {
+            Some(info) => (info.width() as i32, info.height() as i32, info.stride()[0]),
+            None => return Err(gst::loggable_error!(CAT, "Video info not available")),
         };
 
         // Create a temporary surface at 2x resolution for better text quality
@@ -887,9 +814,9 @@ impl EdgeImpulseOverlay {
             // Create and configure text layout
             let layout = create_layout(&cr);
             let mut font_desc = pango::FontDescription::new();
-            font_desc.set_family(&settings.text_font);
+            font_desc.set_family(&settings.font_type);
             // Scale up the font size for high resolution
-            font_desc.set_absolute_size(settings.text_font_size as f64 * pango::SCALE as f64);
+            font_desc.set_absolute_size(settings.font_size as f64 * pango::SCALE as f64);
             if height < 200 {
                 font_desc.set_weight(pango::Weight::Bold);
             }
@@ -983,5 +910,73 @@ impl EdgeImpulseOverlay {
         let g = ((1.0 - score) * 255.0) as u8;
         let b = 0;
         (r, g, b)
+    }
+
+    fn scale_coordinates(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        frame_width: i32,
+        frame_height: i32,
+    ) -> (i32, i32, i32, i32) {
+        let settings = self.settings.lock().unwrap();
+        let scale_x = frame_width as f32 / settings.model_input_width as f32;
+        let scale_y = frame_height as f32 / settings.model_input_height as f32;
+
+        let x = (x * scale_x).round() as i32;
+        let y = (y * scale_y).round() as i32;
+        let width = (width * scale_x).round() as i32;
+        let height = (height * scale_y).round() as i32;
+
+        (x, y, width, height)
+    }
+
+    fn set_pixel(
+        &self,
+        frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
+        x: i32,
+        y: i32,
+        color: (u8, u8, u8),
+        video_info: &Option<VideoInfo>,
+    ) {
+        let info = match video_info {
+            Some(info) => info,
+            None => {
+                gst::warning!(CAT, "Video info not available");
+                return;
+            }
+        };
+
+        let format = info.format();
+        let stride = info.stride()[0];
+        let (r, g, b) = color;
+
+        // Get the plane data directly from the frame
+        if let Ok(data) = frame.plane_data_mut(0) {
+            match format {
+                VideoFormat::Rgb => {
+                    let idx = (y * stride + x * 3) as usize;
+                    if idx + 2 < data.len() {
+                        data[idx] = r;
+                        data[idx + 1] = g;
+                        data[idx + 2] = b;
+                    }
+                }
+                VideoFormat::Nv12 | VideoFormat::Nv21 => {
+                    let idx = (y * stride + x) as usize;
+                    if idx < data.len() {
+                        // Convert RGB to Y (luminance)
+                        let y_value =
+                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+                        data[idx] = y_value;
+                    }
+                }
+                _ => {
+                    gst::warning!(CAT, "Unsupported format: {:?}", format);
+                }
+            }
+        }
     }
 }

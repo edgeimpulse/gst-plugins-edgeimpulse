@@ -195,8 +195,8 @@ use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use serde_json::Value;
+use std::sync::Mutex;
 
 use super::VideoClassificationMeta;
 use crate::video::meta::{VideoAnomalyMeta, VideoRegionOfInterestMeta};
@@ -219,6 +219,9 @@ pub struct VideoState {
 
     /// Height of the input frames (for video models)
     pub height: Option<u32>,
+
+    /// Format of the input frames
+    pub format: Option<VideoFormat>,
 }
 
 /// EdgeImpulseVideoInfer element
@@ -294,7 +297,7 @@ impl ElementImpl for EdgeImpulseVideoInfer {
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
             let caps = gst::Caps::builder("video/x-raw")
-                .field("format", "RGB")
+                .field("format", gst::List::new(["RGB", "GRAY8"]))
                 .field("width", gst::IntRange::new(1, i32::MAX))
                 .field("height", gst::IntRange::new(1, i32::MAX))
                 .build();
@@ -372,9 +375,24 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         drop(out_map);
         drop(in_map);
 
-        // Run inference on the input buffer
-        let mut state = self.state.lock().unwrap();
-        if let Some(ref mut model) = state.model {
+        // Get state values we need
+        let (width, height, format) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.width.unwrap_or(0),
+                state.height.unwrap_or(0),
+                state.format,
+            )
+        };
+
+        // Take a mutable lock on the state for inference
+        let model = {
+            let mut state = self.state.lock().unwrap();
+            state.model.take()
+        };
+
+        if let Some(mut model) = model {
+            gst::debug!(CAT, obj = self.obj(), "Model loaded, running inference");
             // Get all parameters upfront
             let params = match model.parameters() {
                 Ok(p) => p,
@@ -385,32 +403,49 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         "Failed to get model parameters: {}",
                         e
                     );
+                    // Put the model back in the state
+                    let mut state = self.state.lock().unwrap();
+                    state.model = Some(model);
                     return Err(gst::FlowError::Error);
                 }
             };
 
-            let width = params.image_input_width;
-            let height = params.image_input_height;
+            let _model_width = params.image_input_width;
+            let _model_height = params.image_input_height;
             let channels = params.image_channel_count;
             let is_object_detection = params.model_type == "constrained_object_detection"
                 || params.model_type == "object_detection";
-            let is_anomaly_detection = params.model_type == "anomaly_detection";
+            let is_anomaly_detection = params.model_type == "anomaly_detection"
+                || matches!(
+                    params.has_anomaly,
+                    edge_impulse_runner::types::RunnerHelloHasAnomaly::VisualGMM
+                );
 
             gst::debug!(
                 CAT,
                 obj = self.obj(),
-                "Model type: {}, is_object_detection: {}, is_anomaly_detection: {}",
+                "Model parameters: width={}, height={}, channels={}, type={}, has_anomaly={:?}",
+                _model_width,
+                _model_height,
+                channels,
                 params.model_type,
-                is_object_detection,
-                is_anomaly_detection
+                params.has_anomaly
             );
 
             // Extract frame data for inference
             let in_frame = match VideoFrameRef::from_buffer_ref_readable(
                 inbuf.as_ref(),
-                &VideoInfo::builder(VideoFormat::Rgb, width as u32, height as u32)
-                    .build()
-                    .unwrap(),
+                &VideoInfo::builder(
+                    if format == Some(VideoFormat::Gray8) {
+                        VideoFormat::Gray8
+                    } else {
+                        VideoFormat::Rgb
+                    },
+                    width,
+                    height,
+                )
+                .build()
+                .unwrap(),
             ) {
                 Ok(frame) => frame,
                 Err(err) => {
@@ -420,6 +455,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         "Failed to map input buffer: {:?}",
                         err
                     );
+                    // Put the model back in the state
+                    let mut state = self.state.lock().unwrap();
+                    state.model = Some(model);
                     return Err(gst::FlowError::Error);
                 }
             };
@@ -429,33 +467,57 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 Ok(data) => data,
                 Err(err) => {
                     gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {:?}", err);
+                    // Put the model back in the state
+                    let mut state = self.state.lock().unwrap();
+                    state.model = Some(model);
                     return Err(gst::FlowError::Error);
                 }
             };
 
-            // Convert frame data to features based on channel count
+            // Convert frame data to features based on channel count and input format
             let features = if channels == 3 {
-                // RGB: Pack RGB values into single numbers
-                let mut features = Vec::with_capacity((width * height) as usize);
-                for chunk in frame_data.chunks_exact(3) {
-                    if let [r, g, b] = chunk {
-                        // Pack RGB values into a single number: (r << 16) + (g << 8) + b
-                        let packed = (*r as u32) << 16 | (*g as u32) << 8 | (*b as u32);
-                        features.push(packed as f32);
-                    }
-                }
-                features
-            } else {
-                // Grayscale: Convert RGB to grayscale and pack
-                let mut features = Vec::with_capacity((width * height) as usize);
-                for chunk in frame_data.chunks_exact(3) {
-                    if let [r, g, b] = chunk {
-                        // Convert RGB to grayscale using standard weights
-                        let gray =
-                            (0.299 * (*r as f32) + 0.587 * (*g as f32) + 0.114 * (*b as f32)) as u8;
+                if format == Some(VideoFormat::Gray8) {
+                    // Convert grayscale to RGB features
+                    let mut features = Vec::with_capacity((width * height) as usize);
+                    for &gray in frame_data {
                         // Pack grayscale value into RGB format
                         let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
                         features.push(packed as f32);
+                    }
+                    features
+                } else {
+                    // RGB: Pack RGB values into single numbers
+                    let mut features = Vec::with_capacity((width * height) as usize);
+                    for chunk in frame_data.chunks_exact(3) {
+                        if let [r, g, b] = chunk {
+                            // Pack RGB values into a single number: (r << 16) + (g << 8) + b
+                            let packed = (*r as u32) << 16 | (*g as u32) << 8 | (*b as u32);
+                            features.push(packed as f32);
+                        }
+                    }
+                    features
+                }
+            } else {
+                // Grayscale model: Convert input to grayscale if needed
+                let mut features = Vec::with_capacity((width * height) as usize);
+                if format == Some(VideoFormat::Gray8) {
+                    // Already grayscale, just pack the values
+                    for &gray in frame_data {
+                        let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
+                        features.push(packed as f32);
+                    }
+                } else {
+                    // Convert RGB to grayscale and pack
+                    for chunk in frame_data.chunks_exact(3) {
+                        if let [r, g, b] = chunk {
+                            // Convert RGB to grayscale using standard weights
+                            let gray = (0.299 * (*r as f32)
+                                + 0.587 * (*g as f32)
+                                + 0.114 * (*b as f32)) as u8;
+                            // Pack grayscale value into RGB format
+                            let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
+                            features.push(packed as f32);
+                        }
                     }
                 }
                 features
@@ -463,141 +525,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
 
             // Run inference
             let start = std::time::Instant::now();
-            match model.infer(features, None) {
-                Ok(result) => {
-                    let elapsed = start.elapsed();
-                    let result_json = serde_json::to_string(&result.result).unwrap();
-                    gst::debug!(
-                        CAT,
-                        obj = self.obj(),
-                        "Inference result: {}",
-                        result_json
-                    );
-
-                    if is_anomaly_detection {
-                        // Parse the JSON result to get anomaly scores
-                        if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
-                            if let (Some(anomaly), Some(visual_anomaly_max), Some(visual_anomaly_mean)) = (
-                                json["anomaly"].as_f64(),
-                                json["visual_anomaly_max"].as_f64(),
-                                json["visual_anomaly_mean"].as_f64(),
-                            ) {
-                                // Add anomaly meta
-                                let mut meta = VideoAnomalyMeta::add(outbuf);
-                                meta.set_anomaly(anomaly as f32);
-                                meta.set_visual_anomaly_max(visual_anomaly_max as f32);
-                                meta.set_visual_anomaly_mean(visual_anomaly_mean as f32);
-
-                                // Add visual anomaly grid if available
-                                if let Some(grid) = json["visual_anomaly_grid"].as_array() {
-                                    let mut visual_grid = Vec::new();
-                                    for cell in grid {
-                                        if let (Some(x), Some(y), Some(width), Some(height), Some(value)) = (
-                                            cell["x"].as_u64(),
-                                            cell["y"].as_u64(),
-                                            cell["width"].as_u64(),
-                                            cell["height"].as_u64(),
-                                            cell["value"].as_f64(),
-                                        ) {
-                                            visual_grid.push(VideoRegionOfInterestMeta {
-                                                x: x as u32,
-                                                y: y as u32,
-                                                width: width as u32,
-                                                height: height as u32,
-                                                label: format!("{:.3}", value),
-                                            });
-                                        }
-                                    }
-                                    meta.set_visual_anomaly_grid(visual_grid);
-                                }
-                            }
-                        }
-
-                        let s = crate::common::create_inference_message(
-                            "video",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            "anomaly-detection",
-                            result_json,
-                            elapsed.as_millis() as u32,
-                        );
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
-                    } else if is_object_detection {
-                        // Parse the JSON result to get bounding boxes
-                        if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
-                            if let Some(boxes) = json["bounding_boxes"].as_array() {
-                                for bbox in boxes {
-                                    if let (Some(label), Some(value), Some(x), Some(y), Some(width), Some(height)) = (
-                                        bbox["label"].as_str(),
-                                        bbox["value"].as_f64(),
-                                        bbox["x"].as_u64(),
-                                        bbox["y"].as_u64(),
-                                        bbox["width"].as_u64(),
-                                        bbox["height"].as_u64(),
-                                    ) {
-                                        // Add ROI meta for each bounding box
-                                        let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
-                                            outbuf,
-                                            label,
-                                            (x as u32, y as u32, width as u32, height as u32),
-                                        );
-
-                                        // Add detection parameters
-                                        let s = gst::Structure::builder("detection")
-                                            .field("label", label)
-                                            .field("confidence", value)  // Changed from "value" to "confidence"
-                                            .build();
-                                        roi_meta.add_param(s);
-                                    }
-                                }
-                            }
-                        }
-
-                        let s = crate::common::create_inference_message(
-                            "video",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            "object-detection",
-                            result_json,
-                            elapsed.as_millis() as u32,
-                        );
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
-                    } else {
-                        // Classification model
-                        if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
-                            if let Some(classification) = json["classification"].as_object() {
-                                // Find the best classification result
-                                let mut best_label = None;
-                                let mut best_confidence = 0.0;
-                                for (label, confidence) in classification {
-                                    if let Some(conf) = confidence.as_f64() {
-                                        if conf > best_confidence {
-                                            best_confidence = conf;
-                                            best_label = Some(label);
-                                        }
-                                    }
-                                }
-
-                                if let Some(label) = best_label {
-                                    // Add classification meta
-                                    let mut meta = VideoClassificationMeta::add(outbuf);
-                                    let s = gst::Structure::builder("Classification")
-                                        .field("label", label)
-                                        .field("confidence", best_confidence)
-                                        .build();
-                                    meta.add_param(s);
-                                }
-                            }
-                        }
-
-                        let s = crate::common::create_inference_message(
-                            "video",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            "classification",
-                            result_json,
-                            elapsed.as_millis() as u32,
-                        );
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
-                    }
-                }
+            let result = match model.infer(features, None) {
+                Ok(result) => result,
                 Err(e) => {
                     gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
                     let s = crate::common::create_error_message(
@@ -606,8 +535,158 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         e.to_string(),
                     );
                     let _ = self.obj().post_message(gst::message::Element::new(s));
+                    // Put the model back in the state
+                    let mut state = self.state.lock().unwrap();
+                    state.model = Some(model);
+                    return Err(gst::FlowError::Error);
                 }
+            };
+
+            let elapsed = start.elapsed();
+            let result_json = serde_json::to_string(&result.result).unwrap();
+            gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
+
+            if is_anomaly_detection {
+                // Parse the JSON result to get anomaly scores
+                if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                    if let (Some(anomaly), Some(visual_anomaly_max), Some(visual_anomaly_mean)) = (
+                        json["anomaly"].as_f64(),
+                        json["visual_anomaly_max"].as_f64(),
+                        json["visual_anomaly_mean"].as_f64(),
+                    ) {
+                        // Add anomaly meta
+                        let mut meta = VideoAnomalyMeta::add(outbuf);
+                        meta.set_anomaly(anomaly as f32);
+                        meta.set_visual_anomaly_max(visual_anomaly_max as f32);
+                        meta.set_visual_anomaly_mean(visual_anomaly_mean as f32);
+
+                        // Add visual anomaly grid if available
+                        if let Some(grid) = json["visual_anomaly_grid"].as_array() {
+                            let mut visual_grid = Vec::new();
+                            for cell in grid {
+                                if let (Some(x), Some(y), Some(width), Some(height), Some(value)) = (
+                                    cell["x"].as_u64(),
+                                    cell["y"].as_u64(),
+                                    cell["width"].as_u64(),
+                                    cell["height"].as_u64(),
+                                    cell["value"].as_f64(),
+                                ) {
+                                    visual_grid.push(VideoRegionOfInterestMeta {
+                                        x: x as u32,
+                                        y: y as u32,
+                                        width: width as u32,
+                                        height: height as u32,
+                                        label: format!("{:.3}", value),
+                                    });
+                                }
+                            }
+                            meta.set_visual_anomaly_grid(visual_grid);
+                        }
+                    }
+                }
+
+                let s = crate::common::create_inference_message(
+                    "video",
+                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                    "anomaly-detection",
+                    result_json,
+                    elapsed.as_millis() as u32,
+                );
+                let _ = self.obj().post_message(gst::message::Element::new(s));
+            } else if is_object_detection {
+                // Parse the JSON result to get bounding boxes
+                if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                    if let Some(boxes) = json["bounding_boxes"].as_array() {
+                        for bbox in boxes {
+                            if let (
+                                Some(label),
+                                Some(value),
+                                Some(x),
+                                Some(y),
+                                Some(width),
+                                Some(height),
+                            ) = (
+                                bbox["label"].as_str(),
+                                bbox["value"].as_f64(),
+                                bbox["x"].as_u64(),
+                                bbox["y"].as_u64(),
+                                bbox["width"].as_u64(),
+                                bbox["height"].as_u64(),
+                            ) {
+                                // Add ROI meta for each bounding box
+                                let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
+                                    outbuf,
+                                    label,
+                                    (x as u32, y as u32, width as u32, height as u32),
+                                );
+
+                                // Add detection parameters
+                                let s = gst::Structure::builder("detection")
+                                    .field("label", label)
+                                    .field("confidence", value)
+                                    .build();
+                                roi_meta.add_param(s);
+                            }
+                        }
+                    }
+                }
+
+                let s = crate::common::create_inference_message(
+                    "video",
+                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                    "object-detection",
+                    result_json,
+                    elapsed.as_millis() as u32,
+                );
+                let _ = self.obj().post_message(gst::message::Element::new(s));
+            } else {
+                // Classification model
+                if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                    if let Some(classification) = json["classification"].as_object() {
+                        // Find the best classification result
+                        let mut best_label = None;
+                        let mut best_confidence = 0.0;
+                        for (label, confidence) in classification {
+                            if let Some(conf) = confidence.as_f64() {
+                                if conf > best_confidence {
+                                    best_confidence = conf;
+                                    best_label = Some(label);
+                                }
+                            }
+                        }
+
+                        if let Some(label) = best_label {
+                            // Add classification meta
+                            let mut meta = VideoClassificationMeta::add(outbuf);
+                            let s = gst::Structure::builder("classification")
+                                .field("label", label)
+                                .field("confidence", best_confidence)
+                                .build();
+                            meta.add_param(s);
+                            gst::debug!(
+                                CAT,
+                                obj = self.obj(),
+                                "Added classification metadata: label={}, confidence={}",
+                                label,
+                                best_confidence
+                            );
+                        }
+                    }
+                }
+
+                let s = crate::common::create_inference_message(
+                    "video",
+                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                    "classification",
+                    result_json,
+                    elapsed.as_millis() as u32,
+                );
+                let _ = self.obj().post_message(gst::message::Element::new(s));
             }
+
+            // Put the model back in the state
+            let mut state = self.state.lock().unwrap();
+            state.model = Some(model);
         } else {
             gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
         }
@@ -637,14 +716,16 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         gst::info!(
             CAT,
             obj = self.obj(),
-            "Setting caps: width={}, height={}",
+            "Setting caps: width={}, height={}, format={:?}",
             in_info.width(),
-            in_info.height()
+            in_info.height(),
+            in_info.format()
         );
 
-        // Store dimensions
+        // Store dimensions and format
         state.width = Some(in_info.width());
         state.height = Some(in_info.height());
+        state.format = Some(in_info.format());
 
         Ok(())
     }

@@ -510,53 +510,11 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 anomaly * 100.0
             );
 
-            // Draw anomaly score
-            let text = format!("Anomaly: {:.1}%", anomaly * 100.0);
-            let text_x = if settings.text_position == "top-left" || settings.text_position == "bottom-left" {
-                10
-            } else if settings.text_position == "top-right" || settings.text_position == "bottom-right" {
-                frame.width() as i32 - settings.font_size - 10
-            } else {
-                -1
-            };
-            let text_y = if settings.text_position == "top-left" || settings.text_position == "top-right" {
-                10
-            } else if settings.text_position == "bottom-left" || settings.text_position == "bottom-right" {
-                frame.height() as i32 - settings.font_size - 10
-            } else {
-                -1
-            };
-
-            // Use red color for anomaly score
-            let color = (255, 0, 0);
-
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Drawing anomaly score text at ({}, {}): {}",
-                text_x,
-                text_y,
-                text
-            );
-
-            if let Err(e) =
-                self.draw_text(frame, TextParams {
-                    text,
-                    x: text_x,
-                    y: text_y,
-                    settings: settings.clone(),
-                    color,
-                }, &video_info)
-            {
-                gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
-                return Err(gst::FlowError::Error);
-            }
-
             // Draw visual anomaly grid
             for (x, y, width, height, score) in grid {
                 // Note: coordinates are already scaled from the grid creation
                 let normalized_score = (score / 30.0).min(1.0);
-                let color = self.get_color_for_score(normalized_score);
+                let color = self.get_color_for_score(normalized_score as f32);
 
                 gst::debug!(
                     CAT,
@@ -599,26 +557,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                         obj = self.obj(),
                         "Skipping bounding box drawing because stroke_width is 0"
                     );
-                }
-
-                // Draw label if enabled
-                if settings.show_labels {
-                    let text = format!("{:.1}%", normalized_score * 100.0);
-                    let text_x = x + 2;
-                    let text_y = y + 2;
-
-                    if let Err(e) =
-                        self.draw_text(frame, TextParams {
-                            text,
-                            x: text_x,
-                            y: text_y,
-                            settings: settings.clone(),
-                            color,
-                        }, &video_info)
-                    {
-                        gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
-                        return Err(gst::FlowError::Error);
-                    }
                 }
             }
         }
@@ -675,7 +613,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
                 // Draw label if enabled
                 if settings.show_labels {
-                    let text = format!("{} {:.1}%", label, confidence * 100.0);
+                    let text = format!("{:.1}", confidence * 100.0);
                     let text_x = x + 2;
                     // Position the text just slightly below the top of the bounding box
                     let text_y = y + 2;
@@ -728,16 +666,7 @@ impl EdgeImpulseOverlay {
         let width = params.width;
         let height = params.height;
 
-        gst::debug!(
-            CAT,
-            "Drawing bbox at ({}, {}) with size {}x{}",
-            x,
-            y,
-            width,
-            height,
-        );
-
-        // Draw horizontal lines
+        // Draw horizontal lines with full opacity
         for i in 0..settings.stroke_width {
             for j in 0..width {
                 let x_pos = x + j;
@@ -762,7 +691,7 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        // Draw vertical lines
+        // Draw vertical lines with full opacity
         for i in 0..settings.stroke_width {
             for j in 0..height {
                 let x_pos_left = x + i;
@@ -783,6 +712,27 @@ impl EdgeImpulseOverlay {
                     && y_pos < frame.height() as i32
                 {
                     self.set_pixel(frame, x_pos_right, y_pos, params.color, video_info);
+                }
+            }
+        }
+
+        // Fill the inner box with fixed 0.2 opacity
+        for i in (x + settings.stroke_width)..(x + width - settings.stroke_width) {
+            for j in (y + settings.stroke_width)..(y + height - settings.stroke_width) {
+                if i >= 0 && i < frame.width() as i32 && j >= 0 && j < frame.height() as i32 {
+                    // Get the original pixel color
+                    let original_color = self.get_pixel(frame, i, j, video_info);
+
+                    // Use fixed 0.2 opacity as in the TypeScript code
+                    let opacity = 0.2;
+
+                    // Mix colors based on opacity
+                    let mixed_color = (
+                        ((params.color.0 as f64 * opacity + original_color.0 as f64 * (1.0 - opacity)) as u32) as u8,
+                        ((params.color.1 as f64 * opacity + original_color.1 as f64 * (1.0 - opacity)) as u32) as u8,
+                        ((params.color.2 as f64 * opacity + original_color.2 as f64 * (1.0 - opacity)) as u32) as u8,
+                    );
+                    self.set_pixel(frame, i, j, mixed_color, video_info);
                 }
             }
         }
@@ -916,12 +866,15 @@ impl EdgeImpulseOverlay {
         Ok(())
     }
 
-    fn get_color_for_score(&self, score: f64) -> (u8, u8, u8) {
-        // Convert score to color gradient from green (0.0) to red (1.0)
-        let r = (score * 255.0) as u8;
-        let g = ((1.0 - score) * 255.0) as u8;
-        let b = 0;
-        (r, g, b)
+    fn get_color_for_score(&self, score: f32) -> (u8, u8, u8) {
+        // Use blue (0, 0, 255) for low scores and red (255, 0, 0) for high scores
+        let score = score.clamp(0.0, 1.0);
+
+        // Linear interpolation from blue to red
+        let red = (score * 255.0) as u8;
+        let blue = ((1.0 - score) * 255.0) as u8;
+
+        (red, 0, blue)
     }
 
     fn set_pixel(
@@ -969,5 +922,44 @@ impl EdgeImpulseOverlay {
                 }
             }
         }
+    }
+
+    fn get_pixel(
+        &self,
+        frame: &gst_video::VideoFrameRef<&mut gst::BufferRef>,
+        x: i32,
+        y: i32,
+        video_info: &Option<VideoInfo>,
+    ) -> (u8, u8, u8) {
+        let info = match video_info {
+            Some(info) => info,
+            None => {
+                return (0, 0, 0);
+            }
+        };
+
+        let format = info.format();
+        let stride = info.stride()[0];
+
+        // Get the plane data directly from the frame
+        if let Ok(data) = frame.plane_data(0) {
+            match format {
+                VideoFormat::Rgb => {
+                    let idx = (y * stride + x * 3) as usize;
+                    if idx + 2 < data.len() {
+                        return (data[idx], data[idx + 1], data[idx + 2]);
+                    }
+                }
+                VideoFormat::Nv12 | VideoFormat::Nv21 => {
+                    let idx = (y * stride + x) as usize;
+                    if idx < data.len() {
+                        let y_value = data[idx];
+                        return (y_value, y_value, y_value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (0, 0, 0)
     }
 }

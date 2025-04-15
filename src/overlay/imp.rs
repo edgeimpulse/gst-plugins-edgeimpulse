@@ -912,27 +912,6 @@ impl EdgeImpulseOverlay {
         (r, g, b)
     }
 
-    fn scale_coordinates(
-        &self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        frame_width: i32,
-        frame_height: i32,
-    ) -> (i32, i32, i32, i32) {
-        let settings = self.settings.lock().unwrap();
-        let scale_x = frame_width as f32 / settings.model_input_width as f32;
-        let scale_y = frame_height as f32 / settings.model_input_height as f32;
-
-        let x = (x * scale_x).round() as i32;
-        let y = (y * scale_y).round() as i32;
-        let width = (width * scale_x).round() as i32;
-        let height = (height * scale_y).round() as i32;
-
-        (x, y, width, height)
-    }
-
     fn set_pixel(
         &self,
         frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,

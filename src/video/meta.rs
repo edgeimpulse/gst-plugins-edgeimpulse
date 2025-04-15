@@ -1,15 +1,8 @@
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
-use gstreamer::subclass::prelude::*;
-use gstreamer::Meta;
-use gstreamer_base as gst_base;
-use gstreamer_base::subclass::prelude::*;
-use gstreamer_video as gst_video;
-use once_cell::sync::Lazy;
 use std::fmt;
 use std::ptr;
-use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct VideoRegionOfInterestMeta {
@@ -160,7 +153,6 @@ mod imp {
     use super::*;
     use glib::translate::*;
     use gstreamer as gst;
-    use gstreamer_video as gst_video;
     use once_cell::sync::Lazy;
     use std::mem;
     use std::ptr;

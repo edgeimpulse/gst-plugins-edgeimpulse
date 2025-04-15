@@ -349,6 +349,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
         let anomaly_data = frame.buffer().meta::<VideoAnomalyMeta>().map(|meta| {
             let anomaly = meta.anomaly();
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Received anomaly meta: score={:.1}%, grid_size={}",
+                anomaly * 100.0,
+                meta.visual_anomaly_grid().len()
+            );
             let grid: Vec<(i32, i32, i32, i32, f64)> = meta
                 .visual_anomaly_grid()
                 .iter()
@@ -357,13 +364,18 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     // Scale coordinates based on input and output dimensions
                     let scale_x = frame.width() as f64 / 160.0;
                     let scale_y = frame.height() as f64 / 160.0;
-                    (
-                        (roi.x as f64 * scale_x) as i32,
-                        (roi.y as f64 * scale_y) as i32,
-                        (roi.width as f64 * scale_x) as i32,
-                        (roi.height as f64 * scale_y) as i32,
-                        score,
-                    )
+                    let scaled_x = (roi.x as f64 * scale_x) as i32;
+                    let scaled_y = (roi.y as f64 * scale_y) as i32;
+                    let scaled_w = (roi.width as f64 * scale_x) as i32;
+                    let scaled_h = (roi.height as f64 * scale_y) as i32;
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Scaling ROI: ({}, {}) {}x{} -> ({}, {}) {}x{}",
+                        roi.x, roi.y, roi.width, roi.height,
+                        scaled_x, scaled_y, scaled_w, scaled_h
+                    );
+                    (scaled_x, scaled_y, scaled_w, scaled_h, score)
                 })
                 .collect();
             (anomaly, grid)
@@ -438,8 +450,10 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             gst::debug!(
                 CAT,
                 obj = self.obj(),
-                "Rendering anomaly detection: {:.1}%",
-                anomaly * 100.0
+                "Processing anomaly grid: {} cells, frame size: {}x{}",
+                grid.len(),
+                frame.width(),
+                frame.height()
             );
 
             // Draw anomaly score
@@ -465,13 +479,16 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw visual anomaly grid
             for (x, y, width, height, score) in grid {
+                // Note: coordinates are already scaled from the grid creation
+                let normalized_score = (score / 30.0).min(1.0);
+                let color = self.get_color_for_score(normalized_score);
+
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
-                    "Drawing anomaly grid cell: ({}, {}) {}x{} score={:.1}%",
-                    x, y, width, height, score * 100.0
+                    "Processing grid cell: ({}, {}) {}x{} score={:.1}% color={:?}",
+                    x, y, width, height, normalized_score * 100.0, color
                 );
-                let color = self.get_color_for_score(score);
 
                 // Draw bounding box if stroke width > 0
                 if settings.stroke_width > 0 {
@@ -480,9 +497,16 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                         y,
                         width,
                         height,
-                        roi_type: format!("anomaly {:.1}%", score * 100.0),
+                        roi_type: format!("anomaly {:.1}%", normalized_score * 100.0),
                         color,
                     };
+
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Drawing bounding box: {:?}",
+                        bbox_params
+                    );
 
                     if let Err(e) = self.draw_bbox(frame, &bbox_params) {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw box: {}", e);
@@ -492,7 +516,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
                 // Draw label if enabled
                 if settings.show_labels {
-                    let text = format!("{:.1}%", score * 100.0);
+                    let text = format!("{:.1}%", normalized_score * 100.0);
                     let text_x = x + 2;
                     let text_y = y + 2;
 
@@ -616,9 +640,13 @@ impl EdgeImpulseOverlay {
         gst::debug!(
             CAT,
             obj = self.obj(),
-            "Drawing bbox for {} with format: {:?}",
+            "Drawing bbox for {}: format={:?}, stride={}, frame={}x{}, bbox={:?}",
             params.roi_type,
-            format
+            format,
+            stride,
+            width,
+            height,
+            params
         );
 
         match format {

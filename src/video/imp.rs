@@ -535,11 +535,18 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         bbox["height"].as_u64(),
                                     ) {
                                         // Add ROI meta for each bounding box
-                                        let _ = gst_video::VideoRegionOfInterestMeta::add(
+                                        let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
                                             outbuf,
                                             label,
                                             (x as u32, y as u32, width as u32, height as u32),
                                         );
+
+                                        // Add detection parameters
+                                        let s = gst::Structure::builder("detection")
+                                            .field("label", label)
+                                            .field("confidence", value)  // Changed from "value" to "confidence"
+                                            .build();
+                                        roi_meta.add_param(s);
                                     }
                                 }
                             }
@@ -555,6 +562,32 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         let _ = self.obj().post_message(gst::message::Element::new(s));
                     } else {
                         // Classification model
+                        if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                            if let Some(classification) = json["classification"].as_object() {
+                                // Find the best classification result
+                                let mut best_label = None;
+                                let mut best_confidence = 0.0;
+                                for (label, confidence) in classification {
+                                    if let Some(conf) = confidence.as_f64() {
+                                        if conf > best_confidence {
+                                            best_confidence = conf;
+                                            best_label = Some(label);
+                                        }
+                                    }
+                                }
+
+                                if let Some(label) = best_label {
+                                    // Add classification meta
+                                    let mut meta = VideoClassificationMeta::add(outbuf);
+                                    let s = gst::Structure::builder("Classification")
+                                        .field("label", label)
+                                        .field("confidence", best_confidence)
+                                        .build();
+                                    meta.add_param(s);
+                                }
+                            }
+                        }
+
                         let s = crate::common::create_inference_message(
                             "video",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),

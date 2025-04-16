@@ -6,7 +6,7 @@
 //! # Object Detection
 //! - Renders bounding boxes from VideoRegionOfInterestMeta
 //! - Each class gets a unique color from a predefined palette
-//! - Boxes have fully opaque borders and 20% opacity fill
+//! - Boxes have fully opaque borders and transparent fill
 //! - Shows confidence scores and labels
 //!
 //! # Classification
@@ -505,20 +505,27 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw classification text
             let text = format!("{} {:.1}%", label, confidence * 100.0);
-            let text_x = if settings.text_position == "top-left" || settings.text_position == "bottom-left" {
+            let text_x = if settings.text_position == "top-left"
+                || settings.text_position == "bottom-left"
+            {
                 10
-            } else if settings.text_position == "top-right" || settings.text_position == "bottom-right" {
+            } else if settings.text_position == "top-right"
+                || settings.text_position == "bottom-right"
+            {
                 frame.width() as i32 - settings.font_size - 10
             } else {
                 -1
             };
-            let text_y = if settings.text_position == "top-left" || settings.text_position == "top-right" {
-                10
-            } else if settings.text_position == "bottom-left" || settings.text_position == "bottom-right" {
-                frame.height() as i32 - settings.font_size - 10
-            } else {
-                -1
-            };
+            let text_y =
+                if settings.text_position == "top-left" || settings.text_position == "top-right" {
+                    10
+                } else if settings.text_position == "bottom-left"
+                    || settings.text_position == "bottom-right"
+                {
+                    frame.height() as i32 - settings.font_size - 10
+                } else {
+                    -1
+                };
 
             // Get or assign color for this label
             let color = if let Some(color) = label_colors.get(&label) {
@@ -530,15 +537,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 *next_color
             };
 
-            if let Err(e) =
-                self.draw_text(frame, TextParams {
+            if let Err(e) = self.draw_text(
+                frame,
+                TextParams {
                     text,
                     x: text_x,
                     y: text_y,
                     settings: settings.clone(),
                     color,
-                }, &video_info)
-            {
+                },
+                &video_info,
+            ) {
                 gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                 return Err(gst::FlowError::Error);
             }
@@ -659,20 +668,22 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
                 // Draw label if enabled
                 if settings.show_labels {
-                    let text = format!("{:.1}", confidence * 100.0);
+                    let text = format!("{} {:.1}%", label, confidence * 100.0);
                     let text_x = x + 2;
                     // Position the text just slightly below the top of the bounding box
                     let text_y = y + 2;
 
-                    if let Err(e) =
-                        self.draw_text(frame, TextParams {
+                    if let Err(e) = self.draw_text(
+                        frame,
+                        TextParams {
                             text,
                             x: text_x,
                             y: text_y,
                             settings: settings.clone(),
                             color,
-                        }, &video_info)
-                    {
+                        },
+                        &video_info,
+                    ) {
                         gst::error!(CAT, obj = self.obj(), "Failed to draw text: {}", e);
                         return Err(gst::FlowError::Error);
                     }
@@ -715,7 +726,6 @@ impl EdgeImpulseOverlay {
         settings: &Settings,
         video_info: &Option<VideoInfo>,
     ) -> Result<(), gst::LoggableError> {
-        // The coordinates are already scaled, no need to scale them again
         let x = params.x;
         let y = params.y;
         let width = params.width;
@@ -771,23 +781,26 @@ impl EdgeImpulseOverlay {
             }
         }
 
-        // Fill the inner box with fixed 0.2 opacity
-        for i in (x + settings.stroke_width)..(x + width - settings.stroke_width) {
-            for j in (y + settings.stroke_width)..(y + height - settings.stroke_width) {
-                if i >= 0 && i < frame.width() as i32 && j >= 0 && j < frame.height() as i32 {
-                    // Get the original pixel color
-                    let original_color = self.get_pixel(frame, i, j, video_info);
-
-                    // Use fixed 0.2 opacity as in the TypeScript code
-                    let opacity = 0.2;
-
-                    // Mix colors based on opacity
-                    let mixed_color = (
-                        ((params.color.0 as f64 * opacity + original_color.0 as f64 * (1.0 - opacity)) as u32) as u8,
-                        ((params.color.1 as f64 * opacity + original_color.1 as f64 * (1.0 - opacity)) as u32) as u8,
-                        ((params.color.2 as f64 * opacity + original_color.2 as f64 * (1.0 - opacity)) as u32) as u8,
-                    );
-                    self.set_pixel(frame, i, j, mixed_color, video_info);
+        // Only fill the box with transparency for anomaly detection
+        if params.roi_type.starts_with("anomaly") {
+            for i in (x + settings.stroke_width)..(x + width - settings.stroke_width) {
+                for j in (y + settings.stroke_width)..(y + height - settings.stroke_width) {
+                    if i >= 0 && i < frame.width() as i32 && j >= 0 && j < frame.height() as i32 {
+                        let original_color = self.get_pixel(frame, i, j, video_info);
+                        let opacity = 0.2;
+                        let mixed_color = (
+                            ((params.color.0 as f64 * opacity
+                                + original_color.0 as f64 * (1.0 - opacity))
+                                as u32) as u8,
+                            ((params.color.1 as f64 * opacity
+                                + original_color.1 as f64 * (1.0 - opacity))
+                                as u32) as u8,
+                            ((params.color.2 as f64 * opacity
+                                + original_color.2 as f64 * (1.0 - opacity))
+                                as u32) as u8,
+                        );
+                        self.set_pixel(frame, i, j, mixed_color, video_info);
+                    }
                 }
             }
         }
@@ -883,8 +896,10 @@ impl EdgeImpulseOverlay {
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo fill failed: {}", e))?;
 
             // Calculate perceived brightness of background color
-            let brightness =
-                (0.299 * params.color.0 as f64 + 0.587 * params.color.1 as f64 + 0.114 * params.color.2 as f64) / 255.0;
+            let brightness = (0.299 * params.color.0 as f64
+                + 0.587 * params.color.1 as f64
+                + 0.114 * params.color.2 as f64)
+                / 255.0;
 
             // Use white text for dark backgrounds, black text for light backgrounds
             if brightness < 0.5 {

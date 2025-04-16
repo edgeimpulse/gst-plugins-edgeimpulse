@@ -177,12 +177,12 @@ impl ObjectImpl for EdgeImpulseOverlay {
                     .build(),
                 glib::ParamSpecString::builder("text-position")
                     .nick("Text Position")
-                    .blurb("Position of the text")
+                    .blurb("Position of the text for classification model labels")
                     .default_value(Some("top-left"))
                     .build(),
                 glib::ParamSpecBoolean::builder("show-labels")
                     .nick("Show Labels")
-                    .blurb("Whether to show labels")
+                    .blurb("Whether to show labels for object detection models")
                     .default_value(true)
                     .build(),
                 glib::ParamSpecInt::builder("model-input-width")
@@ -512,9 +512,12 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             } else if settings.text_position == "top-right"
                 || settings.text_position == "bottom-right"
             {
-                frame.width() as i32 - settings.font_size - 10
+                // Calculate position based on frame width and text width
+                // Add more padding (20px) from the right edge and use a more conservative text width estimate
+                let estimated_text_width = settings.font_size * (text.len() as i32) / 2;
+                (frame.width() as i32 - estimated_text_width - 20).max(0)
             } else {
-                -1
+                10 // Default to left alignment
             };
             let text_y =
                 if settings.text_position == "top-left" || settings.text_position == "top-right" {
@@ -524,7 +527,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 {
                     frame.height() as i32 - settings.font_size - 10
                 } else {
-                    -1
+                    10 // Default to top
                 };
 
             // Get or assign color for this label

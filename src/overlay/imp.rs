@@ -1,3 +1,49 @@
+//! Edge Impulse GStreamer Overlay
+//!
+//! A GStreamer video filter element that renders visual overlays for Edge Impulse model inference
+//! results. Supports multiple types of model outputs:
+//!
+//! # Object Detection
+//! - Renders bounding boxes from VideoRegionOfInterestMeta
+//! - Each class gets a unique color from a predefined palette
+//! - Boxes have fully opaque borders and 20% opacity fill
+//! - Shows confidence scores and labels
+//!
+//! # Classification
+//! - Renders text overlays from VideoClassificationMeta
+//! - Configurable position (top/bottom, left/right)
+//! - Shows class label and confidence
+//! - Uses consistent colors per class
+//!
+//! # Anomaly Detection
+//! - Visualizes anomaly matrix from VideoAnomalyMeta
+//! - Color interpolation based on score:
+//!   - Low scores: Blue (0, 0, 255)
+//!   - High scores: Red (255, 0, 0)
+//! - Grid cells have 20% fill opacity
+//! - Scores are normalized (score/30.0, clamped to 1.0)
+//!
+//! # Rendering
+//! Uses two main approaches:
+//! 1. Direct pixel manipulation (set_pixel/get_pixel) for boxes and grids
+//!    - Supports RGB and NV12/NV21 formats
+//!    - Handles transparency by mixing with original pixels
+//!
+//! 2. Cairo/Pango for text
+//!    - 2x resolution for quality
+//!    - 70% opacity background for readability
+//!    - Auto-selects text color based on background
+//!
+//! # Configuration
+//! Configurable via GStreamer properties:
+//! - stroke-width: Line width for boxes
+//! - text-color: Override text color
+//! - font-size: Text size
+//! - font-type: Font selection
+//! - text-position: Label placement
+//! - show-labels: Toggle labels
+//! - model-input-width/height: For coordinate scaling
+
 use glib::ParamSpecBuilderExt;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -653,6 +699,15 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
 // Implementation of element specific methods
 impl EdgeImpulseOverlay {
+    /// Renders a bounding box with colored borders and semi-transparent fill.
+    /// Used for both object detection boxes and anomaly grid cells.
+    ///
+    /// The box is drawn with:
+    /// - Fully opaque borders of specified stroke width
+    /// - Semi-transparent fill (20% opacity)
+    /// - Color determined by the model type:
+    ///   - Object Detection: From predefined class color palette
+    ///   - Anomaly Detection: Interpolated between blue and red based on score
     fn draw_bbox(
         &self,
         frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
@@ -740,9 +795,30 @@ impl EdgeImpulseOverlay {
         Ok(())
     }
 
+    /// Determines color for anomaly visualization based on score.
+    /// - Low scores (near 0): Blue (0, 0, 255)
+    /// - High scores (near 1): Red (255, 0, 0)
+    /// - Intermediate scores: Linear interpolation between blue and red
+    fn get_color_for_score(&self, score: f32) -> (u8, u8, u8) {
+        // Use blue (0, 0, 255) for low scores and red (255, 0, 0) for high scores
+        let score = score.clamp(0.0, 1.0);
+
+        // Linear interpolation from blue to red
+        let red = (score * 255.0) as u8;
+        let blue = ((1.0 - score) * 255.0) as u8;
+
+        (red, 0, blue)
+    }
+
+    /// Renders text overlay for classification results.
+    /// Uses Cairo/Pango for high-quality text rendering with:
+    /// - 2x resolution surface for better quality
+    /// - Semi-transparent background (70% opacity)
+    /// - Auto-selected text color based on background brightness
+    /// - Configurable position via settings
     fn draw_text(
         &self,
-        frame: &mut VideoFrameRef<&mut gst::BufferRef>,
+        frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
         params: TextParams,
         video_info: &Option<VideoInfo>,
     ) -> Result<(), gst::LoggableError> {
@@ -866,17 +942,8 @@ impl EdgeImpulseOverlay {
         Ok(())
     }
 
-    fn get_color_for_score(&self, score: f32) -> (u8, u8, u8) {
-        // Use blue (0, 0, 255) for low scores and red (255, 0, 0) for high scores
-        let score = score.clamp(0.0, 1.0);
-
-        // Linear interpolation from blue to red
-        let red = (score * 255.0) as u8;
-        let blue = ((1.0 - score) * 255.0) as u8;
-
-        (red, 0, blue)
-    }
-
+    /// Sets a pixel color in the video frame, handling different color formats.
+    /// Supports direct RGB manipulation and NV12/NV21 color space conversion.
     fn set_pixel(
         &self,
         frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
@@ -924,9 +991,12 @@ impl EdgeImpulseOverlay {
         }
     }
 
+    /// Reads a pixel's color from the video frame.
+    /// Used for transparency calculations when filling boxes.
+    /// Handles different color formats (RGB, NV12/NV21).
     fn get_pixel(
         &self,
-        frame: &gst_video::VideoFrameRef<&mut gst::BufferRef>,
+        frame: &gst_video::VideoFrameRef<&gst::BufferRef>,
         x: i32,
         y: i32,
         video_info: &Option<VideoInfo>,

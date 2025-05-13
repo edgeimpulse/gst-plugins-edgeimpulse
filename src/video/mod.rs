@@ -26,4 +26,4 @@ pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     )
 }
 
-pub use meta::VideoClassificationMeta;
+pub use meta::{VideoAnomalyMeta, VideoClassificationMeta};

@@ -4,6 +4,105 @@
 
 A GStreamer plugin that enables real-time machine learning inference using Edge Impulse models. The plugin provides three elements for audio and video inference and visualization.
 
+## Public API: Inference Output
+
+The plugin exposes inference results through two standardized mechanisms:
+
+1. **GStreamer Bus Messages**
+   - All inference elements emit structured messages on the GStreamer bus with the name `edge-impulse-inference-result`.
+   - These messages contain the inference result as JSON, along with buffer timestamp and type.
+   - Available for both audio and video elements.
+
+2. **Video Frame Metadata (VideoRegionOfInterestMeta)**
+   - For video inference, results are also attached as metadata to each video frame using `VideoRegionOfInterestMeta`.
+   - This enables downstream elements (e.g., overlays, SDKs) to consume and visualize results directly.
+   - Available for video elements only.
+
+   **VideoRegionOfInterestMeta Content:**
+
+   Each `VideoRegionOfInterestMeta` attached to a video frame contains:
+   - `x` (u32): X coordinate of the top-left corner of the region (in pixels)
+   - `y` (u32): Y coordinate of the top-left corner of the region (in pixels)
+   - `width` (u32): Width of the region (in pixels)
+   - `height` (u32): Height of the region (in pixels)
+   - `label` (String): Class label or description for the region
+
+   For object detection, each detected object is represented as a separate ROI. For classification, a single ROI may cover the whole frame with the top label. For visual anomaly detection, the ROI may include anomaly scores and grid data as additional metadata.
+
+### Supported Model Types and Output Formats
+
+#### 1. Object Detection
+- **Bus Message Example:**
+  ```json
+  {
+    "timestamp": 1234567890,
+    "type": "object-detection",
+    "result": {
+      "bounding_boxes": [
+        {
+          "label": "person",
+          "value": 0.95,
+          "x": 24,
+          "y": 145,
+          "width": 352,
+          "height": 239
+        }
+      ]
+    }
+  }
+  ```
+- **Video Metadata:**
+  - Each detected object is attached as a `VideoRegionOfInterestMeta` with bounding box coordinates, label, and confidence.
+
+#### 2. Classification
+- **Bus Message Example:**
+  ```json
+  {
+    "timestamp": 1234567890,
+    "type": "classification",
+    "result": {
+      "classification": [
+        {"label": "cat", "value": 0.85},
+        {"label": "dog", "value": 0.15}
+      ]
+    }
+  }
+  ```
+- **Video Metadata:**
+  - For video, the top classification result may be attached as a single ROI covering the frame, with label and confidence.
+
+#### 3. Visual Anomaly Detection
+- **Bus Message Example:**
+  ```json
+  {
+    "timestamp": 1234567890,
+    "type": "anomaly-detection",
+    "result": {
+      "anomaly": 0.35,
+      "classification": {
+        "normal": 0.85,
+        "anomalous": 0.15
+      },
+      "visual_anomaly_max": 0.42,
+      "visual_anomaly_mean": 0.21,
+      "visual_anomaly_grid": [
+        { "x": 0, "y": 0, "width": 32, "height": 32, "score": 0.12 },
+        { "x": 32, "y": 0, "width": 32, "height": 32, "score": 0.18 }
+        // ... more grid cells ...
+      ]
+    }
+  }
+  ```
+- **Video Metadata:**
+  - The frame will have a `VideoAnomalyMeta` attached, containing:
+    - `anomaly`: The overall anomaly score for the frame
+    - `visual_anomaly_max`: The maximum anomaly score in the grid
+    - `visual_anomaly_mean`: The mean anomaly score in the grid
+    - `visual_anomaly_grid`: A list of grid cells, each with its own region (`x`, `y`, `width`, `height`) and anomaly `score`
+  - Optionally, each grid cell may also be represented as a `VideoRegionOfInterestMeta` with the anomaly score as the label or as additional metadata, enabling visualization overlays.
+
+> **Note:** Audio elements only emit bus messages; video elements emit both bus messages and metadata.
+
 ## Dependencies
 This plugin depends on:
 * GStreamer 1.20 or newer
@@ -142,7 +241,7 @@ Key features:
 - Accepts S16LE mono audio at 8-48kHz
 - Passes audio through unchanged
 - Performs inference when model is loaded
-- Emits inference results as messages
+- Emits inference results as messages (see [Public API](#public-api-inference-output))
 
 Example pipeline:
 ```bash
@@ -204,21 +303,8 @@ Key features:
 - Passes frames through unchanged
 - Performs inference when model is loaded
 - Supports both classification and object detection models
-- Emits inference results as messages
-- Configurable thresholds for object detection and anomaly detection
-
-For object detection models, the element provides two mechanisms to consume results:
-
-1. Bus Messages:
-   - Sends element messages on the GStreamer bus
-   - Messages contain raw JSON results and timing information
-   - Useful for custom applications that want to process detection results
-
-2. QC IM SDK Compatible Metadata:
-   - Attaches VideoRegionOfInterestMeta to each video frame
-   - Compatible with Qualcomm IM SDK `qtioverlay` element
-   - Enables automatic visualization in QC IM SDK pipelines
-   - Each ROI includes bounding box coordinates, label and confidence
+- Emits inference results as messages (see [Public API](#public-api-inference-output))
+- Attaches VideoRegionOfInterestMeta to each video frame (see [Public API](#public-api-inference-output))
 
 Example pipelines:
 
@@ -276,7 +362,7 @@ Pad Templates:
   ```
 
 Key features:
-- Draws bounding boxes for object detection results
+- Draws bounding boxes for object detection results (from VideoRegionOfInterestMeta)
 - Displays class labels with confidence scores
 - Supports wide range of video formats
 
@@ -371,7 +457,7 @@ Detected: normal (85.0%)
 Anomaly score: 35.0%
 ```
 
-The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks.
+The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks. See [Public API](#public-api-inference-output) for output details.
 
 ### Video Classification/Detection
 Run the video classification example:
@@ -425,13 +511,7 @@ Message structure: edge-impulse-inference-result {
 Detected: cat (85.0%)
 ```
 
-The element will automatically detect the model type (classification or object detection) and emit appropriate messages. For object detection models, bounding boxes will be visualized on the video output when using the `edgeimpulseoverlay` element.
-
-## Message Format
-The elements emit "edge-impulse-inference-result" messages containing:
-- timestamp: Buffer presentation timestamp
-- type: "classification" or "object-detection" (video only)
-- result: JSON string with model output
+The element will automatically detect the model type (classification or object detection) and emit appropriate messages. For object detection models, bounding boxes will be visualized on the video output when using the `edgeimpulseoverlay` element. See [Public API](#public-api-inference-output) for output details.
 
 ## Debugging
 Enable debug output with:

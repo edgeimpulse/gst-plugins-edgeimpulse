@@ -295,24 +295,32 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                             if classification.is_array() {
                                 let mut map = serde_json::Map::new();
                                 for entry in classification.as_array().unwrap() {
-                                    if let (Some(label), Some(value)) = (entry.get("label"), entry.get("value")) {
-                                        if let (Some(label), Some(value)) = (label.as_str(), value.as_f64()) {
-                                            map.insert(label.to_string(), serde_json::Value::from(value));
+                                    if let (Some(label), Some(value)) =
+                                        (entry.get("label"), entry.get("value"))
+                                    {
+                                        if let (Some(label), Some(value)) =
+                                            (label.as_str(), value.as_f64())
+                                        {
+                                            map.insert(
+                                                label.to_string(),
+                                                serde_json::Value::from(value),
+                                            );
                                         }
                                     }
                                 }
                                 *classification = serde_json::Value::Object(map);
                             }
                         }
-                        let result_json = serde_json::to_string(&result_value).unwrap_or_else(|e| {
-                            gst::warning!(
-                                CAT,
-                                obj = self.obj(),
-                                "Failed to serialize result: {}",
-                                e
-                            );
-                            String::from("{}")
-                        });
+                        let result_json =
+                            serde_json::to_string(&result_value).unwrap_or_else(|e| {
+                                gst::warning!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "Failed to serialize result: {}",
+                                    e
+                                );
+                                String::from("{}")
+                            });
 
                         let s = crate::common::create_inference_message(
                             "audio",

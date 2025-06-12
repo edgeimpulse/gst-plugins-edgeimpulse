@@ -316,11 +316,7 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                                 if let Some(classification) = json["classification"].as_object() {
                                     for (label, value) in classification {
                                         if let Some(conf) = value.as_f64() {
-                                            println!(
-                                                "  Class: {} ({:.1}%)",
-                                                label,
-                                                conf * 100.0
-                                            );
+                                            println!("  Class: {} ({:.1}%)", label, conf * 100.0);
                                         }
                                     }
                                 }
@@ -334,13 +330,18 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                                         let score = cell["score"].as_f64().unwrap_or(0.0);
                                         println!(
                                             "    Cell at ({}, {}) size {}x{}: score {:.2}%",
-                                            x, y, width, height, score * 100.0
+                                            x,
+                                            y,
+                                            width,
+                                            height,
+                                            score * 100.0
                                         );
                                     }
                                 }
                             }
                             // Handle classification (object only)
-                            else if let Some(classification) = json["classification"].as_object() {
+                            else if let Some(classification) = json["classification"].as_object()
+                            {
                                 println!("Classification results:");
                                 for (label, value) in classification {
                                     if let Some(conf) = value.as_f64() {

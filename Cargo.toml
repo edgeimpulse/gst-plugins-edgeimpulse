@@ -12,7 +12,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cairo-rs = "0.20.7"
-edge-impulse-runner = { git = "ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git" }
 glib = "0.20.7"
 gstreamer = "0.23.4"
 gstreamer-audio = "0.23.4"
@@ -25,8 +24,12 @@ regex = "1.10.3"
 serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
+edge-impulse-runner = { git = "ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git" }
 
 [dev-dependencies]
+anyhow = "1.0"
+tempfile = "3.10"
+image = "0.24"
 clap = { version = "4.4", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]

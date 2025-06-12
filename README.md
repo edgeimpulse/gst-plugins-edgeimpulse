@@ -524,6 +524,42 @@ Grid cells:
 
 The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks. See [Public API](#public-api-inference-output) for output details.
 
+## Image Slideshow Example
+
+The repository includes an `image_slideshow` example that demonstrates how to run Edge Impulse video inference on a folder of images as a configurable slideshow.
+
+### Usage
+
+```bash
+cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
+```
+
+- `--model` (required): Path to the Edge Impulse model file (.eim)
+- `--folder` (required): Path to the folder containing images (jpg, jpeg, png)
+- `-W`, `--width` (required): Input width for inference
+- `-H`, `--height` (required): Input height for inference
+- `--framerate` (optional): Slideshow speed in images per second (default: 1)
+- `--max-images` (optional): Maximum number of images to process (default: 100)
+
+### How it works
+- All images in the folder are copied and converted to JPEG in a temporary directory for robust GStreamer playback.
+- The pipeline mimics the following structure:
+  ```
+  multifilesrc ! decodebin ! videoconvert ! queue ! videoscale ! videorate ! video/x-raw,format=GRAY8,width=...,height=...,framerate=... ! edgeimpulsevideoinfer ! videoconvert ! video/x-raw,format=RGB,width=...,height=... ! edgeimpulseoverlay ! autovideosink
+  ```
+- The slideshow speed is controlled by the `--framerate` argument.
+- Each image is shown for the correct duration, and the pipeline loops through all images.
+- Inference results are visualized and also available as bus messages and metadata (see above).
+
+### Example
+
+```bash
+cargo run --example image_slideshow -- --model model.eim --folder ./images -W 160 -H 160 --framerate 2
+```
+
+This will show a 2 FPS slideshow of all images in `./images`, running inference and overlaying results.
+
+---
 ## Debugging
 Enable debug output with:
 ```bash

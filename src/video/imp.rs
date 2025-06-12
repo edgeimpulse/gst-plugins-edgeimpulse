@@ -551,7 +551,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 if classification.is_array() {
                     let mut map = serde_json::Map::new();
                     for entry in classification.as_array().unwrap() {
-                        if let (Some(label), Some(value)) = (entry.get("label"), entry.get("value")) {
+                        if let (Some(label), Some(value)) = (entry.get("label"), entry.get("value"))
+                        {
                             if let (Some(label), Some(value)) = (label.as_str(), value.as_f64()) {
                                 map.insert(label.to_string(), serde_json::Value::from(value));
                             }

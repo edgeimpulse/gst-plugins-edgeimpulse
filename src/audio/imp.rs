@@ -288,8 +288,31 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                     Ok(result) => {
                         let elapsed = now.elapsed();
 
+                        // Convert result.result to serde_json::Value for normalization
+                        let mut result_value = serde_json::to_value(&result.result).unwrap();
+                        // Standardize classification output: always as object {label: value, ...}
+                        if let Some(classification) = result_value.get_mut("classification") {
+                            if classification.is_array() {
+                                let mut map = serde_json::Map::new();
+                                for entry in classification.as_array().unwrap() {
+                                    if let (Some(label), Some(value)) =
+                                        (entry.get("label"), entry.get("value"))
+                                    {
+                                        if let (Some(label), Some(value)) =
+                                            (label.as_str(), value.as_f64())
+                                        {
+                                            map.insert(
+                                                label.to_string(),
+                                                serde_json::Value::from(value),
+                                            );
+                                        }
+                                    }
+                                }
+                                *classification = serde_json::Value::Object(map);
+                            }
+                        }
                         let result_json =
-                            serde_json::to_string(&result.result).unwrap_or_else(|e| {
+                            serde_json::to_string(&result_value).unwrap_or_else(|e| {
                                 gst::warning!(
                                     CAT,
                                     obj = self.obj(),

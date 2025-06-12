@@ -543,7 +543,46 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             };
 
             let elapsed = start.elapsed();
-            let result_json = serde_json::to_string(&result.result).unwrap();
+
+            // Convert result.result to serde_json::Value for normalization
+            let mut result_value = serde_json::to_value(&result.result).unwrap();
+            // Standardize classification output: always as object {label: value, ...}
+            if let Some(classification) = result_value.get_mut("classification") {
+                if classification.is_array() {
+                    let mut map = serde_json::Map::new();
+                    for entry in classification.as_array().unwrap() {
+                        if let (Some(label), Some(value)) = (entry.get("label"), entry.get("value"))
+                        {
+                            if let (Some(label), Some(value)) = (label.as_str(), value.as_f64()) {
+                                map.insert(label.to_string(), serde_json::Value::from(value));
+                            }
+                        }
+                    }
+                    *classification = serde_json::Value::Object(map);
+                }
+            }
+            // Standardize object detection: always array of objects for bounding_boxes
+            if let Some(bboxes) = result_value.get_mut("bounding_boxes") {
+                if bboxes.is_object() {
+                    // Convert object to array if needed (legacy)
+                    let mut arr = Vec::new();
+                    for (_k, v) in bboxes.as_object().unwrap() {
+                        arr.push(v.clone());
+                    }
+                    *bboxes = serde_json::Value::Array(arr);
+                }
+            }
+            // Standardize visual anomaly detection grid: always array of objects
+            if let Some(grid) = result_value.get_mut("visual_anomaly_grid") {
+                if grid.is_object() {
+                    let mut arr = Vec::new();
+                    for (_k, v) in grid.as_object().unwrap() {
+                        arr.push(v.clone());
+                    }
+                    *grid = serde_json::Value::Array(arr);
+                }
+            }
+            let result_json = serde_json::to_string(&result_value).unwrap();
             gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
 
             if is_anomaly_detection {

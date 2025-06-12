@@ -91,7 +91,7 @@ fn run<T, F: FnOnce() -> T + Send + 'static>(main: F) -> T
 where
     T: Send + 'static,
 {
-    use cocoa::appkit::{NSApplication, NSWindow};
+    use cocoa::appkit::NSApplication;
     use cocoa::base::id;
     use cocoa::delegate;
     use objc::runtime::{Object, Sel};

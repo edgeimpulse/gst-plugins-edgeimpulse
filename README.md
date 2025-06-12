@@ -61,10 +61,10 @@ The plugin exposes inference results through two standardized mechanisms:
     "timestamp": 1234567890,
     "type": "classification",
     "result": {
-      "classification": [
-        {"label": "cat", "value": 0.85},
-        {"label": "dog", "value": 0.15}
-      ]
+      "classification": {
+        "cat": 0.85,
+        "dog": 0.15
+      }
     }
   }
   ```
@@ -502,16 +502,47 @@ Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 1234567890,
     type: "classification",
     result: {
-        "classification": [
-            {"label": "cat", "value": 0.85},
-            {"label": "dog", "value": 0.15}
-        ]
+        "classification": {
+            "cat": 0.85,
+            "dog": 0.15
+        }
     }
 }
 Detected: cat (85.0%)
 ```
 
-The element will automatically detect the model type (classification or object detection) and emit appropriate messages. For object detection models, bounding boxes will be visualized on the video output when using the `edgeimpulseoverlay` element. See [Public API](#public-api-inference-output) for output details.
+For visual anomaly detection:
+```
+Got element message with name: edge-impulse-inference-result
+Message structure: edge-impulse-inference-result {
+    timestamp: (guint64) 1234567890,
+    type: "anomaly-detection",
+    result: {
+        "anomaly": 0.35,
+        "classification": {
+            "normal": 0.85,
+            "anomalous": 0.15
+        },
+        "visual_anomaly_max": 0.42,
+        "visual_anomaly_mean": 0.21,
+        "visual_anomaly_grid": [
+            { "x": 0, "y": 0, "width": 32, "height": 32, "score": 0.12 },
+            { "x": 32, "y": 0, "width": 32, "height": 32, "score": 0.18 }
+            // ... more grid cells ...
+        ]
+    }
+}
+Detected: normal (85.0%)
+Anomaly score: 35.0%
+Max grid score: 42.0%
+Mean grid score: 21.0%
+Grid cells:
+  Cell at (0, 0) size 32x32: score 12.0%
+  Cell at (32, 0) size 32x32: score 18.0%
+  ...
+```
+
+The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks. See [Public API](#public-api-inference-output) for output details.
 
 ## Debugging
 Enable debug output with:

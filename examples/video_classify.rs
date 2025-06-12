@@ -291,17 +291,60 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                     if let Ok(result) = structure.get::<String>("result") {
                         // Parse the JSON string
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
-                            // Access the bounding_boxes array
+                            // Handle object detection (array of objects)
                             if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                println!("Object detection results:");
                                 for bbox in boxes {
                                     if let (Some(label), Some(value)) =
                                         (bbox["label"].as_str(), bbox["value"].as_f64())
                                     {
                                         println!(
-                                            "Detected {} with confidence {:.1}%",
+                                            "  {}: {:.1}% (x: {}, y: {}, w: {}, h: {})",
                                             label,
-                                            value * 100.0
+                                            value * 100.0,
+                                            bbox["x"].as_f64().unwrap_or(0.0),
+                                            bbox["y"].as_f64().unwrap_or(0.0),
+                                            bbox["width"].as_f64().unwrap_or(0.0),
+                                            bbox["height"].as_f64().unwrap_or(0.0)
                                         );
+                                    }
+                                }
+                            }
+                            // Handle visual anomaly detection (object with grid: array of objects)
+                            else if let Some(anomaly) = json["anomaly"].as_f64() {
+                                println!("Anomaly score: {:.2}%", anomaly * 100.0);
+                                if let Some(classification) = json["classification"].as_object() {
+                                    for (label, value) in classification {
+                                        if let Some(conf) = value.as_f64() {
+                                            println!(
+                                                "  Class: {} ({:.1}%)",
+                                                label,
+                                                conf * 100.0
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(grid) = json["visual_anomaly_grid"].as_array() {
+                                    println!("Visual anomaly grid ({} cells):", grid.len());
+                                    for cell in grid {
+                                        let x = cell["x"].as_u64().unwrap_or(0);
+                                        let y = cell["y"].as_u64().unwrap_or(0);
+                                        let width = cell["width"].as_u64().unwrap_or(0);
+                                        let height = cell["height"].as_u64().unwrap_or(0);
+                                        let score = cell["score"].as_f64().unwrap_or(0.0);
+                                        println!(
+                                            "    Cell at ({}, {}) size {}x{}: score {:.2}%",
+                                            x, y, width, height, score * 100.0
+                                        );
+                                    }
+                                }
+                            }
+                            // Handle classification (object only)
+                            else if let Some(classification) = json["classification"].as_object() {
+                                println!("Classification results:");
+                                for (label, value) in classification {
+                                    if let Some(conf) = value.as_f64() {
+                                        println!("  {}: {:.1}%", label, conf * 100.0);
                                     }
                                 }
                             }

@@ -24,7 +24,7 @@ regex = "1.10.3"
 serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
-edge-impulse-runner = { git = "ssh://git@github.com/edgeimpulse/edge-impulse-runner-rs.git" }
+edge-impulse-runner = { git = "https://github.com/edgeimpulse/edge-impulse-runner-rs.git" }
 
 [dev-dependencies]
 anyhow = "1.0"

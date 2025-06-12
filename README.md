@@ -403,19 +403,19 @@ The overlay element automatically processes VideoRegionOfInterestMeta from upstr
 
 The repository includes examples demonstrating both audio and video inference. These examples have been tested on MacOS.
 
-### Audio Classification
-Run the audio classification example:
+### Audio Inference
+Run the audio inference example:
 ```bash
 # Basic usage
-cargo run --example audio_classify -- --model path/to/your/model.eim
+cargo run --example audio_inference -- --model path/to/your/model.eim
 
 # With threshold settings
-cargo run --example audio_classify -- --model path/to/your/model.eim \
+cargo run --example audio_inference -- --model path/to/your/model.eim \
     --threshold "5.min_score=0.6" \
     --threshold "4.min_anomaly_score=0.35"
 
 # With audio file input
-cargo run --example audio_classify -- --model path/to/your/model.eim \
+cargo run --example audio_inference -- --model path/to/your/model.eim \
     --audio input.wav \
     --threshold "5.min_score=0.6"
 ```
@@ -439,34 +439,14 @@ Message structure: edge-impulse-inference-result {
 Detected: noise (96.9%)
 ```
 
-For anomaly detection:
-```
-Got element message with name: edge-impulse-inference-result
-Message structure: edge-impulse-inference-result {
-    timestamp: (guint64) 9498000000,
-    type: "anomaly",
-    result: {
-        "anomaly": 0.35,
-        "classification": {
-            "normal": 0.85,
-            "anomalous": 0.15
-        }
-    }
-}
-Detected: normal (85.0%)
-Anomaly score: 35.0%
-```
-
-The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks. See [Public API](#public-api-inference-output) for output details.
-
-### Video Classification/Detection
-Run the video classification example:
+### Video Inference
+Run the video inference example:
 ```bash
 # Basic usage
-cargo run --example video_classify -- --model path/to/your/model.eim
+cargo run --example video_inference -- --model path/to/your/model.eim
 
 # With threshold settings
-cargo run --example video_classify -- --model path/to/your/model.eim \
+cargo run --example video_inference -- --model path/to/your/model.eim \
     --threshold "5.min_score=0.6" \
     --threshold "4.min_anomaly_score=0.35"
 ```

@@ -5,7 +5,7 @@
 //! input or an audio file.
 //!
 //! Usage:
-//!   cargo run --example audio_classify -- --model <path_to_model> [OPTIONS]
+//!   cargo run --example audio_inference -- --model <path_to_model> [OPTIONS]
 //!
 //! Required arguments:
 //!   --model <path>         Path to the Edge Impulse model file (.eim)
@@ -15,10 +15,10 @@
 //!   --threshold <float>    Confidence threshold (0.0 to 1.0) for showing results (default: 0.8)
 //!
 //! Example with microphone:
-//!   cargo run --example audio_classify -- --model model.eim
+//!   cargo run --example audio_inference -- --model model.eim
 //!
 //! Example with audio file:
-//!   cargo run --example audio_classify -- --model model.eim --audio input.wav
+//!   cargo run --example audio_inference -- --model model.eim --audio input.wav
 
 use clap::Parser;
 use gstreamer as gst;

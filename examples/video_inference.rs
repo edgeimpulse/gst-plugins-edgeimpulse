@@ -4,7 +4,7 @@
 //! video classification using a trained model.
 //!
 //! Usage:
-//!   cargo run --example video_classify -- --model <path_to_model>
+//!   cargo run --example video_inference -- --model <path_to_model>
 //!
 //! Environment setup:
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"

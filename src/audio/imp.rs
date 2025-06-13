@@ -56,9 +56,7 @@
 //! - 16kHz sample rate
 //! - Interleaved layout
 //!
-//! ## Sample Normalization
-//! - Input samples are converted from S16LE [-32768, 32767] to f32 [-1, 1]
-//! - Conversion: float_sample = int_sample / 32768.0
+
 //!
 //! ## Threading and Synchronization
 //! - State is protected by Mutex for thread-safe access
@@ -239,7 +237,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
             .chunks_exact(2)
             .map(|chunk| {
                 let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                sample as f32 / 32768.0 // Normalize to [-1, 1]
+                sample as f32
             })
             .collect();
 

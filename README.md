@@ -2,16 +2,18 @@
 [![CI](https://github.com/edgeimpulse/gst-plugins-edgeimpulse/actions/workflows/ci.yml/badge.svg)](https://github.com/edgeimpulse/gst-plugins-edgeimpulse/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://edgeimpulse.github.io/gst-plugins-edgeimpulse/)
 
-A GStreamer plugin that enables real-time machine learning inference using Edge Impulse models. The plugin provides three elements for audio and video inference and visualization.
+A GStreamer plugin that enables real-time machine learning inference and data ingestion using Edge Impulse models and APIs. The plugin provides four elements for audio and video inference, visualization, and ingestion.
 
-## Public API: Inference Output
+## Public API: Inference and Ingestion Output
 
-The plugin exposes inference results through two standardized mechanisms:
+The plugin exposes results and ingestion status through standardized mechanisms:
 
 1. **GStreamer Bus Messages**
    - All inference elements emit structured messages on the GStreamer bus with the name `edge-impulse-inference-result`.
-   - These messages contain the inference result as JSON, along with buffer timestamp and type.
-   - Available for both audio and video elements.
+   - The ingestion element (`edgeimpulsesink`) emits bus messages for ingestion results and errors:
+     - `edge-impulse-ingestion-result`: Sent when a sample is successfully ingested (fields: filename, media type, length, label, category).
+     - `edge-impulse-ingestion-error`: Sent when ingestion fails (fields: filename, media type, error, label, category).
+   - These messages allow applications to monitor both inference and ingestion events in real time.
 
 2. **Video Frame Metadata (VideoRegionOfInterestMeta)**
    - For video inference, results are also attached as metadata to each video frame using `VideoRegionOfInterestMeta`.
@@ -399,9 +401,60 @@ gst-launch-1.0 avfvideosrc ! \
 
 The overlay element automatically processes VideoRegionOfInterestMeta from upstream elements (like edgeimpulsevideoinfer) and visualizes them with configurable styles.
 
+### edgeimpulsesink
+Sink element that uploads audio or video buffers to Edge Impulse using the ingestion API.
+
+Element Details:
+- Long name: Edge Impulse Ingestion Sink
+- Class: Sink/AI
+- Description: Uploads audio or video buffers to Edge Impulse ingestion API (WAV for audio, PNG for video)
+
+Pad Templates:
+- Sink pad (Always available):
+  ```
+  audio/x-raw
+    format: S16LE
+    channels: 1
+    rate: 16000
+  video/x-raw
+    format: { RGB, RGBA }
+    width: [ 1, 2147483647 ]
+    height: [ 1, 2147483647 ]
+  ```
+
+Properties:
+1. `api-key` (string, required):
+   - Edge Impulse API key
+   - Flags: readable, writable
+2. `hmac-key` (string, optional):
+   - Optional HMAC key for signing requests
+   - Flags: readable, writable
+3. `label` (string, optional):
+   - Optional label for the sample
+   - Flags: readable, writable
+4. `category` (string, default: "training"):
+   - Category for the sample (training, testing, anomaly)
+   - Flags: readable, writable
+5. `upload-interval-ms` (u32, default: 0):
+   - Minimum interval in milliseconds between uploads (0 = every buffer)
+   - Flags: readable, writable
+
+Key features:
+- Supports both audio (WAV) and video (PNG) ingestion
+- Batches and uploads buffers at a configurable interval
+- Emits bus messages for ingestion results and errors (see [Public API](#public-api-inference-and-ingestion-output))
+- Can be used in pipelines for automated dataset collection
+
+Example pipeline:
+```bash
+gst-launch-1.0 autoaudiosrc ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,channels=1,rate=16000 ! edgeimpulsesink api-key=<your-api-key> upload-interval-ms=1000 category=training
+```
+
+See `examples/audio_ingestion.rs` for a full example with bus message handling.
+
 ## Examples
 
-The repository includes examples demonstrating both audio and video inference. These examples have been tested on MacOS.
+The repository includes examples demonstrating audio and video inference, as well as data ingestion. These examples have been tested on MacOS.
 
 ### Audio Inference
 Run the audio inference example:
@@ -524,6 +577,20 @@ Grid cells:
 
 The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks. See [Public API](#public-api-inference-output) for output details.
 
+### Audio Ingestion
+Run the audio ingestion example:
+```bash
+cargo run --example audio_ingestion -- --api-key <your-api-key> [--upload-interval-ms <interval>]
+```
+This will capture audio from the default microphone and upload samples to Edge Impulse using the ingestion API. Ingestion results and errors are printed as bus messages:
+
+```
+✅ Sample ingested: file='...', media_type='audio/wav', length=..., label=..., category='training'
+❌ Ingestion error: file='...', media_type='audio/wav', error='...', label=..., category='training'
+```
+
+See the [Public API](#public-api-inference-and-ingestion-output) and [edgeimpulsesink](#edgeimpulsesink) sections for details.
+
 ## Image Slideshow Example
 
 The repository includes an `image_slideshow` example that demonstrates how to run Edge Impulse video inference on a folder of images as a configurable slideshow.
@@ -563,9 +630,10 @@ This will show a 2 FPS slideshow of all images in `./images`, running inference 
 ## Debugging
 Enable debug output with:
 ```bash
-GST_DEBUG=edgeimpulseaudioinfer:4 # for audio element
-GST_DEBUG=edgeimpulsevideoinfer:4 # for video element
+GST_DEBUG=edgeimpulseaudioinfer:4 # for audio inference element
+GST_DEBUG=edgeimpulsevideoinfer:4 # for video inference element
 GST_DEBUG=edgeimpulseoverlay:4 # for overlay element
+GST_DEBUG=edgeimpulsesink:4 # for ingestion element
 ```
 
 ## Acknowledgments

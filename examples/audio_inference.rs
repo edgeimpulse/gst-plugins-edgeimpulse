@@ -199,14 +199,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Parse the JSON string
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
                                 if let Some(classifications) = json["classification"].as_object() {
-                                    for (label, value) in classifications {
-                                        if let Some(confidence) = value.as_f64() {
-                                            println!(
-                                                "Detected {} with confidence {:.1}%",
-                                                label,
-                                                confidence * 100.0
-                                            );
-                                        }
+                                    if let Some((top_label, top_conf)) = classifications
+                                        .iter()
+                                        .filter_map(|(label, value)| {
+                                            value.as_f64().map(|v| (label, v))
+                                        })
+                                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                                    {
+                                        // Assign a color per label (simple hash to color)
+                                        let colors =
+                                            [31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96];
+                                        let color_idx = (top_label
+                                            .bytes()
+                                            .fold(0u8, |acc, b| acc.wrapping_add(b))
+                                            as usize)
+                                            % colors.len();
+                                        let color_code = colors[color_idx];
+                                        println!(
+                                            "\x1b[1;{}mDetected {} ({:.1}%)\x1b[0m",
+                                            color_code,
+                                            top_label,
+                                            top_conf * 100.0
+                                        );
                                     }
                                 }
                             }

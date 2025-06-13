@@ -5,11 +5,13 @@ mod audio;
 mod common;
 mod overlay;
 mod video;
+pub mod sink;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     video::register(plugin)?;
     audio::register(plugin)?;
     overlay::register(plugin)?;
+    sink::register(plugin)?;
     Ok(())
 }
 

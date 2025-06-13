@@ -198,14 +198,14 @@ impl ElementImpl for EdgeImpulseSink {
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
             let audio_caps = gst::Caps::builder("audio/x-raw")
-                .field("format", &"S16LE")
-                .field("channels", &gst::IntRange::<i32>::new(1, 2))
-                .field("rate", &gst::IntRange::<i32>::new(1, 192000))
+                .field("format", "S16LE")
+                .field("channels", gst::IntRange::<i32>::new(1, 2))
+                .field("rate", gst::IntRange::<i32>::new(1, 192000))
                 .build();
             let video_caps = gst::Caps::builder("video/x-raw")
-                .field("format", &gst::List::new(["RGB", "RGBA"]))
-                .field("width", &gst::IntRange::<i32>::new(1, 4096))
-                .field("height", &gst::IntRange::<i32>::new(1, 4096))
+                .field("format", gst::List::new(["RGB", "RGBA"]))
+                .field("width", gst::IntRange::<i32>::new(1, 4096))
+                .field("height", gst::IntRange::<i32>::new(1, 4096))
                 .build();
             let mut caps = gst::Caps::new_empty();
             caps.merge(audio_caps);
@@ -256,7 +256,6 @@ impl BaseSinkImpl for EdgeImpulseSink {
     }
 
     fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::log!(CAT, "render called");
         let ingestion = self.ingestion.lock().unwrap().as_ref().cloned();
         let label = self.label.lock().unwrap().clone();
         let category = self
@@ -394,7 +393,7 @@ impl BaseSinkImpl for EdgeImpulseSink {
                         .ok_or(gst::FlowError::Error)?;
                     let encoder = PngEncoder::new(&mut file);
                     encoder
-                        .write_image(img.as_raw(), width, height, ColorType::Rgb8.into())
+                        .write_image(img.as_raw(), width, height, ColorType::Rgb8)
                         .map_err(|_| gst::FlowError::Error)?;
                 }
                 "RGBA" => {
@@ -402,7 +401,7 @@ impl BaseSinkImpl for EdgeImpulseSink {
                         .ok_or(gst::FlowError::Error)?;
                     let encoder = PngEncoder::new(&mut file);
                     encoder
-                        .write_image(img.as_raw(), width, height, ColorType::Rgba8.into())
+                        .write_image(img.as_raw(), width, height, ColorType::Rgba8)
                         .map_err(|_| gst::FlowError::Error)?;
                 }
                 _ => return Err(gst::FlowError::Error),
@@ -458,6 +457,6 @@ impl BaseSinkImpl for EdgeImpulseSink {
             });
             return Ok(gst::FlowSuccess::Ok);
         }
-        return Err(gst::FlowError::Error);
+        Err(gst::FlowError::Error)
     }
 }

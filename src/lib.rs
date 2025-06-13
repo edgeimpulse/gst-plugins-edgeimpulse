@@ -4,8 +4,8 @@ use gstreamer::glib;
 mod audio;
 mod common;
 mod overlay;
-mod video;
 pub mod sink;
+mod video;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     video::register(plugin)?;

@@ -1,24 +1,24 @@
+use edge_impulse_runner::ingestion::{Category, Ingestion, UploadOptions};
+use glib::ParamSpec;
+use glib::ParamSpecString;
+use glib::Value;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_base as gst_base;
 use gstreamer_base::subclass::prelude::*;
-use once_cell::sync::Lazy;
-use std::sync::{Mutex, Arc};
-use tempfile::NamedTempFile;
-use edge_impulse_runner::ingestion::{Ingestion, Category, UploadOptions};
-use glib::ParamSpec;
-use glib::ParamSpecString;
-use glib::Value;
 use hound;
-use image::{ColorType, ImageBuffer, Rgb, Rgba, ImageEncoder};
 use image::codecs::png::PngEncoder;
+use image::{ColorType, ImageBuffer, ImageEncoder, Rgb, Rgba};
+use once_cell::sync::Lazy;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tempfile::NamedTempFile;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
         "edgeimpulsesink",
         gst::DebugColorFlags::empty(),
-        Some("Edge Impulse Sink")
+        Some("Edge Impulse Sink"),
     )
 });
 
@@ -47,13 +47,11 @@ fn create_ingestion_message_structure_with_error(
     error: Option<&str>,
     length: Option<u64>,
 ) -> gst::Structure {
-    let mut builder = gst::Structure::builder(
-        if error.is_some() {
-            "edge-impulse-ingestion-error"
-        } else {
-            "edge-impulse-ingestion-result"
-        }
-    )
+    let mut builder = gst::Structure::builder(if error.is_some() {
+        "edge-impulse-ingestion-error"
+    } else {
+        "edge-impulse-ingestion-result"
+    })
     .field("filename", filename)
     .field("media_type", media_type)
     .field("label", label)
@@ -67,13 +65,41 @@ fn create_ingestion_message_structure_with_error(
     builder.build()
 }
 
-fn post_ingestion_success(obj: &gst::Element, filename: &str, media_type: &str, length: u64, label: &Option<String>, category: &str) {
-    let s = create_ingestion_message_structure_with_error(filename, media_type, label, category, None, Some(length));
+fn post_ingestion_success(
+    obj: &gst::Element,
+    filename: &str,
+    media_type: &str,
+    length: u64,
+    label: &Option<String>,
+    category: &str,
+) {
+    let s = create_ingestion_message_structure_with_error(
+        filename,
+        media_type,
+        label,
+        category,
+        None,
+        Some(length),
+    );
     let _ = obj.post_message(gst::message::Element::new(s));
 }
 
-fn post_ingestion_error(obj: &gst::Element, filename: &str, media_type: &str, label: &Option<String>, category: &str, error: &str) {
-    let s = create_ingestion_message_structure_with_error(filename, media_type, label, category, Some(error), None);
+fn post_ingestion_error(
+    obj: &gst::Element,
+    filename: &str,
+    media_type: &str,
+    label: &Option<String>,
+    category: &str,
+    error: &str,
+) {
+    let s = create_ingestion_message_structure_with_error(
+        filename,
+        media_type,
+        label,
+        category,
+        Some(error),
+        None,
+    );
     let _ = obj.post_message(gst::message::Element::new(s));
 }
 
@@ -184,14 +210,13 @@ impl ElementImpl for EdgeImpulseSink {
             let mut caps = gst::Caps::new_empty();
             caps.merge(audio_caps);
             caps.merge(video_caps);
-            vec![
-                gst::PadTemplate::new(
-                    "sink",
-                    gst::PadDirection::Sink,
-                    gst::PadPresence::Always,
-                    &caps,
-                ).unwrap(),
-            ]
+            vec![gst::PadTemplate::new(
+                "sink",
+                gst::PadDirection::Sink,
+                gst::PadPresence::Always,
+                &caps,
+            )
+            .unwrap()]
         });
         PAD_TEMPLATES.as_ref()
     }
@@ -234,7 +259,12 @@ impl BaseSinkImpl for EdgeImpulseSink {
         gst::log!(CAT, "render called");
         let ingestion = self.ingestion.lock().unwrap().as_ref().cloned();
         let label = self.label.lock().unwrap().clone();
-        let category = self.category.lock().unwrap().clone().unwrap_or_else(|| "training".to_string());
+        let category = self
+            .category
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "training".to_string());
         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
         let data = map.as_slice();
         let pad = self.obj().static_pad("sink").ok_or(gst::FlowError::Error)?;
@@ -244,7 +274,9 @@ impl BaseSinkImpl for EdgeImpulseSink {
         let path;
         let tmpfile;
         if media_type.starts_with("audio/x-raw") {
-            let sample_rate = structure.get::<i32>("rate").map_err(|_| gst::FlowError::Error)? as u32;
+            let sample_rate = structure
+                .get::<i32>("rate")
+                .map_err(|_| gst::FlowError::Error)? as u32;
             *self.audio_sample_rate.lock().unwrap() = Some(sample_rate);
             let mut audio_buffer = self.audio_buffer.lock().unwrap();
             audio_buffer.extend_from_slice(data);
@@ -269,10 +301,13 @@ impl BaseSinkImpl for EdgeImpulseSink {
                 bits_per_sample: 16,
                 sample_format: hound::SampleFormat::Int,
             };
-            let mut writer = hound::WavWriter::new(&tmpfile, spec).map_err(|_| gst::FlowError::Error)?;
+            let mut writer =
+                hound::WavWriter::new(&tmpfile, spec).map_err(|_| gst::FlowError::Error)?;
             for chunk in audio_buffer.chunks_exact(2) {
                 let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                writer.write_sample(sample).map_err(|_| gst::FlowError::Error)?;
+                writer
+                    .write_sample(sample)
+                    .map_err(|_| gst::FlowError::Error)?;
             }
             writer.finalize().map_err(|_| gst::FlowError::Error)?;
             let audio_length = (audio_buffer.len() as u64) / 2 * 1000 / sample_rate as u64; // ms
@@ -295,14 +330,31 @@ impl BaseSinkImpl for EdgeImpulseSink {
                             _ => Category::Training,
                         };
                         let options = UploadOptions::default();
-                        match ingestion.upload_file(&path, cat, label_clone.clone(), Some(options)).await {
+                        match ingestion
+                            .upload_file(&path, cat, label_clone.clone(), Some(options))
+                            .await
+                        {
                             Ok(_resp) => {
-                                post_ingestion_success(&obj, &filename, &media_type_str, audio_length, &label_clone, &category_clone);
-                            },
+                                post_ingestion_success(
+                                    &obj,
+                                    &filename,
+                                    &media_type_str,
+                                    audio_length,
+                                    &label_clone,
+                                    &category_clone,
+                                );
+                            }
                             Err(e) => {
                                 gst::error!(CAT, "upload error: {e:?}");
-                                post_ingestion_error(&obj, &filename, &media_type_str, &label_clone, &category_clone, &format!("{e:?}"));
-                            },
+                                post_ingestion_error(
+                                    &obj,
+                                    &filename,
+                                    &media_type_str,
+                                    &label_clone,
+                                    &category_clone,
+                                    &format!("{e:?}"),
+                                );
+                            }
                         }
                     } else {
                         gst::warning!(CAT, "ingestion client not initialized");
@@ -325,9 +377,15 @@ impl BaseSinkImpl for EdgeImpulseSink {
                 return Ok(gst::FlowSuccess::Ok);
             }
             *last_upload = Some(now);
-            let width = structure.get::<i32>("width").map_err(|_| gst::FlowError::Error)? as u32;
-            let height = structure.get::<i32>("height").map_err(|_| gst::FlowError::Error)? as u32;
-            let format = structure.get::<&str>("format").map_err(|_| gst::FlowError::Error)?;
+            let width = structure
+                .get::<i32>("width")
+                .map_err(|_| gst::FlowError::Error)? as u32;
+            let height = structure
+                .get::<i32>("height")
+                .map_err(|_| gst::FlowError::Error)? as u32;
+            let format = structure
+                .get::<&str>("format")
+                .map_err(|_| gst::FlowError::Error)?;
             tmpfile = NamedTempFile::with_suffix(".png").map_err(|_| gst::FlowError::Error)?;
             let mut file = tmpfile.reopen().map_err(|_| gst::FlowError::Error)?;
             match format {
@@ -335,14 +393,16 @@ impl BaseSinkImpl for EdgeImpulseSink {
                     let img = ImageBuffer::<Rgb<u8>, _>::from_raw(width, height, data)
                         .ok_or(gst::FlowError::Error)?;
                     let encoder = PngEncoder::new(&mut file);
-                    encoder.write_image(img.as_raw(), width, height, ColorType::Rgb8.into())
+                    encoder
+                        .write_image(img.as_raw(), width, height, ColorType::Rgb8.into())
                         .map_err(|_| gst::FlowError::Error)?;
                 }
                 "RGBA" => {
                     let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, data)
                         .ok_or(gst::FlowError::Error)?;
                     let encoder = PngEncoder::new(&mut file);
-                    encoder.write_image(img.as_raw(), width, height, ColorType::Rgba8.into())
+                    encoder
+                        .write_image(img.as_raw(), width, height, ColorType::Rgba8.into())
                         .map_err(|_| gst::FlowError::Error)?;
                 }
                 _ => return Err(gst::FlowError::Error),
@@ -365,14 +425,31 @@ impl BaseSinkImpl for EdgeImpulseSink {
                             _ => Category::Training,
                         };
                         let options = UploadOptions::default();
-                        match ingestion.upload_file(&path, cat, label_clone.clone(), Some(options)).await {
+                        match ingestion
+                            .upload_file(&path, cat, label_clone.clone(), Some(options))
+                            .await
+                        {
                             Ok(_resp) => {
-                                post_ingestion_success(&obj, &filename, &media_type_str, 1, &label_clone, &category_clone);
-                            },
+                                post_ingestion_success(
+                                    &obj,
+                                    &filename,
+                                    &media_type_str,
+                                    1,
+                                    &label_clone,
+                                    &category_clone,
+                                );
+                            }
                             Err(e) => {
                                 gst::error!(CAT, "upload error: {e:?}");
-                                post_ingestion_error(&obj, &filename, &media_type_str, &label_clone, &category_clone, &format!("{e:?}"));
-                            },
+                                post_ingestion_error(
+                                    &obj,
+                                    &filename,
+                                    &media_type_str,
+                                    &label_clone,
+                                    &category_clone,
+                                    &format!("{e:?}"),
+                                );
+                            }
                         }
                     } else {
                         gst::warning!(CAT, "ingestion client not initialized");

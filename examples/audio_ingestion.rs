@@ -22,10 +22,10 @@
 // Example:
 //   cargo run --release --example audio_ingestion -- --api-key ei_xxx_yourkeyhere
 
-use gstreamer as gst;
-use gstreamer::prelude::*;
 use clap::Parser;
+use gstreamer as gst;
 use gstreamer::parse;
+use gstreamer::prelude::*;
 
 /// Audio ingestion example for Edge Impulse
 #[derive(Parser, Debug)]
@@ -81,7 +81,7 @@ fn main() {
                         let label = s.get::<Option<&str>>("label").unwrap_or(None);
                         let category = s.get::<&str>("category").unwrap_or("");
                         println!(
-                            "Sample ingested: file='{}', media_type='{}', length={}ms, label={:?}, category='{}'",
+                            "✅ Sample ingested: file='{}', media_type='{}', length={}ms, label={:?}, category='{}'",
                             filename, media_type, length, label, category
                         );
                     } else if s.name() == "edge-impulse-ingestion-error" {
@@ -91,7 +91,7 @@ fn main() {
                         let label = s.get::<Option<&str>>("label").unwrap_or(None);
                         let category = s.get::<&str>("category").unwrap_or("");
                         eprintln!(
-                            "Ingestion error: file='{}', media_type='{}', error='{}', label={:?}, category='{}'",
+                            "❌ Ingestion error: file='{}', media_type='{}', error='{}', label={:?}, category='{}'",
                             filename, media_type, error, label, category
                         );
                     }

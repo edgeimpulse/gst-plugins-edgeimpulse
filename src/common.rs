@@ -195,9 +195,7 @@ where
                 None::<String>.to_value()
             }
         }
-        "model-path-with-debug" => {
-            None::<String>.to_value()
-        }
+        "model-path-with-debug" => None::<String>.to_value(),
         "threshold" => {
             let state = state.lock().unwrap();
             if let Some(ref model) = *state.as_ref() {

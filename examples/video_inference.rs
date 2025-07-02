@@ -160,12 +160,12 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create queue element.");
 
-    let mut classifier_factory =
-        if args.debug {
-            gst::ElementFactory::make("edgeimpulsevideoinfer").property("model-path-with-debug", &args.model)
-        } else {
-            gst::ElementFactory::make("edgeimpulsevideoinfer").property("model-path", &args.model)
-        };
+    let mut classifier_factory = if args.debug {
+        gst::ElementFactory::make("edgeimpulsevideoinfer")
+            .property("model-path-with-debug", &args.model)
+    } else {
+        gst::ElementFactory::make("edgeimpulsevideoinfer").property("model-path", &args.model)
+    };
 
     // Set thresholds if provided
     for threshold in &args.threshold {
@@ -331,24 +331,19 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                                         let y = cell["y"].as_u64().unwrap_or(0);
                                         let width = cell["width"].as_u64().unwrap_or(0);
                                         let height = cell["height"].as_u64().unwrap_or(0);
-                                        let score = cell.get("score").and_then(|v| v.as_f64())
-    .or_else(|| cell.get("value").and_then(|v| v.as_f64()));
+                                        let score = cell
+                                            .get("score")
+                                            .and_then(|v| v.as_f64())
+                                            .or_else(|| cell.get("value").and_then(|v| v.as_f64()));
                                         if let Some(score) = score {
                                             println!(
                                                 "    Cell at ({}, {}) size {}x{}: score {:.2}%",
-                                                x,
-                                                y,
-                                                width,
-                                                height,
-                                                score
+                                                x, y, width, height, score
                                             );
                                         } else {
                                             println!(
                                                 "    Cell at ({}, {}) size {}x{}: score N/A",
-                                                x,
-                                                y,
-                                                width,
-                                                height
+                                                x, y, width, height
                                             );
                                         }
                                     }

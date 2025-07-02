@@ -28,7 +28,7 @@ unsafe impl Send for VideoAnomalyMeta {}
 unsafe impl Sync for VideoAnomalyMeta {}
 
 impl VideoClassificationMeta {
-    pub fn add(buffer: &mut gst::BufferRef) -> gst::MetaRefMut<Self, gst::meta::Standalone> {
+    pub fn add(buffer: &mut gst::BufferRef) -> gst::MetaRefMut<'_, Self, gst::meta::Standalone> {
         unsafe {
             // First add it with empty params
             let meta = gst::ffi::gst_buffer_add_meta(
@@ -57,7 +57,7 @@ impl VideoClassificationMeta {
 }
 
 impl VideoAnomalyMeta {
-    pub fn add(buffer: &mut gst::BufferRef) -> gst::MetaRefMut<Self, gst::meta::Standalone> {
+    pub fn add(buffer: &mut gst::BufferRef) -> gst::MetaRefMut<'_, Self, gst::meta::Standalone> {
         unsafe {
             // First add it with empty params
             let meta = gst::ffi::gst_buffer_add_meta(

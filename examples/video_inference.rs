@@ -93,7 +93,7 @@ where
         let delegate = delegate!("AppDelegate", {
             app: id = app,
             send: *const c_void = Box::into_raw(Box::new(send)) as *const c_void,
-            (applicationDidFinishLaunching:) => on_finish_launching as extern fn(&Object, Sel, id)
+            (applicationDidFinishLaunching:) => on_finish_launching as extern "C" fn(&Object, Sel, id)
         });
         app.setDelegate_(delegate);
 

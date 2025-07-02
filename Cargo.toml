@@ -5,6 +5,7 @@ edition = "2021"
 description = "GStreamer plugin to run AI/ML inference via Edge Impulse machine learning models"
 authors = ["Fernando Jiménez Moreno <fernando@edgeimpulse.com>"]
 license = "BSD-3-Clause-Clear"
+rust-version = "1.75"  # Minimum Rust version that supports edition 2024 features
 
 [lib]
 name = "gstedgeimpulse"

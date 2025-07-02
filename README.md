@@ -110,7 +110,7 @@ This plugin depends on:
 * GStreamer 1.20 or newer
 * [edge-impulse-runner-rs](https://github.com/edgeimpulse/edge-impulse-runner-rs) - Rust bindings for Edge Impulse Linux SDK
 * A trained Edge Impulse model file (.eim)
-* Rust toolchain (via rustup)
+* Rust nightly toolchain (via rustup) - required for edition 2024 support
 
 ## Installation
 
@@ -123,6 +123,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 Follow the prompts to complete the installation. After installation, restart your terminal to ensure the Rust tools are in your PATH.
+
+**Note:** This plugin requires Rust nightly due to the `edge-impulse-runner` dependency using edition 2024. Switch to nightly after installation:
+
+```bash
+rustup override set nightly
+```
 
 ### 2. Install GStreamer
 Download and install GStreamer from the official binaries:

@@ -29,6 +29,10 @@ pub fn create_common_properties() -> Vec<glib::ParamSpec> {
             .nick("Model Path")
             .blurb("Path to Edge Impulse model file")
             .build(),
+        glib::ParamSpecString::builder("model-path-with-debug")
+            .nick("Model Path With Debug")
+            .blurb("Path to Edge Impulse model file (debug mode enabled)")
+            .build(),
         glib::ParamSpecString::builder("threshold")
             .nick("Model Block Threshold")
             .blurb("Threshold value for model blocks in format 'blockId.type=value'. Examples: '5.min_score=0.6' for object detection blocks, '4.min_anomaly_score=0.35' for anomaly detection blocks. Multiple thresholds can be set by calling the property multiple times.")
@@ -50,15 +54,35 @@ pub fn set_common_property<T>(
         "model-path" => {
             let mut state = state.lock().unwrap();
             let model_path: Option<String> = value.get().expect("type checked upstream");
-
-            // Initialize the model when the path is set
             if let Some(model_path) = model_path {
-                match edge_impulse_runner::EimModel::new(&model_path) {
+                let model_result = edge_impulse_runner::EimModel::new(&model_path);
+                match model_result {
                     Ok(model) => {
                         gst::debug!(
                             cat,
                             obj = obj,
-                            "Successfully loaded model from {}",
+                            "Successfully loaded model from {} (debug=false)",
+                            model_path
+                        );
+                        *state.as_mut() = Some(model);
+                    }
+                    Err(err) => {
+                        gst::error!(cat, obj = obj, "Failed to load model: {}", err);
+                    }
+                }
+            }
+        }
+        "model-path-with-debug" => {
+            let mut state = state.lock().unwrap();
+            let model_path: Option<String> = value.get().expect("type checked upstream");
+            if let Some(model_path) = model_path {
+                let model_result = edge_impulse_runner::EimModel::new_with_debug(&model_path, true);
+                match model_result {
+                    Ok(model) => {
+                        gst::debug!(
+                            cat,
+                            obj = obj,
+                            "Successfully loaded model from {} (debug=true)",
                             model_path
                         );
                         *state.as_mut() = Some(model);
@@ -171,6 +195,7 @@ where
                 None::<String>.to_value()
             }
         }
+        "model-path-with-debug" => None::<String>.to_value(),
         "threshold" => {
             let state = state.lock().unwrap();
             if let Some(ref model) = *state.as_ref() {
@@ -199,6 +224,9 @@ where
                                 ..
                             } => {
                                 format!("{}.threshold={}", id, threshold)
+                            }
+                            edge_impulse_runner::types::ModelThreshold::Unknown { id, unknown } => {
+                                format!("{}.unknown={}", id, unknown)
                             }
                         })
                         .collect();

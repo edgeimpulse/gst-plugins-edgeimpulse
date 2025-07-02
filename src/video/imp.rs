@@ -258,8 +258,18 @@ impl ObjectSubclass for EdgeImpulseVideoInfer {
 
 impl ObjectImpl for EdgeImpulseVideoInfer {
     fn properties() -> &'static [glib::ParamSpec] {
-        static PROPERTIES: Lazy<Vec<glib::ParamSpec>> =
-            Lazy::new(crate::common::create_common_properties);
+        static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
+            let mut props = crate::common::create_common_properties();
+            if !props.iter().any(|p| p.name() == "model-path-with-debug") {
+                props.push(
+                    glib::ParamSpecString::builder("model-path-with-debug")
+                        .nick("Model Path With Debug")
+                        .blurb("Path to Edge Impulse model file (debug mode enabled)")
+                        .build(),
+                );
+            }
+            props
+        });
         PROPERTIES.as_ref()
     }
 

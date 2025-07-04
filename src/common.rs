@@ -210,23 +210,23 @@ where
                                 id,
                                 min_score,
                             } => {
-                                format!("{}.min_score={}", id, min_score)
+                                format!("{id}.min_score={min_score}")
                             }
                             edge_impulse_runner::types::ModelThreshold::AnomalyGMM {
                                 id,
                                 min_anomaly_score,
                             } => {
-                                format!("{}.min_anomaly_score={}", id, min_anomaly_score)
+                                format!("{id}.min_anomaly_score={min_anomaly_score}")
                             }
                             edge_impulse_runner::types::ModelThreshold::ObjectTracking {
                                 id,
                                 threshold,
                                 ..
                             } => {
-                                format!("{}.threshold={}", id, threshold)
+                                format!("{id}.threshold={threshold}")
                             }
                             edge_impulse_runner::types::ModelThreshold::Unknown { id, unknown } => {
-                                format!("{}.unknown={}", id, unknown)
+                                format!("{id}.unknown={unknown}")
                             }
                         })
                         .collect();
@@ -253,7 +253,7 @@ pub fn create_inference_message(
     result_json: String,
     timing_ms: u32,
 ) -> gst::Structure {
-    gst::Structure::builder(format!("edge-impulse-{}-inference-result", element_type))
+    gst::Structure::builder(format!("edge-impulse-{element_type}-inference-result"))
         .field("timestamp", timestamp)
         .field("type", result_type)
         .field("result", result_json)
@@ -267,7 +267,7 @@ pub fn create_error_message(
     timestamp: gst::ClockTime,
     error: String,
 ) -> gst::Structure {
-    gst::Structure::builder(format!("edge-impulse-{}-inference-result", element_type))
+    gst::Structure::builder(format!("edge-impulse-{element_type}-inference-result"))
         .field("timestamp", timestamp)
         .field("type", "error")
         .field("error", error)

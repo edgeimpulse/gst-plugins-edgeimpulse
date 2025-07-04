@@ -484,54 +484,27 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
             };
 
-            // Convert frame data to features based on channel count and input format
-            let features = if channels == 3 {
-                if format == Some(VideoFormat::Gray8) {
-                    // Convert grayscale to RGB features
-                    let mut features = Vec::with_capacity((width * height) as usize);
-                    for &gray in frame_data {
-                        // Pack grayscale value into RGB format
-                        let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
-                        features.push(packed as f32);
-                    }
-                    features
-                } else {
-                    // RGB: Pack RGB values into single numbers
-                    let mut features = Vec::with_capacity((width * height) as usize);
-                    for chunk in frame_data.chunks_exact(3) {
-                        if let [r, g, b] = chunk {
-                            // Pack RGB values into a single number: (r << 16) + (g << 8) + b
-                            let packed = (*r as u32) << 16 | (*g as u32) << 8 | (*b as u32);
-                            features.push(packed as f32);
-                        }
-                    }
-                    features
+            // Always pass in full RGB array in the form of pixels like 0xff0000
+            // DSP handles normalization and splitting into 1 or 3 channels
+            let mut features = Vec::with_capacity((width * height) as usize);
+
+            if format == Some(VideoFormat::Gray8) {
+                // For grayscale images, create RGB values by repeating the grayscale value
+                for &pixel in frame_data {
+                    // Create 24-bit RGB value: 0xRRGGBB where R=G=B=pixel
+                    let feature = ((pixel as u32) << 16) | ((pixel as u32) << 8) | (pixel as u32);
+                    features.push(feature as f32);
                 }
             } else {
-                // Grayscale model: Convert input to grayscale if needed
-                let mut features = Vec::with_capacity((width * height) as usize);
-                if format == Some(VideoFormat::Gray8) {
-                    // Already grayscale, just pack the values
-                    for &gray in frame_data {
-                        let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
-                        features.push(packed as f32);
-                    }
-                } else {
-                    // Convert RGB to grayscale and pack
-                    for chunk in frame_data.chunks_exact(3) {
-                        if let [r, g, b] = chunk {
-                            // Convert RGB to grayscale using standard weights
-                            let gray = (0.299 * (*r as f32)
-                                + 0.587 * (*g as f32)
-                                + 0.114 * (*b as f32)) as u8;
-                            // Pack grayscale value into RGB format
-                            let packed = (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
-                            features.push(packed as f32);
-                        }
+                // For RGB images, combine channels into 24-bit RGB values
+                for chunk in frame_data.chunks_exact(3) {
+                    if let [r, g, b] = chunk {
+                        // Create 24-bit RGB value: 0xRRGGBB
+                        let feature = ((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32);
+                        features.push(feature as f32);
                     }
                 }
-                features
-            };
+            }
 
             // Run inference
             let start = std::time::Instant::now();

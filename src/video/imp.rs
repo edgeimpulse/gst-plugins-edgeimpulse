@@ -598,7 +598,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y: y as u32,
                                         width: width as u32,
                                         height: height as u32,
-                                        label: format!("{:.3}", value),
+                                        label: format!("{value:.3}"),
                                     });
                                 }
                             }

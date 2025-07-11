@@ -1,28 +1,34 @@
 //! Video Classification Example using edgeimpulseinfer GStreamer plugin
 //!
 //! This example demonstrates how to use the Edge Impulse GStreamer plugin to perform
-//! video classification using a trained model.
+//! video classification using a trained model with performance optimizations.
 //!
 //! Usage:
+//!   # EIM mode (requires model path):
 //!   cargo run --example video_inference -- --model <path_to_model>
+//!
+//!   # FFI mode (no model path needed):
+//!   cargo run --example video_inference
 //!
 //! Environment setup:
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
 
 use clap::Parser;
+use edge_impulse_runner::ffi::ModelMetadata;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_video as gst_video;
 use serde_json;
 use std::error::Error;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Command line parameters for the video classification example
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct VideoClassifyParams {
-    /// Path to Edge Impulse model file
+    /// Path to Edge Impulse model file (optional for FFI mode)
     #[arg(short, long)]
-    model: String,
+    model: Option<String>,
 
     /// Video format (RGB, RGBA, BGR, BGRA)
     #[arg(short, long, default_value = "RGB")]
@@ -43,6 +49,111 @@ struct VideoClassifyParams {
     /// Model block thresholds in format 'blockId.type=value' (e.g., '5.min_score=0.6')
     #[clap(long)]
     threshold: Vec<String>,
+
+    /// Enable performance monitoring
+    #[arg(long)]
+    perf: bool,
+}
+
+// Performance tracking structure
+#[derive(Debug, Clone)]
+struct PerformanceMetrics {
+    frame_count: u64,
+    total_inference_time: Duration,
+    start_time: Instant,
+    last_fps_time: Instant,
+    fps_samples: Vec<f64>,
+    inference_samples: Vec<Duration>,
+}
+
+impl PerformanceMetrics {
+    fn new() -> Self {
+        Self {
+            frame_count: 0,
+            total_inference_time: Duration::ZERO,
+            start_time: Instant::now(),
+            last_fps_time: Instant::now(),
+            fps_samples: Vec::new(),
+            inference_samples: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, inference_time_ms: u32) {
+        self.frame_count += 1;
+        let inference_time = Duration::from_millis(inference_time_ms as u64);
+        self.total_inference_time += inference_time;
+        self.inference_samples.push(inference_time);
+
+        // Keep only last 100 samples for rolling average
+        if self.inference_samples.len() > 100 {
+            self.inference_samples.remove(0);
+        }
+
+        // Calculate FPS every second
+        let now = Instant::now();
+        if now.duration_since(self.last_fps_time) >= Duration::from_secs(1) {
+            let fps = self.frame_count as f64 / now.duration_since(self.start_time).as_secs_f64();
+            self.fps_samples.push(fps);
+
+            // Keep only last 10 FPS samples
+            if self.fps_samples.len() > 10 {
+                self.fps_samples.remove(0);
+            }
+
+            self.last_fps_time = now;
+        }
+    }
+
+    fn print_summary(&self) {
+        let total_time = self.start_time.elapsed();
+        let avg_fps = if !self.fps_samples.is_empty() {
+            self.fps_samples.iter().sum::<f64>() / self.fps_samples.len() as f64
+        } else {
+            0.0
+        };
+
+        let avg_inference_time = if !self.inference_samples.is_empty() {
+            self.inference_samples.iter().sum::<Duration>() / self.inference_samples.len() as u32
+        } else {
+            Duration::ZERO
+        };
+
+        let min_inference_time = self
+            .inference_samples
+            .iter()
+            .min()
+            .unwrap_or(&Duration::ZERO);
+        let max_inference_time = self
+            .inference_samples
+            .iter()
+            .max()
+            .unwrap_or(&Duration::ZERO);
+
+        println!("\n📊 PERFORMANCE SUMMARY:");
+        println!("   Total frames processed: {}", self.frame_count);
+        println!("   Total runtime: {:.2}s", total_time.as_secs_f64());
+        println!("   Average FPS: {:.2}", avg_fps);
+        println!(
+            "   Average inference time: {:.2}ms",
+            avg_inference_time.as_millis()
+        );
+        println!(
+            "   Min inference time: {:.2}ms",
+            min_inference_time.as_millis()
+        );
+        println!(
+            "   Max inference time: {:.2}ms",
+            max_inference_time.as_millis()
+        );
+        println!(
+            "   Total inference time: {:.2}s",
+            self.total_inference_time.as_secs_f64()
+        );
+        println!(
+            "   Inference efficiency: {:.1}%",
+            (self.total_inference_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0
+        );
+    }
 }
 
 // macOS specific run loop handling
@@ -127,6 +238,17 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     // Initialize GStreamer
     gst::init()?;
 
+    // Check for FFI mode
+    let is_ffi_mode = args.model.is_none();
+    if is_ffi_mode {
+        println!("✅ FFI Mode: No model path provided, will use FFI backend");
+    } else {
+        println!(
+            "🔧 EIM Mode: Using model path: {}",
+            args.model.as_ref().unwrap()
+        );
+    }
+
     // Create pipeline
     let pipeline = gst::Pipeline::new();
 
@@ -160,12 +282,28 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create queue element.");
 
-    let mut classifier_factory = if args.debug {
-        gst::ElementFactory::make("edgeimpulsevideoinfer")
-            .property("model-path-with-debug", &args.model)
+    // Create classifier based on mode
+    let mut classifier_factory = gst::ElementFactory::make("edgeimpulsevideoinfer");
+
+    if is_ffi_mode {
+        if args.debug {
+            classifier_factory = classifier_factory.property("debug", true);
+            println!("🔧 Setting debug mode for FFI inference");
+        }
     } else {
-        gst::ElementFactory::make("edgeimpulsevideoinfer").property("model-path", &args.model)
-    };
+        if args.debug {
+            classifier_factory =
+                classifier_factory.property("model-path-with-debug", args.model.as_ref().unwrap());
+            println!(
+                "🔧 Setting model-path-with-debug: {}",
+                args.model.as_ref().unwrap()
+            );
+        } else {
+            classifier_factory =
+                classifier_factory.property("model-path", args.model.as_ref().unwrap());
+            println!("🔧 Setting model-path: {}", args.model.as_ref().unwrap());
+        }
+    }
 
     // Set thresholds if provided
     for threshold in &args.threshold {
@@ -175,6 +313,19 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     let classifier = classifier_factory
         .build()
         .expect("Could not create edgeimpulsevideoinfer element.");
+
+    // Print model metadata when available
+    if let Some(path) = classifier.property::<Option<String>>("model-path") {
+        println!("📁 Model path: {}", path);
+    }
+
+    // Try to get model parameters after a short delay to allow model loading
+    let classifier_clone = classifier.clone();
+    thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(500));
+        let debug_enabled = classifier_clone.property::<bool>("debug");
+        println!("🔧 Debug mode: {}", debug_enabled);
+    });
 
     let queue3 = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 2u32)
@@ -252,28 +403,6 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         &sink,
     ])?;
 
-    // Add debug probe to check ROI metadata
-    let overlay_sink_pad = overlay.static_pad("sink").unwrap();
-    overlay_sink_pad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
-        if let Some(buffer) = probe_info.buffer() {
-            let rois: Vec<_> = buffer
-                .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
-                .collect();
-            println!("Number of ROIs on buffer: {}", rois.len());
-
-            for roi in rois {
-                let (x, y, w, h) = roi.rect();
-                println!("ROI: {} at ({}, {}, {}, {})", roi.roi_type(), x, y, w, h);
-
-                // Iterate through all parameters
-                for param in roi.params() {
-                    println!("ROI param: {:?}", param);
-                }
-            }
-        }
-        gst::PadProbeReturn::Ok
-    });
-
     Ok(pipeline)
 }
 
@@ -285,13 +414,105 @@ fn example_main() -> Result<(), Box<dyn Error>> {
     pipeline.set_state(gst::State::Playing)?;
 
     let bus = pipeline.bus().unwrap();
+    let mut perf_metrics = PerformanceMetrics::new();
+
     for msg in bus.iter_timed(gst::ClockTime::NONE) {
         use gst::MessageView;
         match msg.view() {
             MessageView::Element(element) => {
                 let structure = element.structure().unwrap();
+
+                // Print model loaded message
+                if structure.name() == "edge-impulse-model-loaded" {
+                    println!("✅ Model loaded successfully!");
+                    if let Ok(model_type) = structure.get::<String>("model-type") {
+                        println!("📊 Model type: {}", model_type);
+                    }
+                    if let Ok(input_width) = structure.get::<u32>("input-width") {
+                        println!("📏 Input width: {}", input_width);
+                    }
+                    if let Ok(input_height) = structure.get::<u32>("input-height") {
+                        println!("📏 Input height: {}", input_height);
+                    }
+                    if let Ok(channel_count) = structure.get::<u32>("channel-count") {
+                        println!("🎨 Channel count: {}", channel_count);
+                    }
+                    if let Ok(has_anomaly) = structure.get::<bool>("has-anomaly") {
+                        println!("🔍 Has anomaly detection: {}", has_anomaly);
+                    }
+                }
+
+                // Print model info from inference results (for FFI mode)
+                if structure.name() == "edge-impulse-video-inference-result"
+                    && perf_metrics.frame_count == 1
+                {
+                    println!("🔍 Model Info (from first inference):");
+                    if let Ok(result_type) = structure.get::<String>("type") {
+                        println!("   📊 Result type: {}", result_type);
+                    }
+
+                    // Get project ID from model metadata
+                    let metadata = ModelMetadata::get();
+                    println!("   🆔 Project ID: {}", metadata.project_id);
+                    println!("   📋 Project Name: {}", metadata.project_name);
+                    println!("   👤 Project Owner: {}", metadata.project_owner);
+                    println!("   🏷️  Deploy Version: {}", metadata.deploy_version);
+
+                    if let Ok(result) = structure.get::<String>("result") {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                            if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                println!("   🎯 Object detection model");
+                                println!("   📦 Bounding boxes: {} objects", boxes.len());
+                            } else if json.get("anomaly").is_some() {
+                                println!("   🔍 Anomaly detection model");
+                            } else if let Some(classification) = json["classification"].as_object()
+                            {
+                                println!("   🏷️  Classification model");
+                                println!("   📋 Classes: {}", classification.len());
+                            }
+                        }
+                    }
+                }
+
                 if structure.name() == "edge-impulse-video-inference-result" {
-                    println!("Inference result: {:?}", structure);
+                    // Extract timing information for performance monitoring
+                    let timing_ms = structure.get::<u32>("timing_ms").unwrap_or(0);
+                    perf_metrics.update(timing_ms);
+
+                    // Always print performance info
+                    let current_fps = if !perf_metrics.fps_samples.is_empty() {
+                        perf_metrics.fps_samples.last().unwrap()
+                    } else {
+                        &0.0
+                    };
+                    let avg_inference = if !perf_metrics.inference_samples.is_empty() {
+                        perf_metrics
+                            .inference_samples
+                            .iter()
+                            .rev()
+                            .take(10)
+                            .sum::<Duration>()
+                            / perf_metrics.inference_samples.iter().rev().take(10).count() as u32
+                    } else {
+                        Duration::ZERO
+                    };
+
+                    println!("🎯 Frame #{:3} | FPS: {:4.1} | Inference: {:3}ms | Avg: {:4.1}ms | Confidence: {:.1}%",
+                        perf_metrics.frame_count,
+                        current_fps,
+                        timing_ms,
+                        avg_inference.as_millis(),
+                        if let Ok(result) = structure.get::<String>("result") {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                                if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                    if let Some(first_box) = boxes.first() {
+                                        first_box["value"].as_f64().unwrap_or(0.0) * 100.0
+                                    } else { 0.0 }
+                                } else { 0.0 }
+                            } else { 0.0 }
+                        } else { 0.0 }
+                    );
+
                     if let Ok(result) = structure.get::<String>("result") {
                         // Parse the JSON string
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
@@ -380,6 +601,7 @@ fn example_main() -> Result<(), Box<dyn Error>> {
     pipeline.set_state(gst::State::Null)?;
     println!("Pipeline stopped");
 
+    perf_metrics.print_summary();
     Ok(())
 }
 

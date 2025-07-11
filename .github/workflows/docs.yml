@@ -46,7 +46,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build Documentation
-        run: cargo doc --no-deps
+        run: cargo doc --no-default-features --features eim --no-deps
 
       - name: Add index.html redirect
         run: |

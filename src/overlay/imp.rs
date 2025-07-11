@@ -21,7 +21,7 @@
 //!   - Low scores: Blue (0, 0, 255)
 //!   - High scores: Red (255, 0, 0)
 //! - Grid cells have 20% fill opacity
-//! - Scores are normalized (score/30.0, clamped to 1.0)
+//! - Scores are normalized using threshold-based scaling (threshold * 2.0 as reference)
 //!
 //! # Rendering
 //! Uses two main approaches:
@@ -571,17 +571,22 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             // Draw visual anomaly grid
             for (x, y, width, height, score) in grid {
                 // Note: coordinates are already scaled from the grid creation
-                let normalized_score = (score / 30.0).min(1.0);
+                // Normalize raw anomaly scores for visualization
+                // Use threshold (6.0) as reference point and scale to 0-1 range
+                let threshold = 6.0;
+                let scale_factor = threshold * 2.0; // This makes threshold = 0.5
+                let normalized_score = (score / scale_factor).clamp(0.0, 1.0);
                 let color = self.get_color_for_score(normalized_score as f32);
 
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
-                    "Processing grid cell: ({}, {}) {}x{} score={:.1}% color={:?} stroke_width={}",
+                    "Processing grid cell: ({}, {}) {}x{} raw_score={:.2} normalized={:.1}% color={:?} stroke_width={}",
                     x,
                     y,
                     width,
                     height,
+                    score,
                     normalized_score * 100.0,
                     color,
                     settings.stroke_width

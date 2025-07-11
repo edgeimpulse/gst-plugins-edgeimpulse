@@ -185,7 +185,7 @@
 //! ```
 //!
 
-use edge_impulse_runner::EimModel;
+use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -209,10 +209,10 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
-#[derive(Default)]
+#[derive(Debug)]
 pub struct VideoState {
     /// The loaded Edge Impulse model instance
-    pub model: Option<EimModel>,
+    pub model: Option<EdgeImpulseModel>,
 
     /// Width of the input frames (for video models)
     pub width: Option<u32>,
@@ -222,6 +222,51 @@ pub struct VideoState {
 
     /// Format of the input frames
     pub format: Option<VideoFormat>,
+
+    /// Debug mode flag for FFI mode (lazy initialization)
+    #[cfg(feature = "ffi")]
+    pub debug_enabled: bool,
+}
+
+impl Default for VideoState {
+    fn default() -> Self {
+        Self {
+            model: None,
+            width: None,
+            height: None,
+            format: None,
+            #[cfg(feature = "ffi")]
+            debug_enabled: false,
+        }
+    }
+}
+
+impl VideoState {
+}
+
+impl crate::common::DebugState for VideoState {
+    fn set_debug(&mut self, enabled: bool) {
+        #[cfg(feature = "ffi")]
+        {
+            self.debug_enabled = enabled;
+        }
+        #[cfg(not(feature = "ffi"))]
+        {
+            // No-op in non-FFI mode
+            let _ = enabled;
+        }
+    }
+
+    fn get_debug(&self) -> bool {
+        #[cfg(feature = "ffi")]
+        {
+            self.debug_enabled
+        }
+        #[cfg(not(feature = "ffi"))]
+        {
+            false
+        }
+    }
 }
 
 /// EdgeImpulseVideoInfer element
@@ -395,10 +440,47 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             )
         };
 
-        // Take a mutable lock on the state for inference
+        // Get state values we need and handle lazy initialization
         let model = {
             let mut state = self.state.lock().unwrap();
-            state.model.take()
+
+            // Try to get existing model first
+            if let Some(model) = state.model.take() {
+                Some(model)
+            } else {
+                // No model exists, try lazy initialization (FFI mode only)
+                #[cfg(feature = "ffi")]
+                {
+                    match if state.debug_enabled {
+                        EdgeImpulseModel::new_with_debug(true)
+                    } else {
+                        EdgeImpulseModel::new()
+                    } {
+                        Ok(model) => {
+                            gst::debug!(
+                                CAT,
+                                obj = self.obj(),
+                                "Lazily created FFI model (debug={})",
+                                state.debug_enabled
+                            );
+                            Some(model)
+                        }
+                        Err(err) => {
+                            gst::error!(
+                                CAT,
+                                obj = self.obj(),
+                                "Failed to create FFI model lazily: {}",
+                                err
+                            );
+                            None
+                        }
+                    }
+                }
+                #[cfg(not(feature = "ffi"))]
+                {
+                    None
+                }
+            }
         };
 
         if let Some(mut model) = model {
@@ -430,6 +512,24 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     params.has_anomaly,
                     edge_impulse_runner::types::RunnerHelloHasAnomaly::VisualGMM
                 );
+
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Model type detection: model_type='{}', is_object_detection={}, is_anomaly_detection={}",
+                params.model_type,
+                is_object_detection,
+                is_anomaly_detection
+            );
+
+            // Add debug output for the condition branches
+            if is_anomaly_detection {
+                gst::debug!(CAT, obj = self.obj(), "Taking anomaly detection branch");
+            } else if is_object_detection {
+                gst::debug!(CAT, obj = self.obj(), "Taking object detection branch");
+            } else {
+                gst::debug!(CAT, obj = self.obj(), "Taking classification branch");
+            }
 
             gst::debug!(
                 CAT,
@@ -568,57 +668,11 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let result_json = serde_json::to_string(&result_value).unwrap();
             gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
 
-            if is_anomaly_detection {
-                // Parse the JSON result to get anomaly scores
-                if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
-                    if let (Some(anomaly), Some(visual_anomaly_max), Some(visual_anomaly_mean)) = (
-                        json["anomaly"].as_f64(),
-                        json["visual_anomaly_max"].as_f64(),
-                        json["visual_anomaly_mean"].as_f64(),
-                    ) {
-                        // Add anomaly meta
-                        let mut meta = VideoAnomalyMeta::add(outbuf);
-                        meta.set_anomaly(anomaly as f32);
-                        meta.set_visual_anomaly_max(visual_anomaly_max as f32);
-                        meta.set_visual_anomaly_mean(visual_anomaly_mean as f32);
-
-                        // Add visual anomaly grid if available
-                        if let Some(grid) = json["visual_anomaly_grid"].as_array() {
-                            let mut visual_grid = Vec::new();
-                            for cell in grid {
-                                if let (Some(x), Some(y), Some(width), Some(height), Some(value)) = (
-                                    cell["x"].as_u64(),
-                                    cell["y"].as_u64(),
-                                    cell["width"].as_u64(),
-                                    cell["height"].as_u64(),
-                                    cell["value"].as_f64(),
-                                ) {
-                                    visual_grid.push(VideoRegionOfInterestMeta {
-                                        x: x as u32,
-                                        y: y as u32,
-                                        width: width as u32,
-                                        height: height as u32,
-                                        label: format!("{value:.3}"),
-                                    });
-                                }
-                            }
-                            meta.set_visual_anomaly_grid(visual_grid);
-                        }
-                    }
-                }
-
-                let s = crate::common::create_inference_message(
-                    "video",
-                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                    "anomaly-detection",
-                    result_json,
-                    elapsed.as_millis() as u32,
-                );
-                let _ = self.obj().post_message(gst::message::Element::new(s));
-            } else if is_object_detection {
-                // Parse the JSON result to get bounding boxes
-                if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
-                    if let Some(boxes) = json["bounding_boxes"].as_array() {
+            // --- Unified result handling: prefer object detection if bounding_boxes is present and non-empty ---
+            if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                if let Some(boxes) = json["bounding_boxes"].as_array() {
+                    if !boxes.is_empty() {
+                        // Object detection branch
                         for bbox in boxes {
                             if let (
                                 Some(label),
@@ -635,14 +689,11 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 bbox["width"].as_u64(),
                                 bbox["height"].as_u64(),
                             ) {
-                                // Add ROI meta for each bounding box
                                 let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
                                     outbuf,
                                     label,
                                     (x as u32, y as u32, width as u32, height as u32),
                                 );
-
-                                // Add detection parameters
                                 let s = gst::Structure::builder("detection")
                                     .field("label", label)
                                     .field("confidence", value)
@@ -650,22 +701,55 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 roi_meta.add_param(s);
                             }
                         }
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "object-detection",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
+                    } else {
+                        // Classification fallback if bounding_boxes is empty
+                        if let Some(classification) = json["classification"].as_object() {
+                            let mut best_label = None;
+                            let mut best_confidence = 0.0;
+                            for (label, confidence) in classification {
+                                if let Some(conf) = confidence.as_f64() {
+                                    if conf > best_confidence {
+                                        best_confidence = conf;
+                                        best_label = Some(label);
+                                    }
+                                }
+                            }
+                            if let Some(label) = best_label {
+                                let mut meta = VideoClassificationMeta::add(outbuf);
+                                let s = gst::Structure::builder("classification")
+                                    .field("label", label)
+                                    .field("confidence", best_confidence)
+                                    .build();
+                                meta.add_param(s);
+                                gst::debug!(
+                                    CAT,
+                                    obj = self.obj(),
+                                    "Added classification metadata: label={}, confidence={}",
+                                    label,
+                                    best_confidence
+                                );
+                            }
+                        }
+                        let s = crate::common::create_inference_message(
+                            "video",
+                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                            "classification",
+                            result_json,
+                            elapsed.as_millis() as u32,
+                        );
+                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
-                }
-
-                let s = crate::common::create_inference_message(
-                    "video",
-                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                    "object-detection",
-                    result_json,
-                    elapsed.as_millis() as u32,
-                );
-                let _ = self.obj().post_message(gst::message::Element::new(s));
-            } else {
-                // Classification model
-                if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
+                } else {
+                    // No bounding_boxes field, treat as classification
                     if let Some(classification) = json["classification"].as_object() {
-                        // Find the best classification result
                         let mut best_label = None;
                         let mut best_confidence = 0.0;
                         for (label, confidence) in classification {
@@ -676,9 +760,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 }
                             }
                         }
-
                         if let Some(label) = best_label {
-                            // Add classification meta
                             let mut meta = VideoClassificationMeta::add(outbuf);
                             let s = gst::Structure::builder("classification")
                                 .field("label", label)
@@ -694,16 +776,15 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             );
                         }
                     }
+                    let s = crate::common::create_inference_message(
+                        "video",
+                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        "classification",
+                        result_json,
+                        elapsed.as_millis() as u32,
+                    );
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
-
-                let s = crate::common::create_inference_message(
-                    "video",
-                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                    "classification",
-                    result_json,
-                    elapsed.as_millis() as u32,
-                );
-                let _ = self.obj().post_message(gst::message::Element::new(s));
             }
 
             // Put the model back in the state
@@ -772,14 +853,14 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
     }
 }
 
-impl AsRef<Option<EimModel>> for VideoState {
-    fn as_ref(&self) -> &Option<EimModel> {
+impl AsRef<Option<EdgeImpulseModel>> for VideoState {
+    fn as_ref(&self) -> &Option<EdgeImpulseModel> {
         &self.model
     }
 }
 
-impl AsMut<Option<EimModel>> for VideoState {
-    fn as_mut(&mut self) -> &mut Option<EimModel> {
+impl AsMut<Option<EdgeImpulseModel>> for VideoState {
+    fn as_mut(&mut self) -> &mut Option<EdgeImpulseModel> {
         &mut self.model
     }
 }

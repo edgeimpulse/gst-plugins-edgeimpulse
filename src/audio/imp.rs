@@ -74,6 +74,7 @@
 //! - Buffer mappings are dropped as soon as possible
 //! - Sample buffer is cleared after each inference
 
+use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -97,21 +98,52 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 #[derive(Default)]
 pub struct AudioState {
     /// The loaded Edge Impulse model
-    pub model: Option<edge_impulse_runner::EimModel>,
+    pub model: Option<EdgeImpulseModel>,
     /// Audio sample rate
     pub sample_rate: Option<u32>,
+    /// Debug mode flag for FFI mode (lazy initialization)
+    #[cfg(feature = "ffi")]
+    pub debug_enabled: bool,
 }
 
-impl AsRef<Option<edge_impulse_runner::EimModel>> for AudioState {
-    fn as_ref(&self) -> &Option<edge_impulse_runner::EimModel> {
+impl AsRef<Option<EdgeImpulseModel>> for AudioState {
+    fn as_ref(&self) -> &Option<EdgeImpulseModel> {
         &self.model
     }
 }
 
-impl AsMut<Option<edge_impulse_runner::EimModel>> for AudioState {
-    fn as_mut(&mut self) -> &mut Option<edge_impulse_runner::EimModel> {
+impl AsMut<Option<EdgeImpulseModel>> for AudioState {
+    fn as_mut(&mut self) -> &mut Option<EdgeImpulseModel> {
         &mut self.model
     }
+}
+
+impl crate::common::DebugState for AudioState {
+    fn set_debug(&mut self, enabled: bool) {
+        #[cfg(feature = "ffi")]
+        {
+            self.debug_enabled = enabled;
+        }
+        #[cfg(not(feature = "ffi"))]
+        {
+            // No-op in non-FFI mode
+            let _ = enabled;
+        }
+    }
+
+    fn get_debug(&self) -> bool {
+        #[cfg(feature = "ffi")]
+        {
+            self.debug_enabled
+        }
+        #[cfg(not(feature = "ffi"))]
+        {
+            false
+        }
+    }
+}
+
+impl AudioState {
 }
 
 /// Audio inference element structure
@@ -247,7 +279,46 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
 
         // Run inference if we have enough samples and a model is loaded
         let mut state = self.state.lock().unwrap();
-        if let Some(ref mut model) = state.model {
+
+        // Try to get existing model or create lazily
+        let model = if let Some(model) = state.model.take() {
+            Some(model)
+        } else {
+            // No model exists, try lazy initialization (FFI mode only)
+            #[cfg(feature = "ffi")]
+            {
+                match if state.debug_enabled {
+                    EdgeImpulseModel::new_with_debug(true)
+                } else {
+                    EdgeImpulseModel::new()
+                } {
+                    Ok(model) => {
+                        gst::debug!(
+                            CAT,
+                            obj = self.obj(),
+                            "Lazily created FFI model (debug={})",
+                            state.debug_enabled
+                        );
+                        Some(model)
+                    }
+                    Err(err) => {
+                        gst::error!(
+                            CAT,
+                            obj = self.obj(),
+                            "Failed to create FFI model lazily: {}",
+                            err
+                        );
+                        None
+                    }
+                }
+            }
+            #[cfg(not(feature = "ffi"))]
+            {
+                None
+            }
+        };
+
+        if let Some(mut model) = model {
             let params = match model.parameters() {
                 Ok(p) => p,
                 Err(e) => {
@@ -342,6 +413,9 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                     }
                 }
             }
+
+            // Put the model back in the state
+            state.model = Some(model);
         }
 
         Ok(gst::FlowSuccess::Ok)

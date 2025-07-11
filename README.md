@@ -170,6 +170,58 @@ cd gst-plugins-edgeimpulse
 cargo build --release
 ```
 
+#### Build Features
+
+The plugin supports two inference modes:
+
+**EIM Mode (Default):**
+- Uses Edge Impulse model files (.eim) for inference
+- Requires model files to be present on the filesystem
+- Compatible with all Edge Impulse deployment targets
+- **Usage:** Set the `model-path` or `model-path-with-debug` property to the .eim file path
+
+```bash
+cargo build --release --features eim
+```
+
+**FFI Mode:**
+- Direct FFI calls to the Edge Impulse C++ SDK
+- Models are compiled into the binary
+- Faster startup and inference times
+- **Usage:** No model path needed - the model is statically linked
+- **Requirement:** Must have environment variables set for model download during build:
+  - `EI_PROJECT_ID`: Your Edge Impulse project ID
+  - `EI_API_KEY`: Your Edge Impulse API key
+
+```bash
+# Set environment variables (required for FFI mode)
+export EI_PROJECT_ID="your_project_id"
+export EI_API_KEY="your_api_key"
+
+# Build with FFI feature
+cargo build --release --features ffi
+```
+
+**Note:**
+- Only one backend should be enabled at a time. The default is EIM mode.
+- FFI mode will fail to build if the environment variables are not set, as it needs to download and compile the model during the build process.
+
+#### Troubleshooting
+
+**FFI Build Errors:**
+If you get an error like `could not find native static library 'edge_impulse_ffi_rs'` when building with `--features ffi`, it means the environment variables are not set. The FFI mode requires:
+1. `EI_PROJECT_ID` environment variable set to your Edge Impulse project ID
+2. `EI_API_KEY` environment variable set to your Edge Impulse API key
+
+These variables are used during the build process to download and compile your model into the binary.
+
+**Solution:** Set the environment variables before building:
+```bash
+export EI_PROJECT_ID="your_project_id"
+export EI_API_KEY="your_api_key"
+cargo build --release --features ffi
+```
+
 #### Cross-compilation for ARM64
 To build a Linux ARM64-compatible .so file from macOS, you'll need Docker.
 

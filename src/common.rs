@@ -1,9 +1,16 @@
-use edge_impulse_runner::EimModel;
+use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::ParamSpecBuilderExt;
 use gstreamer::prelude::*;
 use std::sync::Mutex;
+
+/// Trait for state types that support debug mode
+#[allow(dead_code)]
+pub trait DebugState {
+    fn set_debug(&mut self, enabled: bool);
+    fn get_debug(&self) -> bool;
+}
 
 /// Creates common GStreamer properties shared between Edge Impulse elements
 ///
@@ -15,29 +22,49 @@ use std::sync::Mutex;
 /// # Returns
 ///
 /// Returns a `Vec<glib::ParamSpec>` containing the property specifications:
-/// - model-path: String property for specifying the path to the .eim model file
+/// - model-path: String property for specifying the path to the .eim model file (EIM mode only)
+/// - model-path-with-debug: String property for specifying the path to the .eim model file with debug enabled (EIM mode only)
+/// - debug: Boolean property for enabling debug mode (FFI mode only)
 ///
 /// # Example
 ///
 /// ```bash
 /// # Setting properties in gst-launch-1.0:
 /// gst-launch-1.0 edgeimpulsevideoinfer model-path=/path/to/model.eim ! ...
+/// gst-launch-1.0 edgeimpulsevideoinfer debug=true ! ...
 /// ```
 pub fn create_common_properties() -> Vec<glib::ParamSpec> {
-    vec![
+    let base_properties = vec![
         glib::ParamSpecString::builder("model-path")
             .nick("Model Path")
-            .blurb("Path to Edge Impulse model file")
+            .blurb("Path to Edge Impulse model file (.eim for EIM mode only)")
             .build(),
         glib::ParamSpecString::builder("model-path-with-debug")
             .nick("Model Path With Debug")
-            .blurb("Path to Edge Impulse model file (debug mode enabled)")
+            .blurb("Path to Edge Impulse model file (debug mode enabled, EIM mode only)")
             .build(),
         glib::ParamSpecString::builder("threshold")
             .nick("Model Block Threshold")
             .blurb("Threshold value for model blocks in format 'blockId.type=value'. Examples: '5.min_score=0.6' for object detection blocks, '4.min_anomaly_score=0.35' for anomaly detection blocks. Multiple thresholds can be set by calling the property multiple times.")
             .build(),
-    ]
+    ];
+
+    #[cfg(feature = "ffi")]
+    {
+        let mut properties = base_properties;
+        properties.push(
+            glib::ParamSpecBoolean::builder("debug")
+                .nick("Debug Mode")
+                .blurb("Enable debug mode for FFI inference (FFI mode only)")
+                .default_value(false)
+                .build(),
+        );
+        properties
+    }
+    #[cfg(not(feature = "ffi"))]
+    {
+        base_properties
+    }
 }
 
 pub fn set_common_property<T>(
@@ -48,49 +75,130 @@ pub fn set_common_property<T>(
     obj: &impl GstObjectExt,
     cat: &gst::DebugCategory,
 ) where
-    T: AsMut<Option<EimModel>>,
+    T: AsMut<Option<EdgeImpulseModel>> + DebugState,
 {
     match pspec.name() {
         "model-path" => {
-            let mut state = state.lock().unwrap();
             let model_path: Option<String> = value.get().expect("type checked upstream");
-            if let Some(model_path) = model_path {
-                let model_result = edge_impulse_runner::EimModel::new(&model_path);
-                match model_result {
-                    Ok(model) => {
-                        gst::debug!(
-                            cat,
-                            obj = obj,
-                            "Successfully loaded model from {} (debug=false)",
-                            model_path
-                        );
-                        *state.as_mut() = Some(model);
-                    }
-                    Err(err) => {
-                        gst::error!(cat, obj = obj, "Failed to load model: {}", err);
-                    }
+
+            #[cfg(feature = "ffi")]
+            {
+                // In FFI mode, ignore the path and warn user
+                if model_path.is_some() {
+                    gst::warning!(
+                        cat,
+                        obj = obj,
+                        "model-path is ignored in FFI mode; model will be created lazily on first inference"
+                    );
                 }
+                gst::debug!(
+                    cat,
+                    obj = obj,
+                    "FFI mode: model will be created lazily on first inference"
+                );
+            }
+            #[cfg(feature = "eim")]
+            {
+                // In EIM mode, require a path
+                if let Some(model_path) = model_path {
+                    let model_result = EdgeImpulseModel::new_eim(&model_path);
+                    match model_result {
+                        Ok(model) => {
+                            gst::debug!(
+                                cat,
+                                obj = obj,
+                                "Successfully loaded EIM model from {} (debug=false)",
+                                model_path
+                            );
+                            *state.as_mut() = Some(model);
+                        }
+                        Err(err) => {
+                            gst::error!(cat, obj = obj, "Failed to load EIM model: {}", err);
+                        }
+                    }
+                } else {
+                    gst::error!(cat, obj = obj, "model-path is required in EIM mode");
+                }
+            }
+            #[cfg(not(any(feature = "eim", feature = "ffi")))]
+            {
+                gst::error!(cat, obj = obj, "No backend enabled. Enable either 'eim' or 'ffi' feature.");
             }
         }
         "model-path-with-debug" => {
             let mut state = state.lock().unwrap();
             let model_path: Option<String> = value.get().expect("type checked upstream");
-            if let Some(model_path) = model_path {
-                let model_result = edge_impulse_runner::EimModel::new_with_debug(&model_path, true);
-                match model_result {
-                    Ok(model) => {
-                        gst::debug!(
-                            cat,
-                            obj = obj,
-                            "Successfully loaded model from {} (debug=true)",
-                            model_path
-                        );
-                        *state.as_mut() = Some(model);
-                    }
-                    Err(err) => {
-                        gst::error!(cat, obj = obj, "Failed to load model: {}", err);
-                    }
+
+            #[cfg(feature = "ffi")]
+            {
+                // In FFI mode, ignore the path and set debug mode
+                if model_path.is_some() {
+                    gst::warning!(
+                        cat,
+                        obj = obj,
+                        "model-path-with-debug is ignored in FFI mode; setting debug mode for lazy initialization"
+                    );
                 }
+                // Set debug mode for lazy initialization
+                state.set_debug(true);
+                gst::debug!(
+                    cat,
+                    obj = obj,
+                    "FFI mode: debug mode enabled, model will be created lazily on first inference"
+                );
+            }
+            #[cfg(feature = "eim")]
+            {
+                // In EIM mode, require a path
+                if let Some(model_path) = model_path {
+                    let model_result = EdgeImpulseModel::new_eim_with_debug(&model_path, true);
+                    match model_result {
+                        Ok(model) => {
+                            gst::debug!(
+                                cat,
+                                obj = obj,
+                                "Successfully loaded EIM model from {} (debug=true)",
+                                model_path
+                            );
+                            *state.as_mut() = Some(model);
+                        }
+                        Err(err) => {
+                            gst::error!(cat, obj = obj, "Failed to load EIM model: {}", err);
+                        }
+                    }
+                } else {
+                    gst::error!(cat, obj = obj, "model-path-with-debug is required in EIM mode");
+                }
+            }
+            #[cfg(not(any(feature = "eim", feature = "ffi")))]
+            {
+                gst::error!(cat, obj = obj, "No backend enabled. Enable either 'eim' or 'ffi' feature.");
+            }
+        }
+                                "debug" => {
+            #[cfg(feature = "ffi")]
+            {
+                let debug_enabled: bool = value.get().expect("type checked upstream");
+                let mut state = state.lock().unwrap();
+
+                // Store debug preference for lazy initialization
+                gst::debug!(
+                    cat,
+                    obj = obj,
+                    "Debug mode set to {} (model will be created lazily)",
+                    debug_enabled
+                );
+
+                // Update the debug flag in the state using the trait
+                state.set_debug(debug_enabled);
+            }
+            #[cfg(not(feature = "ffi"))]
+            {
+                gst::warning!(
+                    cat,
+                    obj = obj,
+                    "debug property is only available in FFI mode"
+                );
             }
         }
         "threshold" => {
@@ -98,7 +206,7 @@ pub fn set_common_property<T>(
             let threshold_str: Option<String> = value.get().expect("type checked upstream");
 
             if let Some(threshold_str) = threshold_str {
-                if let Some(model) = state.as_mut() {
+                if let Some(_model) = state.as_mut() {
                     // Parse threshold string in format "blockId.type=value"
                     let re = regex::Regex::new(r"^(\d+)\.([a-zA-Z0-9_-]+)=([\d\.]+)$").unwrap();
 
@@ -131,7 +239,7 @@ pub fn set_common_property<T>(
                         };
 
                         // Create appropriate threshold config based on key
-                        let threshold_config = match key.as_str() {
+                        let _threshold_config = match key.as_str() {
                             "min_score" => edge_impulse_runner::inference::messages::ThresholdConfig::ObjectDetection {
                                 id,
                                 min_score: value,
@@ -151,22 +259,12 @@ pub fn set_common_property<T>(
                             }
                         };
 
-                        // Set the threshold asynchronously
-                        let rt = tokio::runtime::Runtime::new().unwrap();
-                        match rt.block_on(model.set_learn_block_threshold(threshold_config)) {
-                            Ok(_) => {
-                                gst::debug!(
-                                    cat,
-                                    obj = obj,
-                                    "Successfully set threshold for block {} to {}",
-                                    id,
-                                    value
-                                );
-                            }
-                            Err(err) => {
-                                gst::error!(cat, obj = obj, "Failed to set threshold: {}", err);
-                            }
-                        }
+                        // TODO: Threshold setting functionality not available in current API
+                        gst::warning!(
+                            cat,
+                            obj = obj,
+                            "Threshold setting not supported in current API version"
+                        );
                     } else {
                         gst::error!(
                             cat,
@@ -184,23 +282,35 @@ pub fn set_common_property<T>(
 
 pub fn get_common_property<T>(state: &Mutex<T>, _id: usize, pspec: &glib::ParamSpec) -> glib::Value
 where
-    T: AsRef<Option<EimModel>>,
+    T: AsRef<Option<EdgeImpulseModel>> + DebugState,
 {
     match pspec.name() {
         "model-path" => {
             let state = state.lock().unwrap();
-            if let Some(ref model) = *state.as_ref() {
-                model.path().to_value()
+            if let Some(ref _model) = *state.as_ref() {
+                // Note: EdgeImpulseModel doesn't have a path() method, so we return None
+                None::<String>.to_value()
             } else {
                 None::<String>.to_value()
             }
         }
         "model-path-with-debug" => None::<String>.to_value(),
+        "debug" => {
+            #[cfg(feature = "ffi")]
+            {
+                let state = state.lock().unwrap();
+                state.get_debug().to_value()
+            }
+            #[cfg(not(feature = "ffi"))]
+            {
+                false.to_value()
+            }
+        }
         "threshold" => {
             let state = state.lock().unwrap();
-            if let Some(ref model) = *state.as_ref() {
+            if let Some(ref _model) = *state.as_ref() {
                 // Try to get the current thresholds from model parameters
-                if let Ok(params) = model.parameters() {
+                if let Ok(params) = _model.parameters() {
                     // Return a string representation of all thresholds
                     let thresholds: Vec<String> = params
                         .thresholds

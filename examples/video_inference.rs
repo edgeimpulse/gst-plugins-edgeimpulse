@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct VideoClassifyParams {
-    /// Path to Edge Impulse model file (required for EIM mode, ignored for FFI mode)
+    /// Path to Edge Impulse model file (optional for FFI mode)
     #[arg(short, long)]
     model: Option<String>,
 
@@ -49,17 +49,9 @@ struct VideoClassifyParams {
     #[clap(long)]
     threshold: Vec<String>,
 
-    /// Target FPS (0 for unlimited)
-    #[arg(long, default_value = "30")]
-    fps: u32,
-
     /// Enable performance monitoring
     #[arg(long)]
     perf: bool,
-
-    /// Queue size for buffering (default: 4)
-    #[arg(long, default_value = "4")]
-    queue_size: u32,
 }
 
 // Performance tracking structure
@@ -67,7 +59,6 @@ struct VideoClassifyParams {
 struct PerformanceMetrics {
     frame_count: u64,
     total_inference_time: Duration,
-    _total_pipeline_time: Duration,
     start_time: Instant,
     last_fps_time: Instant,
     fps_samples: Vec<f64>,
@@ -79,7 +70,6 @@ impl PerformanceMetrics {
         Self {
             frame_count: 0,
             total_inference_time: Duration::ZERO,
-            _total_pipeline_time: Duration::ZERO,
             start_time: Instant::now(),
             last_fps_time: Instant::now(),
             fps_samples: Vec::new(),
@@ -154,7 +144,6 @@ where
 
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
-#[allow(deprecated)]
 fn run<T, F: FnOnce() -> T + Send + 'static>(main: F) -> T
 where
     T: Send + 'static,
@@ -226,119 +215,123 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     // Initialize GStreamer
     gst::init()?;
 
-    println!("[DEBUG] Creating full pipeline with Edge Impulse inference");
+    // Check for FFI mode
+    let is_ffi_mode = args.model.is_none();
+    if is_ffi_mode {
+        let api_key = std::env::var("EI_API_KEY").ok();
+        let project_id = std::env::var("EI_PROJECT_ID").ok();
 
-    // Create pipeline with performance optimizations
+        if api_key.is_some() && project_id.is_some() {
+            println!("✅ FFI Mode: Environment variables are set, model will be loaded automatically.");
+        } else {
+            println!("❌ FFI Mode: Missing EI_API_KEY or EI_PROJECT_ID environment variables");
+            return Err("FFI mode requires EI_API_KEY and EI_PROJECT_ID environment variables".into());
+        }
+    } else {
+        println!("🔧 EIM Mode: Using model path: {}", args.model.as_ref().unwrap());
+    }
+
+    // Create pipeline
     let pipeline = gst::Pipeline::new();
 
-    // Create elements with performance optimizations
+    // Create elements
     let src = gst::ElementFactory::make("avfvideosrc")
-        .property("device-index", 0i32) // Use first camera
         .build()
         .expect("Could not create avfvideosrc element.");
 
-    // Optimized queue with larger buffer
     let queue1 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", args.queue_size as u32)
-        .property("max-size-bytes", 0u32)
-        .property("max-size-time", 0u64)
+        .property("max-size-buffers", 2u32)
+        .property_from_str("leaky", "downstream")
         .build()
         .expect("Could not create queue element.");
 
-    // Optimized video conversion with threading
     let videoconvert1 = gst::ElementFactory::make("videoconvert")
-        .property("n-threads", 8u32) // Use 8 threads for conversion
+        .property("n-threads", 4u32)
         .build()
         .expect("Could not create videoconvert element.");
 
-    // Video scaling
     let videoscale1 = gst::ElementFactory::make("videoscale")
         .build()
         .expect("Could not create videoscale element.");
 
-    // Caps filter for model input - only after conversion/scaling
     let caps1 = gst::ElementFactory::make("capsfilter")
-        .property("caps", gst::Caps::builder("video/x-raw")
-            .field("width", args.width as i32)
-            .field("height", args.height as i32)
-            .field("format", "RGB")
-            .build())
         .build()
         .expect("Could not create capsfilter element.");
 
-    // Queue for inference
     let queue2 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 4u32)
+        .property("max-size-buffers", 2u32)
+        .property_from_str("leaky", "downstream")
         .build()
         .expect("Could not create queue element.");
 
-    // Edge Impulse classifier
+    // Create classifier based on mode
     let mut classifier_factory = gst::ElementFactory::make("edgeimpulsevideoinfer");
 
-    // Set model path if provided (for EIM mode) or let FFI mode use statically linked model
-    if let Some(ref model_path) = args.model {
+    if is_ffi_mode {
         if args.debug {
-            classifier_factory = classifier_factory.property("model-path-with-debug", model_path);
-            println!("🔧 Setting model-path-with-debug: {}", model_path);
-        } else {
-            classifier_factory = classifier_factory.property("model-path", model_path);
-            println!("🔧 Setting model-path: {}", model_path);
+            classifier_factory = classifier_factory.property("debug", true);
+            println!("🔧 Setting debug mode for FFI inference");
         }
     } else {
-        println!("🔧 No model path provided - will use FFI mode with lazy loading");
-    }
-
-    // Set debug mode for FFI mode if requested
-    if args.debug && args.model.is_none() {
-        classifier_factory = classifier_factory.property("debug", true);
-        println!("🔧 Setting debug mode for FFI inference");
+        if args.debug {
+            classifier_factory = classifier_factory.property("model-path-with-debug", args.model.as_ref().unwrap());
+            println!("🔧 Setting model-path-with-debug: {}", args.model.as_ref().unwrap());
+        } else {
+            classifier_factory = classifier_factory.property("model-path", args.model.as_ref().unwrap());
+            println!("🔧 Setting model-path: {}", args.model.as_ref().unwrap());
+        }
     }
 
     // Set thresholds if provided
     for threshold in &args.threshold {
         classifier_factory = classifier_factory.property("threshold", threshold);
-        println!("🔧 Setting threshold: {}", threshold);
     }
 
     let classifier = classifier_factory
         .build()
         .expect("Could not create edgeimpulsevideoinfer element.");
 
-    // Queue for overlay
     let queue3 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 4u32)
+        .property("max-size-buffers", 2u32)
+        .property_from_str("leaky", "downstream")
         .build()
         .expect("Could not create queue element.");
 
-    // Video overlay for bounding boxes
     let overlay = gst::ElementFactory::make("edgeimpulseoverlay")
         .build()
         .expect("Could not create edgeimpulseoverlay element.");
 
-    // Video scaling for display
     let videoscale2 = gst::ElementFactory::make("videoscale")
         .build()
         .expect("Could not create videoscale element.");
 
-    // Caps filter for display
     let caps2 = gst::ElementFactory::make("capsfilter")
-        .property("caps", gst::Caps::builder("video/x-raw")
-            .field("width", 640i32)
-            .field("height", 480i32)
-            .build())
         .build()
         .expect("Could not create capsfilter element.");
 
-    // Video conversion for display
     let videoconvert2 = gst::ElementFactory::make("videoconvert")
+        .property("n-threads", 4u32)
         .build()
         .expect("Could not create videoconvert element.");
 
-    // Optimized sink with async processing
     let sink = gst::ElementFactory::make("autovideosink")
-        .property("sync", false) // Disable sync for better performance
+        .property("sync", false)
         .build()
         .expect("Could not create autovideosink element.");
+
+    // Set caps using provided dimensions
+    let caps1_struct = gst::Caps::builder("video/x-raw")
+        .field("format", "RGB")
+        .field("width", args.width)
+        .field("height", args.height)
+        .build();
+    caps1.set_property("caps", &caps1_struct);
+
+    let caps2_struct = gst::Caps::builder("video/x-raw")
+        .field("width", 480i32)
+        .field("height", 480i32)
+        .build();
+    caps2.set_property("caps", &caps2_struct);
 
     // Add elements to the pipeline
     pipeline.add_many(&[
@@ -346,7 +339,7 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         &queue1,
         &videoconvert1,
         &videoscale1,
-        &caps1, // Caps filter after conversion/scaling
+        &caps1,
         &queue2,
         &classifier,
         &queue3,
@@ -380,43 +373,6 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
 fn example_main() -> Result<(), Box<dyn Error>> {
     let args = VideoClassifyParams::parse();
 
-    // Check if we're in FFI mode and provide guidance
-    if args.model.is_none() {
-        let ei_project_id = std::env::var("EI_PROJECT_ID").ok();
-        let ei_api_key = std::env::var("EI_API_KEY").ok();
-
-        if ei_project_id.is_none() || ei_api_key.is_none() {
-            println!("⚠️  FFI Mode: No model path provided, but environment variables are not set.");
-            println!("   To use FFI mode, set the following environment variables:");
-            println!("   export EI_PROJECT_ID=your_project_id");
-            println!("   export EI_API_KEY=your_api_key");
-            println!("   Then run: cargo run --example video_inference -- -W 224 -H 224 --debug");
-            println!();
-            println!("   Alternatively, use EIM mode with a model file:");
-            println!("   cargo run --example video_inference -- --model /path/to/model.eim -W 224 -H 224 --debug");
-            println!();
-            println!("   Current environment:");
-            println!("   EI_PROJECT_ID: {}", ei_project_id.as_deref().unwrap_or("not set"));
-            println!("   EI_API_KEY: {}", if ei_api_key.is_some() { "set" } else { "not set" });
-            println!();
-            println!("   Continuing with FFI mode (model will be loaded lazily if env vars are set)...");
-        } else {
-            println!("✅ FFI Mode: Environment variables are set, model will be loaded automatically.");
-        }
-    } else {
-        println!("✅ EIM Mode: Using model file: {}", args.model.as_ref().unwrap());
-    }
-
-    // Print performance configuration
-    if args.perf {
-        println!("🚀 Performance mode enabled:");
-        println!("   Target FPS: {}", args.fps);
-        println!("   Queue size: {}", args.queue_size);
-        println!("   Threads: 8 (optimized)");
-        println!("   Sync: disabled");
-        println!("   Async: enabled");
-    }
-
     let pipeline = create_pipeline(&args)?;
 
     pipeline.set_state(gst::State::Playing)?;
@@ -430,29 +386,40 @@ fn example_main() -> Result<(), Box<dyn Error>> {
             MessageView::Element(element) => {
                 let structure = element.structure().unwrap();
                 if structure.name() == "edge-impulse-video-inference-result" {
-                    // Extract timing information
+                    // Extract timing information for performance monitoring
                     let timing_ms = structure.get::<u32>("timing_ms").unwrap_or(0);
                     perf_metrics.update(timing_ms);
 
-                    // Print performance info if enabled
-                    if args.perf {
-                        let current_fps = if !perf_metrics.fps_samples.is_empty() {
-                            perf_metrics.fps_samples.last().unwrap()
-                        } else {
-                            &0.0
-                        };
-                        let avg_inference = if !perf_metrics.inference_samples.is_empty() {
-                            perf_metrics.inference_samples.iter()
-                                .rev()
-                                .take(10)
-                                .sum::<Duration>() / perf_metrics.inference_samples.iter().rev().take(10).count() as u32
-                        } else {
-                            Duration::ZERO
-                        };
+                    // Always print performance info
+                    let current_fps = if !perf_metrics.fps_samples.is_empty() {
+                        perf_metrics.fps_samples.last().unwrap()
+                    } else {
+                        &0.0
+                    };
+                    let avg_inference = if !perf_metrics.inference_samples.is_empty() {
+                        perf_metrics.inference_samples.iter()
+                            .rev()
+                            .take(10)
+                            .sum::<Duration>() / perf_metrics.inference_samples.iter().rev().take(10).count() as u32
+                    } else {
+                        Duration::ZERO
+                    };
 
-                        println!("📊 Frame #{} | FPS: {:.1} | Inference: {}ms | Avg: {:.1}ms",
-                            perf_metrics.frame_count, current_fps, timing_ms, avg_inference.as_millis());
-                    }
+                    println!("🎯 Frame #{:3} | FPS: {:4.1} | Inference: {:3}ms | Avg: {:4.1}ms | Confidence: {:.1}%",
+                        perf_metrics.frame_count,
+                        current_fps,
+                        timing_ms,
+                        avg_inference.as_millis(),
+                        if let Ok(result) = structure.get::<String>("result") {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                                if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                    if let Some(first_box) = boxes.first() {
+                                        first_box["value"].as_f64().unwrap_or(0.0) * 100.0
+                                    } else { 0.0 }
+                                } else { 0.0 }
+                            } else { 0.0 }
+                        } else { 0.0 }
+                    );
 
                     println!("Inference result: {:?}", structure);
                     if let Ok(result) = structure.get::<String>("result") {
@@ -543,11 +510,7 @@ fn example_main() -> Result<(), Box<dyn Error>> {
     pipeline.set_state(gst::State::Null)?;
     println!("Pipeline stopped");
 
-    // Print performance summary
-    if args.perf {
-        perf_metrics.print_summary();
-    }
-
+    perf_metrics.print_summary();
     Ok(())
 }
 

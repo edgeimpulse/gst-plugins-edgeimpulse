@@ -411,41 +411,15 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         inbuf: &gst::Buffer,
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        // Map the input buffer for reading
-        let in_map = inbuf.map_readable().map_err(|_| {
-            gst::error!(CAT, imp = self, "Failed to map input buffer readable");
-            gst::FlowError::Error
-        })?;
-
-        // Map the output buffer for writing
-        let mut out_map = outbuf.map_writable().map_err(|_| {
-            gst::error!(CAT, imp = self, "Failed to map output buffer writable");
-            gst::FlowError::Error
-        })?;
-
-        // Copy the input buffer to the output buffer
-        out_map.copy_from_slice(&in_map);
-
-        // Drop the mappings before doing inference
-        drop(out_map);
-        drop(in_map);
-
-        // Get state values we need
-        let (width, height, format) = {
-            let state = self.state.lock().unwrap();
-            (
-                state.width.unwrap_or(0),
-                state.height.unwrap_or(0),
-                state.format,
-            )
-        };
-
-        // Get state values we need and handle lazy initialization
-        let model = {
+        // Get all state values upfront to minimize mutex lock time
+        let (width, height, format, model) = {
             let mut state = self.state.lock().unwrap();
+            let width = state.width.unwrap_or(0);
+            let height = state.height.unwrap_or(0);
+            let format = state.format;
 
             // Try to get existing model first
-            if let Some(model) = state.model.take() {
+            let model = if let Some(model) = state.model.take() {
                 Some(model)
             } else {
                 // No model exists, try lazy initialization (FFI mode only)
@@ -480,11 +454,32 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 {
                     None
                 }
-            }
+            };
+
+            (width, height, format, model)
         };
+
+        // Map the input buffer for reading (keep it mapped for inference)
+        let in_map = inbuf.map_readable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map input buffer readable");
+            gst::FlowError::Error
+        })?;
+
+        // Map the output buffer for writing
+        let mut out_map = outbuf.map_writable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map output buffer writable");
+            gst::FlowError::Error
+        })?;
+
+        // Copy the input buffer to the output buffer
+        out_map.copy_from_slice(&in_map);
+
+        // Drop output mapping but keep input mapping for inference
+        drop(out_map);
 
         if let Some(mut model) = model {
             gst::debug!(CAT, obj = self.obj(), "Model loaded, running inference");
+
             // Get all parameters upfront
             let params = match model.parameters() {
                 Ok(p) => p,
@@ -542,68 +537,29 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 params.has_anomaly
             );
 
-            // Extract frame data for inference
-            let in_frame = match VideoFrameRef::from_buffer_ref_readable(
-                inbuf.as_ref(),
-                &VideoInfo::builder(
-                    if format == Some(VideoFormat::Gray8) {
-                        VideoFormat::Gray8
-                    } else {
-                        VideoFormat::Rgb
-                    },
-                    width,
-                    height,
-                )
-                .build()
-                .unwrap(),
-            ) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    gst::error!(
-                        CAT,
-                        obj = self.obj(),
-                        "Failed to map input buffer: {:?}",
-                        err
-                    );
-                    // Put the model back in the state
-                    let mut state = self.state.lock().unwrap();
-                    state.model = Some(model);
-                    return Err(gst::FlowError::Error);
-                }
-            };
+            // Use the already mapped input buffer data directly for feature conversion
+            let frame_data = &in_map;
 
-            // Get the raw frame data
-            let frame_data = match in_frame.plane_data(0) {
-                Ok(data) => data,
-                Err(err) => {
-                    gst::error!(CAT, obj = self.obj(), "Failed to get frame data: {:?}", err);
-                    // Put the model back in the state
-                    let mut state = self.state.lock().unwrap();
-                    state.model = Some(model);
-                    return Err(gst::FlowError::Error);
-                }
-            };
+            // Pre-allocate features vector with exact capacity
+            let pixel_count = (width * height) as usize;
+            let mut features = Vec::with_capacity(pixel_count);
 
-            // Always pass in full RGB array in the form of pixels like 0xff0000
-            // DSP handles normalization and splitting into 1 or 3 channels
-            let mut features = Vec::with_capacity((width * height) as usize);
-
+            // Optimized feature conversion - avoid redundant VideoFrameRef creation
             if format == Some(VideoFormat::Gray8) {
                 // For grayscale images, create RGB values by repeating the grayscale value
-                for &pixel in frame_data {
+                features.extend(frame_data.iter().map(|&pixel| {
                     // Create 24-bit RGB value: 0xRRGGBB where R=G=B=pixel
                     let feature = ((pixel as u32) << 16) | ((pixel as u32) << 8) | (pixel as u32);
-                    features.push(feature as f32);
-                }
+                    feature as f32
+                }));
             } else {
                 // For RGB images, combine channels into 24-bit RGB values
-                for chunk in frame_data.chunks_exact(3) {
-                    if let [r, g, b] = chunk {
-                        // Create 24-bit RGB value: 0xRRGGBB
-                        let feature = ((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32);
-                        features.push(feature as f32);
-                    }
-                }
+                // Use chunks_exact for better performance and avoid bounds checking
+                features.extend(frame_data.chunks_exact(3).map(|chunk| {
+                    // Create 24-bit RGB value: 0xRRGGBB
+                    let feature = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
+                    feature as f32
+                }));
             }
 
             // Run inference
@@ -629,6 +585,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
 
             // Convert result.result to serde_json::Value for normalization
             let mut result_value = serde_json::to_value(&result.result).unwrap();
+
             // Standardize classification output: always as object {label: value, ...}
             if let Some(classification) = result_value.get_mut("classification") {
                 if classification.is_array() {
@@ -644,6 +601,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     *classification = serde_json::Value::Object(map);
                 }
             }
+
             // Standardize object detection: always array of objects for bounding_boxes
             if let Some(bboxes) = result_value.get_mut("bounding_boxes") {
                 if bboxes.is_object() {
@@ -655,6 +613,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     *bboxes = serde_json::Value::Array(arr);
                 }
             }
+
             // Standardize visual anomaly detection grid: always array of objects
             if let Some(grid) = result_value.get_mut("visual_anomaly_grid") {
                 if grid.is_object() {
@@ -665,136 +624,140 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     *grid = serde_json::Value::Array(arr);
                 }
             }
+
+            // Convert to JSON string once and reuse
             let result_json = serde_json::to_string(&result_value).unwrap();
             gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
 
             // --- Unified result handling: prefer object detection if bounding_boxes is present and non-empty ---
-            if let Ok(json) = serde_json::from_str::<Value>(&result_json) {
-                if let Some(boxes) = json["bounding_boxes"].as_array() {
-                    if !boxes.is_empty() {
-                        // Object detection branch
-                        for bbox in boxes {
-                            if let (
-                                Some(label),
-                                Some(value),
-                                Some(x),
-                                Some(y),
-                                Some(width),
-                                Some(height),
-                            ) = (
-                                bbox["label"].as_str(),
-                                bbox["value"].as_f64(),
-                                bbox["x"].as_u64(),
-                                bbox["y"].as_u64(),
-                                bbox["width"].as_u64(),
-                                bbox["height"].as_u64(),
-                            ) {
-                                let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
-                                    outbuf,
-                                    label,
-                                    (x as u32, y as u32, width as u32, height as u32),
-                                );
-                                let s = gst::Structure::builder("detection")
-                                    .field("label", label)
-                                    .field("confidence", value)
-                                    .build();
-                                roi_meta.add_param(s);
-                            }
-                        }
-                        let s = crate::common::create_inference_message(
-                            "video",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            "object-detection",
-                            result_json,
-                            elapsed.as_millis() as u32,
+            // Use the already parsed result_value instead of parsing JSON again
+            if let Some(boxes) = result_value.get("bounding_boxes").and_then(|b| b.as_array()) {
+                if !boxes.is_empty() {
+                // Object detection branch
+                for bbox in boxes {
+                    if let (
+                        Some(label),
+                        Some(value),
+                        Some(x),
+                        Some(y),
+                        Some(width),
+                        Some(height),
+                    ) = (
+                        bbox["label"].as_str(),
+                        bbox["value"].as_f64(),
+                        bbox["x"].as_u64(),
+                        bbox["y"].as_u64(),
+                        bbox["width"].as_u64(),
+                        bbox["height"].as_u64(),
+                    ) {
+                        let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
+                            outbuf,
+                            label,
+                            (x as u32, y as u32, width as u32, height as u32),
                         );
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
-                    } else {
-                        // Classification fallback if bounding_boxes is empty
-                        if let Some(classification) = json["classification"].as_object() {
-                            let mut best_label = None;
-                            let mut best_confidence = 0.0;
-                            for (label, confidence) in classification {
-                                if let Some(conf) = confidence.as_f64() {
-                                    if conf > best_confidence {
-                                        best_confidence = conf;
-                                        best_label = Some(label);
-                                    }
-                                }
-                            }
-                            if let Some(label) = best_label {
-                                let mut meta = VideoClassificationMeta::add(outbuf);
-                                let s = gst::Structure::builder("classification")
-                                    .field("label", label)
-                                    .field("confidence", best_confidence)
-                                    .build();
-                                meta.add_param(s);
-                                gst::debug!(
-                                    CAT,
-                                    obj = self.obj(),
-                                    "Added classification metadata: label={}, confidence={}",
-                                    label,
-                                    best_confidence
-                                );
-                            }
-                        }
-                        let s = crate::common::create_inference_message(
-                            "video",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            "classification",
-                            result_json,
-                            elapsed.as_millis() as u32,
-                        );
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
+                        let s = gst::Structure::builder("detection")
+                            .field("label", label)
+                            .field("confidence", value)
+                            .build();
+                        roi_meta.add_param(s);
                     }
-                } else {
-                    // No bounding_boxes field, treat as classification
-                    if let Some(classification) = json["classification"].as_object() {
-                        let mut best_label = None;
-                        let mut best_confidence = 0.0;
-                        for (label, confidence) in classification {
-                            if let Some(conf) = confidence.as_f64() {
-                                if conf > best_confidence {
-                                    best_confidence = conf;
-                                    best_label = Some(label);
-                                }
+                }
+                let s = crate::common::create_inference_message(
+                    "video",
+                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                    "object-detection",
+                    result_json,
+                    elapsed.as_millis() as u32,
+                );
+                let _ = self.obj().post_message(gst::message::Element::new(s));
+            } else {
+                // Classification fallback if bounding_boxes is empty
+                if let Some(classification) = result_value.get("classification").and_then(|c| c.as_object()) {
+                    let mut best_label = None;
+                    let mut best_confidence = 0.0;
+                    for (label, confidence) in classification {
+                        if let Some(conf) = confidence.as_f64() {
+                            if conf > best_confidence {
+                                best_confidence = conf;
+                                best_label = Some(label);
                             }
-                        }
-                        if let Some(label) = best_label {
-                            let mut meta = VideoClassificationMeta::add(outbuf);
-                            let s = gst::Structure::builder("classification")
-                                .field("label", label)
-                                .field("confidence", best_confidence)
-                                .build();
-                            meta.add_param(s);
-                            gst::debug!(
-                                CAT,
-                                obj = self.obj(),
-                                "Added classification metadata: label={}, confidence={}",
-                                label,
-                                best_confidence
-                            );
                         }
                     }
-                    let s = crate::common::create_inference_message(
-                        "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                        "classification",
-                        result_json,
-                        elapsed.as_millis() as u32,
+                    if let Some(label) = best_label {
+                        let mut meta = VideoClassificationMeta::add(outbuf);
+                        let s = gst::Structure::builder("classification")
+                            .field("label", label)
+                            .field("confidence", best_confidence)
+                            .build();
+                        meta.add_param(s);
+                        gst::debug!(
+                            CAT,
+                            obj = self.obj(),
+                            "Added classification metadata: label={}, confidence={}",
+                            label,
+                            best_confidence
+                        );
+                    }
+                }
+                let s = crate::common::create_inference_message(
+                    "video",
+                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                    "classification",
+                    result_json,
+                    elapsed.as_millis() as u32,
+                );
+                let _ = self.obj().post_message(gst::message::Element::new(s));
+            }
+        } else {
+            // No bounding_boxes field, treat as classification
+            if let Some(classification) = result_value.get("classification").and_then(|c| c.as_object()) {
+                let mut best_label = None;
+                let mut best_confidence = 0.0;
+                for (label, confidence) in classification {
+                    if let Some(conf) = confidence.as_f64() {
+                        if conf > best_confidence {
+                            best_confidence = conf;
+                            best_label = Some(label);
+                        }
+                    }
+                }
+                if let Some(label) = best_label {
+                    let mut meta = VideoClassificationMeta::add(outbuf);
+                    let s = gst::Structure::builder("classification")
+                        .field("label", label)
+                        .field("confidence", best_confidence)
+                        .build();
+                    meta.add_param(s);
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Added classification metadata: label={}, confidence={}",
+                        label,
+                        best_confidence
                     );
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
             }
-
-            // Put the model back in the state
-            let mut state = self.state.lock().unwrap();
-            state.model = Some(model);
-        } else {
-            gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
+            let s = crate::common::create_inference_message(
+                "video",
+                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                "classification",
+                result_json,
+                elapsed.as_millis() as u32,
+            );
+            let _ = self.obj().post_message(gst::message::Element::new(s));
         }
 
-        Ok(gst::FlowSuccess::Ok)
+        // Put the model back in the state
+        let mut state = self.state.lock().unwrap();
+        state.model = Some(model);
+    } else {
+        gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
+    }
+
+    // Drop the input mapping at the end
+    drop(in_map);
+
+    Ok(gst::FlowSuccess::Ok)
     }
 
     /// Handle caps (format) negotiation

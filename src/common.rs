@@ -81,26 +81,10 @@ pub fn set_common_property<T>(
         "model-path" => {
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
-            #[cfg(feature = "ffi")]
-            {
-                // In FFI mode, ignore the path and warn user
-                if model_path.is_some() {
-                    gst::warning!(
-                        cat,
-                        obj = obj,
-                        "model-path is ignored in FFI mode; model will be created lazily on first inference"
-                    );
-                }
-                gst::debug!(
-                    cat,
-                    obj = obj,
-                    "FFI mode: model will be created lazily on first inference"
-                );
-            }
-            #[cfg(feature = "eim")]
-            {
-                // In EIM mode, require a path
-                if let Some(model_path) = model_path {
+            // Runtime mode selection: if model path is provided, use EIM mode
+            if let Some(model_path) = model_path {
+                #[cfg(feature = "eim")]
+                {
                     let model_result = EdgeImpulseModel::new_eim(&model_path);
                     match model_result {
                         Ok(model) => {
@@ -110,47 +94,42 @@ pub fn set_common_property<T>(
                                 "Successfully loaded EIM model from {} (debug=false)",
                                 model_path
                             );
-                            *state.as_mut() = Some(model);
+                            let mut state_guard = state.lock().unwrap();
+                            *state_guard.as_mut() = Some(model);
                         }
                         Err(err) => {
                             gst::error!(cat, obj = obj, "Failed to load EIM model: {}", err);
                         }
                     }
-                } else {
-                    gst::error!(cat, obj = obj, "model-path is required in EIM mode");
                 }
-            }
-            #[cfg(not(any(feature = "eim", feature = "ffi")))]
-            {
-                gst::error!(cat, obj = obj, "No backend enabled. Enable either 'eim' or 'ffi' feature.");
+                #[cfg(not(feature = "eim"))]
+                {
+                    gst::error!(cat, obj = obj, "EIM mode not enabled. Enable the 'eim' feature to use model files.");
+                }
+            } else {
+                // No model path provided, use FFI mode
+                #[cfg(feature = "ffi")]
+                {
+                    gst::debug!(
+                        cat,
+                        obj = obj,
+                        "FFI mode: model will be created lazily on first inference"
+                    );
+                }
+                #[cfg(not(feature = "ffi"))]
+                {
+                    gst::error!(cat, obj = obj, "FFI mode not enabled. Enable the 'ffi' feature or provide a model path for EIM mode.");
+                }
             }
         }
         "model-path-with-debug" => {
             let mut state = state.lock().unwrap();
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
-            #[cfg(feature = "ffi")]
-            {
-                // In FFI mode, ignore the path and set debug mode
-                if model_path.is_some() {
-                    gst::warning!(
-                        cat,
-                        obj = obj,
-                        "model-path-with-debug is ignored in FFI mode; setting debug mode for lazy initialization"
-                    );
-                }
-                // Set debug mode for lazy initialization
-                state.set_debug(true);
-                gst::debug!(
-                    cat,
-                    obj = obj,
-                    "FFI mode: debug mode enabled, model will be created lazily on first inference"
-                );
-            }
-            #[cfg(feature = "eim")]
-            {
-                // In EIM mode, require a path
-                if let Some(model_path) = model_path {
+            // Runtime mode selection: if model path is provided, use EIM mode
+            if let Some(model_path) = model_path {
+                #[cfg(feature = "eim")]
+                {
                     let model_result = EdgeImpulseModel::new_eim_with_debug(&model_path, true);
                     match model_result {
                         Ok(model) => {
@@ -166,13 +145,27 @@ pub fn set_common_property<T>(
                             gst::error!(cat, obj = obj, "Failed to load EIM model: {}", err);
                         }
                     }
-                } else {
-                    gst::error!(cat, obj = obj, "model-path-with-debug is required in EIM mode");
                 }
-            }
-            #[cfg(not(any(feature = "eim", feature = "ffi")))]
-            {
-                gst::error!(cat, obj = obj, "No backend enabled. Enable either 'eim' or 'ffi' feature.");
+                #[cfg(not(feature = "eim"))]
+                {
+                    gst::error!(cat, obj = obj, "EIM mode not enabled. Enable the 'eim' feature to use model files.");
+                }
+            } else {
+                // No model path provided, use FFI mode with debug
+                #[cfg(feature = "ffi")]
+                {
+                    // Set debug mode for lazy initialization
+                    state.set_debug(true);
+                    gst::debug!(
+                        cat,
+                        obj = obj,
+                        "FFI mode: debug mode enabled, model will be created lazily on first inference"
+                    );
+                }
+                #[cfg(not(feature = "ffi"))]
+                {
+                    gst::error!(cat, obj = obj, "FFI mode not enabled. Enable the 'ffi' feature or provide a model path for EIM mode.");
+                }
             }
         }
                                 "debug" => {

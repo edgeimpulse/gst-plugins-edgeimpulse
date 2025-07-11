@@ -20,6 +20,8 @@ use gstreamer_video as gst_video;
 use serde_json;
 use std::error::Error;
 use std::time::{Duration, Instant};
+use std::thread;
+use edge_impulse_runner::ffi::ModelMetadata;
 
 /// Command line parameters for the video classification example
 #[derive(Parser, Debug)]
@@ -291,6 +293,19 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create edgeimpulsevideoinfer element.");
 
+        // Print model metadata when available
+    if let Some(path) = classifier.property::<Option<String>>("model-path") {
+        println!("📁 Model path: {}", path);
+    }
+
+    // Try to get model parameters after a short delay to allow model loading
+    let classifier_clone = classifier.clone();
+    thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(500));
+        let debug_enabled = classifier_clone.property::<bool>("debug");
+        println!("🔧 Debug mode: {}", debug_enabled);
+    });
+
     let queue3 = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 2u32)
         .property_from_str("leaky", "downstream")
@@ -385,6 +400,56 @@ fn example_main() -> Result<(), Box<dyn Error>> {
         match msg.view() {
             MessageView::Element(element) => {
                 let structure = element.structure().unwrap();
+
+                // Print model loaded message
+                if structure.name() == "edge-impulse-model-loaded" {
+                    println!("✅ Model loaded successfully!");
+                    if let Ok(model_type) = structure.get::<String>("model-type") {
+                        println!("📊 Model type: {}", model_type);
+                    }
+                    if let Ok(input_width) = structure.get::<u32>("input-width") {
+                        println!("📏 Input width: {}", input_width);
+                    }
+                    if let Ok(input_height) = structure.get::<u32>("input-height") {
+                        println!("📏 Input height: {}", input_height);
+                    }
+                    if let Ok(channel_count) = structure.get::<u32>("channel-count") {
+                        println!("🎨 Channel count: {}", channel_count);
+                    }
+                    if let Ok(has_anomaly) = structure.get::<bool>("has-anomaly") {
+                        println!("🔍 Has anomaly detection: {}", has_anomaly);
+                    }
+                }
+
+                // Print model info from inference results (for FFI mode)
+                if structure.name() == "edge-impulse-video-inference-result" && perf_metrics.frame_count == 1 {
+                    println!("🔍 Model Info (from first inference):");
+                    if let Ok(result_type) = structure.get::<String>("type") {
+                        println!("   📊 Result type: {}", result_type);
+                    }
+
+                    // Get project ID from model metadata
+                    let metadata = ModelMetadata::get();
+                    println!("   🆔 Project ID: {}", metadata.project_id);
+                    println!("   📋 Project Name: {}", metadata.project_name);
+                    println!("   👤 Project Owner: {}", metadata.project_owner);
+                    println!("   🏷️  Deploy Version: {}", metadata.deploy_version);
+
+                    if let Ok(result) = structure.get::<String>("result") {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                            if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                println!("   🎯 Object detection model");
+                                println!("   📦 Bounding boxes: {} objects", boxes.len());
+                            } else if json.get("anomaly").is_some() {
+                                println!("   🔍 Anomaly detection model");
+                            } else if let Some(classification) = json["classification"].as_object() {
+                                println!("   🏷️  Classification model");
+                                println!("   📋 Classes: {}", classification.len());
+                            }
+                        }
+                    }
+                }
+
                 if structure.name() == "edge-impulse-video-inference-result" {
                     // Extract timing information for performance monitoring
                     let timing_ms = structure.get::<u32>("timing_ms").unwrap_or(0);
@@ -421,7 +486,6 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                         } else { 0.0 }
                     );
 
-                    println!("Inference result: {:?}", structure);
                     if let Ok(result) = structure.get::<String>("result") {
                         // Parse the JSON string
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {

@@ -14,13 +14,13 @@
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
 
 use clap::Parser;
+use edge_impulse_runner::ffi::ModelMetadata;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use serde_json;
 use std::error::Error;
-use std::time::{Duration, Instant};
 use std::thread;
-use edge_impulse_runner::ffi::ModelMetadata;
+use std::time::{Duration, Instant};
 
 /// Command line parameters for the video classification example
 #[derive(Parser, Debug)]
@@ -118,19 +118,41 @@ impl PerformanceMetrics {
             Duration::ZERO
         };
 
-        let min_inference_time = self.inference_samples.iter().min().unwrap_or(&Duration::ZERO);
-        let max_inference_time = self.inference_samples.iter().max().unwrap_or(&Duration::ZERO);
+        let min_inference_time = self
+            .inference_samples
+            .iter()
+            .min()
+            .unwrap_or(&Duration::ZERO);
+        let max_inference_time = self
+            .inference_samples
+            .iter()
+            .max()
+            .unwrap_or(&Duration::ZERO);
 
         println!("\n📊 PERFORMANCE SUMMARY:");
         println!("   Total frames processed: {}", self.frame_count);
         println!("   Total runtime: {:.2}s", total_time.as_secs_f64());
         println!("   Average FPS: {:.2}", avg_fps);
-        println!("   Average inference time: {:.2}ms", avg_inference_time.as_millis());
-        println!("   Min inference time: {:.2}ms", min_inference_time.as_millis());
-        println!("   Max inference time: {:.2}ms", max_inference_time.as_millis());
-        println!("   Total inference time: {:.2}s", self.total_inference_time.as_secs_f64());
-        println!("   Inference efficiency: {:.1}%",
-            (self.total_inference_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0);
+        println!(
+            "   Average inference time: {:.2}ms",
+            avg_inference_time.as_millis()
+        );
+        println!(
+            "   Min inference time: {:.2}ms",
+            min_inference_time.as_millis()
+        );
+        println!(
+            "   Max inference time: {:.2}ms",
+            max_inference_time.as_millis()
+        );
+        println!(
+            "   Total inference time: {:.2}s",
+            self.total_inference_time.as_secs_f64()
+        );
+        println!(
+            "   Inference efficiency: {:.1}%",
+            (self.total_inference_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0
+        );
     }
 }
 
@@ -221,7 +243,10 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     if is_ffi_mode {
         println!("✅ FFI Mode: No model path provided, will use FFI backend");
     } else {
-        println!("🔧 EIM Mode: Using model path: {}", args.model.as_ref().unwrap());
+        println!(
+            "🔧 EIM Mode: Using model path: {}",
+            args.model.as_ref().unwrap()
+        );
     }
 
     // Create pipeline
@@ -267,10 +292,15 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         }
     } else {
         if args.debug {
-            classifier_factory = classifier_factory.property("model-path-with-debug", args.model.as_ref().unwrap());
-            println!("🔧 Setting model-path-with-debug: {}", args.model.as_ref().unwrap());
+            classifier_factory =
+                classifier_factory.property("model-path-with-debug", args.model.as_ref().unwrap());
+            println!(
+                "🔧 Setting model-path-with-debug: {}",
+                args.model.as_ref().unwrap()
+            );
         } else {
-            classifier_factory = classifier_factory.property("model-path", args.model.as_ref().unwrap());
+            classifier_factory =
+                classifier_factory.property("model-path", args.model.as_ref().unwrap());
             println!("🔧 Setting model-path: {}", args.model.as_ref().unwrap());
         }
     }
@@ -284,7 +314,7 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create edgeimpulsevideoinfer element.");
 
-        // Print model metadata when available
+    // Print model metadata when available
     if let Some(path) = classifier.property::<Option<String>>("model-path") {
         println!("📁 Model path: {}", path);
     }
@@ -413,7 +443,9 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                 }
 
                 // Print model info from inference results (for FFI mode)
-                if structure.name() == "edge-impulse-video-inference-result" && perf_metrics.frame_count == 1 {
+                if structure.name() == "edge-impulse-video-inference-result"
+                    && perf_metrics.frame_count == 1
+                {
                     println!("🔍 Model Info (from first inference):");
                     if let Ok(result_type) = structure.get::<String>("type") {
                         println!("   📊 Result type: {}", result_type);
@@ -433,7 +465,8 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                                 println!("   📦 Bounding boxes: {} objects", boxes.len());
                             } else if json.get("anomaly").is_some() {
                                 println!("   🔍 Anomaly detection model");
-                            } else if let Some(classification) = json["classification"].as_object() {
+                            } else if let Some(classification) = json["classification"].as_object()
+                            {
                                 println!("   🏷️  Classification model");
                                 println!("   📋 Classes: {}", classification.len());
                             }
@@ -453,10 +486,13 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                         &0.0
                     };
                     let avg_inference = if !perf_metrics.inference_samples.is_empty() {
-                        perf_metrics.inference_samples.iter()
+                        perf_metrics
+                            .inference_samples
+                            .iter()
                             .rev()
                             .take(10)
-                            .sum::<Duration>() / perf_metrics.inference_samples.iter().rev().take(10).count() as u32
+                            .sum::<Duration>()
+                            / perf_metrics.inference_samples.iter().rev().take(10).count() as u32
                     } else {
                         Duration::ZERO
                     };

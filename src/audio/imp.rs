@@ -143,8 +143,7 @@ impl crate::common::DebugState for AudioState {
     }
 }
 
-impl AudioState {
-}
+impl AudioState {}
 
 /// Audio inference element structure
 #[derive(Default)]

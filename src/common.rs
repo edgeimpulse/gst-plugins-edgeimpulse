@@ -105,7 +105,11 @@ pub fn set_common_property<T>(
                 }
                 #[cfg(not(feature = "eim"))]
                 {
-                    gst::error!(cat, obj = obj, "EIM mode not enabled. Enable the 'eim' feature to use model files.");
+                    gst::error!(
+                        cat,
+                        obj = obj,
+                        "EIM mode not enabled. Enable the 'eim' feature to use model files."
+                    );
                 }
             } else {
                 // No model path provided, use FFI mode
@@ -150,7 +154,11 @@ pub fn set_common_property<T>(
                 }
                 #[cfg(not(feature = "eim"))]
                 {
-                    gst::error!(cat, obj = obj, "EIM mode not enabled. Enable the 'eim' feature to use model files.");
+                    gst::error!(
+                        cat,
+                        obj = obj,
+                        "EIM mode not enabled. Enable the 'eim' feature to use model files."
+                    );
                 }
             } else {
                 // No model path provided, use FFI mode with debug
@@ -170,7 +178,7 @@ pub fn set_common_property<T>(
                 }
             }
         }
-                                "debug" => {
+        "debug" => {
             #[cfg(feature = "ffi")]
             {
                 let debug_enabled: bool = value.get().expect("type checked upstream");

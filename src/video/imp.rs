@@ -198,6 +198,8 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
 use super::VideoClassificationMeta;
+use super::VideoAnomalyMeta;
+use super::meta::VideoRegionOfInterestMeta;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -626,6 +628,72 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Convert to JSON string once and reuse
             let result_json = serde_json::to_string(&result_value).unwrap();
             gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
+
+            // --- Handle visual anomaly detection metadata ---
+            if let Some(grid) = result_value.get("visual_anomaly_grid").and_then(|g| g.as_array()) {
+                if !grid.is_empty() {
+                    // Create VideoAnomalyMeta for visual anomaly detection
+                    let mut anomaly_meta = VideoAnomalyMeta::add(outbuf);
+
+                    // Set anomaly values from the result
+                    if let Some(anomaly) = result_value.get("anomaly").and_then(|a| a.as_f64()) {
+                        anomaly_meta.set_anomaly(anomaly as f32);
+                    }
+                    if let Some(max) = result_value.get("visual_anomaly_max").and_then(|m| m.as_f64()) {
+                        anomaly_meta.set_visual_anomaly_max(max as f32);
+                    }
+                    if let Some(mean) = result_value.get("visual_anomaly_mean").and_then(|m| m.as_f64()) {
+                        anomaly_meta.set_visual_anomaly_mean(mean as f32);
+                    }
+
+                    // Convert grid cells to VideoRegionOfInterestMeta format
+                    let mut grid_rois = Vec::new();
+                    for cell in grid {
+                        if let (
+                            Some(x),
+                            Some(y),
+                            Some(width),
+                            Some(height),
+                            Some(score),
+                        ) = (
+                            cell["x"].as_u64(),
+                            cell["y"].as_u64(),
+                            cell["width"].as_u64(),
+                            cell["height"].as_u64(),
+                            cell["value"].as_f64(),
+                        ) {
+                            grid_rois.push(VideoRegionOfInterestMeta {
+                                x: x as u32,
+                                y: y as u32,
+                                width: width as u32,
+                                height: height as u32,
+                                label: format!("{:.1}", score * 100.0), // Store score as label
+                            });
+                        }
+                    }
+                    anomaly_meta.set_visual_anomaly_grid(grid_rois);
+
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Added visual anomaly metadata: anomaly={:.1}%, max={:.1}%, mean={:.1}%, grid_cells={}",
+                        anomaly_meta.anomaly() * 100.0,
+                        anomaly_meta.visual_anomaly_max() * 100.0,
+                        anomaly_meta.visual_anomaly_mean() * 100.0,
+                        anomaly_meta.visual_anomaly_grid().len()
+                    );
+
+                    // Post inference message for visual anomaly detection
+                    let s = crate::common::create_inference_message(
+                        "video",
+                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        "visual-anomaly",
+                        result_json.clone(),
+                        elapsed.as_millis() as u32,
+                    );
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                }
+            }
 
             // --- Unified result handling: prefer object detection if bounding_boxes is present and non-empty ---
             // Use the already parsed result_value instead of parsing JSON again

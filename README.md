@@ -88,8 +88,8 @@ The plugin exposes results and ingestion status through standardized mechanisms:
       "visual_anomaly_max": 0.42,
       "visual_anomaly_mean": 0.21,
       "visual_anomaly_grid": [
-        { "x": 0, "y": 0, "width": 32, "height": 32, "score": 0.12 },
-        { "x": 32, "y": 0, "width": 32, "height": 32, "score": 0.18 }
+        { "x": 0, "y": 0, "width": 32, "height": 32, "value": 0.12 },
+        { "x": 32, "y": 0, "width": 32, "height": 32, "value": 0.18 }
         // ... more grid cells ...
       ]
     }
@@ -100,7 +100,7 @@ The plugin exposes results and ingestion status through standardized mechanisms:
     - `anomaly`: The overall anomaly score for the frame
     - `visual_anomaly_max`: The maximum anomaly score in the grid
     - `visual_anomaly_mean`: The mean anomaly score in the grid
-    - `visual_anomaly_grid`: A list of grid cells, each with its own region (`x`, `y`, `width`, `height`) and anomaly `score`
+    - `visual_anomaly_grid`: A list of grid cells, each with its own region (`x`, `y`, `width`, `height`) and anomaly `value`
   - Optionally, each grid cell may also be represented as a `VideoRegionOfInterestMeta` with the anomaly score as the label or as additional metadata, enabling visualization overlays.
 
 > **Note:** Audio elements only emit bus messages; video elements emit both bus messages and metadata.
@@ -109,8 +109,11 @@ The plugin exposes results and ingestion status through standardized mechanisms:
 This plugin depends on:
 * GStreamer 1.20 or newer
 * [edge-impulse-runner-rs](https://github.com/edgeimpulse/edge-impulse-runner-rs) - Rust bindings for Edge Impulse Linux SDK
-* A trained Edge Impulse model file (.eim)
+* [edge-impulse-ffi-rs](https://github.com/edgeimpulse/edge-impulse-ffi-rs) - FFI bindings for Edge Impulse C++ SDK (used by runner-rs)
+* A trained Edge Impulse model file (.eim) or environment variables for FFI mode
 * Rust nightly toolchain (via rustup) - required for edition 2024 support
+
+**Note:** The plugin inherits all build flags and environment variables supported by the underlying FFI crate. See the [edge-impulse-ffi-rs documentation](https://github.com/edgeimpulse/edge-impulse-ffi-rs) for the complete list of supported platforms, accelerators, and build options.
 
 ## Installation
 
@@ -174,17 +177,7 @@ cargo build --release
 
 The plugin supports two inference modes:
 
-**EIM Mode (Default):**
-- Uses Edge Impulse model files (.eim) for inference
-- Requires model files to be present on the filesystem
-- Compatible with all Edge Impulse deployment targets
-- **Usage:** Set the `model-path` or `model-path-with-debug` property to the .eim file path
-
-```bash
-cargo build --release --features eim
-```
-
-**FFI Mode:**
+**FFI Mode (Default):**
 - Direct FFI calls to the Edge Impulse C++ SDK
 - Models are compiled into the binary
 - Faster startup and inference times
@@ -192,24 +185,82 @@ cargo build --release --features eim
 - **Requirement:** Must have environment variables set for model download during build:
   - `EI_PROJECT_ID`: Your Edge Impulse project ID
   - `EI_API_KEY`: Your Edge Impulse API key
+  - `EI_MODEL`: Path to your Edge Impulse model directory (optional, for local models)
 
 ```bash
 # Set environment variables (required for FFI mode)
 export EI_PROJECT_ID="your_project_id"
 export EI_API_KEY="your_api_key"
+export EI_MODEL="~/Downloads/your-model-directory"  # Optional: for local models
 
-# Build with FFI feature
-cargo build --release --features ffi
+# Build with FFI feature (default)
+cargo build --release
+```
+
+**EIM Mode (Legacy):**
+- Uses Edge Impulse model files (.eim) for inference
+- Requires model files to be present on the filesystem
+- Compatible with all Edge Impulse deployment targets
+- **Usage:** Set the `model-path` or `model-path-with-debug` property to the .eim file path
+
+```bash
+cargo build --release --no-default-features --features eim
 ```
 
 **Note:**
-- Only one backend should be enabled at a time. The default is EIM mode.
+- The default build uses FFI mode. Use `--no-default-features --features eim` for EIM mode.
 - FFI mode will fail to build if the environment variables are not set, as it needs to download and compile the model during the build process.
+- When switching between different models, it's recommended to clean the build cache:
+  ```bash
+  cargo clean
+  cargo cache -a
+  ```
+
+#### Environment Variables
+
+**Required for FFI Mode:**
+- `EI_PROJECT_ID`: Your Edge Impulse project ID (found in your project settings)
+- `EI_API_KEY`: Your Edge Impulse API key (found in your project settings)
+
+**Common Optional Variables:**
+- `EI_MODEL`: Path to a local Edge Impulse model directory (e.g., `~/Downloads/visual-ad-v16`)
+- `EI_ENGINE`: Inference engine to use (`tflite`, `tflite-eon`, etc.)
+- `USE_FULL_TFLITE`: Set to `1` to use full TensorFlow Lite instead of EON
+
+**Platform-Specific Variables:**
+- `TARGET_MAC_ARM64=1`: Build for Apple Silicon (M1/M2/M3)
+- `TARGET_MAC_X86_64=1`: Build for Intel Mac
+- `TARGET_LINUX_X86=1`: Build for Linux x86_64
+- `TARGET_LINUX_AARCH64=1`: Build for Linux ARM64
+- `TARGET_LINUX_ARMV7=1`: Build for Linux ARMv7
+
+**Example:**
+```bash
+export EI_PROJECT_ID="12345"
+export EI_API_KEY="ei_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export EI_MODEL="~/Downloads/visual-ad-v16"
+export EI_ENGINE="tflite"
+export USE_FULL_TFLITE="1"
+```
+
+**Advanced Build Flags:**
+For a complete list of advanced build flags including hardware accelerators, backends, and cross-compilation options, see the [edge-impulse-ffi-rs documentation](https://github.com/edgeimpulse/edge-impulse-ffi-rs#advanced-build-flags). This includes support for:
+
+- Apache TVM backend (`USE_TVM=1`)
+- ONNX Runtime backend (`USE_ONNX=1`)
+- Qualcomm QNN delegate (`USE_QUALCOMM_QNN=1`)
+- ARM Ethos-U delegate (`USE_ETHOS=1`)
+- BrainChip Akida backend (`USE_AKIDA=1`)
+- MemryX backend (`USE_MEMRYX=1`)
+- TensorRT for Jetson platforms (`TENSORRT_VERSION=8.5.2`)
+- And many more...
+
+**Note:** The GStreamer plugin inherits all build flags and environment variables supported by the underlying [edge-impulse-ffi-rs](https://github.com/edgeimpulse/edge-impulse-ffi-rs) crate.
 
 #### Troubleshooting
 
 **FFI Build Errors:**
-If you get an error like `could not find native static library 'edge_impulse_ffi_rs'` when building with `--features ffi`, it means the environment variables are not set. The FFI mode requires:
+If you get an error like `could not find native static library 'edge_impulse_ffi_rs'` when building with FFI mode, it means the environment variables are not set. The FFI mode requires:
 1. `EI_PROJECT_ID` environment variable set to your Edge Impulse project ID
 2. `EI_API_KEY` environment variable set to your Edge Impulse API key
 
@@ -219,7 +270,22 @@ These variables are used during the build process to download and compile your m
 ```bash
 export EI_PROJECT_ID="your_project_id"
 export EI_API_KEY="your_api_key"
-cargo build --release --features ffi
+cargo build --release
+```
+
+**Model Switching:**
+When switching between different models, the build cache may contain artifacts from the previous model. To ensure a clean build:
+
+```bash
+# Clean build artifacts
+cargo clean
+
+# Clean cargo cache (optional, but recommended when switching models)
+cargo cache -a
+
+# Rebuild with new model
+export EI_MODEL="~/Downloads/new-model-directory"
+cargo build --release
 ```
 
 #### Cross-compilation for ARM64
@@ -305,6 +371,19 @@ Key features:
 
 Example pipeline:
 ```bash
+# FFI mode (default)
+gst-launch-1.0 autoaudiosrc ! \
+    capsfilter caps="audio/x-raw,format=F32LE" ! \
+    audioconvert ! \
+    audioresample ! \
+    capsfilter caps="audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved" ! \
+    edgeimpulseaudioinfer ! \
+    audioconvert ! \
+    audioresample ! \
+    capsfilter caps="audio/x-raw,format=F32LE,channels=2,rate=44100" ! \
+    autoaudiosink
+
+# EIM mode (legacy)
 gst-launch-1.0 autoaudiosrc ! \
     capsfilter caps="audio/x-raw,format=F32LE" ! \
     audioconvert ! \
@@ -370,6 +449,18 @@ Example pipelines:
 
 Basic pipeline with built-in overlay:
 ```bash
+# FFI mode (default)
+gst-launch-1.0  avfvideosrc ! \
+  queue max-size-buffers=2 leaky=downstream ! \
+  videoconvert n-threads=4 ! \
+  videoscale method=nearest-neighbour ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  queue max-size-buffers=2 leaky=downstream ! \
+  edgeimpulsevideoinfer ! \
+  edgeimpulseoverlay ! \
+  autovideosink sync=false
+
+# EIM mode (legacy)
 gst-launch-1.0  avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
   videoconvert n-threads=4 ! \
@@ -383,7 +474,27 @@ gst-launch-1.0  avfvideosrc ! \
 
 Pipeline with threshold settings:
 ```bash
-# Set object detection threshold
+# FFI mode (default) - Set object detection threshold
+gst-launch-1.0 avfvideosrc ! \
+  videoconvert ! \
+  videoscale ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  edgeimpulsevideoinfer threshold="5.min_score=0.6" ! \
+  edgeimpulseoverlay ! \
+  autovideosink sync=false
+
+# FFI mode (default) - Set multiple thresholds
+gst-launch-1.0 avfvideosrc ! \
+  videoconvert ! \
+  videoscale ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  edgeimpulsevideoinfer \
+    threshold="5.min_score=0.6" \
+    threshold="4.min_anomaly_score=0.35" ! \
+  edgeimpulseoverlay ! \
+  autovideosink sync=false
+
+# EIM mode (legacy) - Set object detection threshold
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
   videoscale ! \
@@ -392,7 +503,7 @@ gst-launch-1.0 avfvideosrc ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# Set multiple thresholds
+# EIM mode (legacy) - Set multiple thresholds
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
   videoscale ! \
@@ -448,6 +559,16 @@ Properties:
 
 Example pipeline:
 ```bash
+# FFI mode (default)
+gst-launch-1.0 avfvideosrc ! \
+  videoconvert ! \
+  videoscale ! \
+  video/x-raw,format=RGB,width=384,height=384 ! \
+  edgeimpulsevideoinfer ! \
+  edgeimpulseoverlay stroke-width=3 text-font-size=20 text-color=0x00FF00 ! \
+  autovideosink sync=false
+
+# EIM mode (legacy)
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
   videoscale ! \
@@ -517,18 +638,21 @@ The repository includes examples demonstrating audio and video inference, as wel
 ### Audio Inference
 Run the audio inference example:
 ```bash
-# Basic usage
-cargo run --example audio_inference -- --model path/to/your/model.eim
+# Basic usage (FFI mode - default)
+cargo run --example audio_inference
 
 # With threshold settings
-cargo run --example audio_inference -- --model path/to/your/model.eim \
+cargo run --example audio_inference \
     --threshold "5.min_score=0.6" \
     --threshold "4.min_anomaly_score=0.35"
 
 # With audio file input
-cargo run --example audio_inference -- --model path/to/your/model.eim \
+cargo run --example audio_inference \
     --audio input.wav \
     --threshold "5.min_score=0.6"
+
+# EIM mode (legacy)
+cargo run --example audio_inference -- --model path/to/your/model.eim
 ```
 
 This will capture audio from the default microphone (or audio file if specified) and display inference results:
@@ -553,13 +677,16 @@ Detected: noise (96.9%)
 ### Video Inference
 Run the video inference example:
 ```bash
-# Basic usage
-cargo run --example video_inference -- --model path/to/your/model.eim
+# Basic usage (FFI mode - default)
+cargo run --example video_inference
 
 # With threshold settings
-cargo run --example video_inference -- --model path/to/your/model.eim \
+cargo run --example video_inference \
     --threshold "5.min_score=0.6" \
     --threshold "4.min_anomaly_score=0.35"
+
+# EIM mode (legacy)
+cargo run --example video_inference -- --model path/to/your/model.eim
 ```
 
 This will capture video from your camera and display inference results with visualization. Example outputs:
@@ -656,10 +783,14 @@ The repository includes an `image_slideshow` example that demonstrates how to ru
 ### Usage
 
 ```bash
+# FFI mode (default)
+cargo run --example image_slideshow -- --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
+
+# EIM mode (legacy)
 cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
 ```
 
-- `--model` (required): Path to the Edge Impulse model file (.eim)
+- `--model` (optional): Path to the Edge Impulse model file (.eim) - only needed for EIM mode
 - `--folder` (required): Path to the folder containing images (jpg, jpeg, png)
 - `-W`, `--width` (required): Input width for inference
 - `-H`, `--height` (required): Input height for inference
@@ -679,6 +810,10 @@ cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <pat
 ### Example
 
 ```bash
+# FFI mode (default)
+cargo run --example image_slideshow -- --folder ./images -W 160 -H 160 --framerate 2
+
+# EIM mode (legacy)
 cargo run --example image_slideshow -- --model model.eim --folder ./images -W 160 -H 160 --framerate 2
 ```
 

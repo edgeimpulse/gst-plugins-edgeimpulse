@@ -17,7 +17,8 @@
 //!    - Results are emitted as GStreamer messages
 //!
 //! # Properties
-//! - `model-path`: Path to the Edge Impulse model file (.eim)
+//! - `model-path`: Path to the Edge Impulse model file (.eim) - EIM mode only (legacy)
+//! - `debug`: Enable debug mode for FFI inference (FFI mode only)
 //!
 //! # Messages
 //! The element emits "edge-impulse-inference-result" messages with:
@@ -28,7 +29,20 @@
 //!
 //! # Pipeline Example
 //! ```bash
-//! # Basic pipeline
+//! # Basic pipeline (FFI mode - default)
+//! gst-launch-1.0 \
+//!     autoaudiosrc ! \
+//!     capsfilter caps="audio/x-raw,format=F32LE" ! \
+//!     audioconvert ! \
+//!     audioresample ! \
+//!     capsfilter caps="audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved" ! \
+//!     edgeimpulseaudioinfer ! \
+//!     audioconvert ! \
+//!     audioresample ! \
+//!     capsfilter caps="audio/x-raw,format=F32LE,channels=2,rate=44100" ! \
+//!     autoaudiosink
+//!
+//! # EIM mode (legacy)
 //! gst-launch-1.0 \
 //!     autoaudiosrc ! \
 //!     capsfilter caps="audio/x-raw,format=F32LE" ! \
@@ -192,7 +206,7 @@ impl ElementImpl for EdgeImpulseAudioInfer {
             gst::subclass::ElementMetadata::new(
                 "Edge Impulse Audio Inference",
                 "Filter/Audio/AI",
-                "Runs audio inference on Edge Impulse models (EIM)",
+                "Runs audio inference on Edge Impulse models (FFI default, EIM legacy)",
                 "Fernando Jiménez Moreno <fernando@edgeimpulse.com>",
             )
         });

@@ -32,9 +32,10 @@
 //! visualization tools to work with the detection results.
 //!
 //! # Properties
-//! - `model-path`: Path to the Edge Impulse model file (.eim)
+//! - `model-path`: Path to the Edge Impulse model file (.eim) - EIM mode only (legacy)
 //!   - When set, loads the model and begins inference
-//!   - When unset or invalid, only passes frames through
+//!   - When unset, uses FFI mode (default)
+//! - `debug`: Enable debug mode for FFI inference (FFI mode only)
 //!
 //! # Messages
 //! The element emits "edge-impulse-inference-result" messages with:
@@ -70,7 +71,22 @@
 //!
 //! # Pipeline Examples
 //! ```bash
-//! # Basic webcam pipeline
+//! # Basic webcam pipeline (FFI mode - default)
+//! gst-launch-1.0 \
+//!   avfvideosrc ! \
+//!   queue max-size-buffers=2 leaky=downstream ! \
+//!   videoconvert n-threads=4 ! \
+//!   videoscale method=nearest-neighbour ! \
+//!   video/x-raw,format=RGB,width=384,height=384 ! \
+//!   queue max-size-buffers=2 leaky=downstream ! \
+//!   edgeimpulsevideoinfer ! \
+//!   queue max-size-buffers=2 leaky=downstream ! \
+//!   videoscale method=nearest-neighbour ! \
+//!   video/x-raw,width=480,height=480 ! \
+//!   videoconvert n-threads=4 ! \
+//!   autovideosink sync=false
+//!
+//! # EIM mode (legacy)
 //! gst-launch-1.0 \
 //!   avfvideosrc ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
@@ -175,7 +191,7 @@
 //! ## Element Information
 //! - Name: "edgeimpulsevideoinfer"
 //! - Classification: Filter/Video/AI
-//! - Description: "Runs video inference on Edge Impulse models (EIM)"
+//! - Description: "Runs video inference on Edge Impulse models (FFI default, EIM legacy)"
 //!
 //! ## Debug Categories
 //! The element uses the "edgeimpulsevideoinfer" debug category for logging.
@@ -341,7 +357,7 @@ impl ElementImpl for EdgeImpulseVideoInfer {
             gst::subclass::ElementMetadata::new(
                 "Edge Impulse Video Inference",
                 "Filter/Video/AI",
-                "Runs video inference on Edge Impulse models (EIM)",
+                "Runs video inference on Edge Impulse models (FFI default, EIM legacy)",
                 "Fernando Jiménez Moreno <fernando@edgeimpulse.com>",
             )
         });

@@ -21,7 +21,7 @@
 //!   - Low scores: Blue (0, 0, 255)
 //!   - High scores: Red (255, 0, 0)
 //! - Grid cells have 20% fill opacity
-//! - Scores are normalized (score/30.0, clamped to 1.0)
+//! - Scores are normalized using threshold-based scaling (threshold * 2.0 as reference)
 //!
 //! # Rendering
 //! Uses two main approaches:

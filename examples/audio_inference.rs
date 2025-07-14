@@ -5,19 +5,27 @@
 //! input or an audio file.
 //!
 //! Usage:
+//!   # FFI mode (default, no model path needed):
+//!   cargo run --example audio_inference [OPTIONS]
+//!
+//!   # EIM mode (legacy, requires model path):
 //!   cargo run --example audio_inference -- --model <path_to_model> [OPTIONS]
 //!
-//! Required arguments:
-//!   --model <path>         Path to the Edge Impulse model file (.eim)
-//!
 //! Optional arguments:
+//!   --model <path>         Path to the Edge Impulse model file (.eim) - EIM mode only
 //!   --audio <path>         Path to input audio file (if not specified, uses microphone)
 //!   --threshold <float>    Confidence threshold (0.0 to 1.0) for showing results (default: 0.8)
 //!
-//! Example with microphone:
+//! Example with microphone (FFI mode):
+//!   cargo run --example audio_inference
+//!
+//! Example with audio file (FFI mode):
+//!   cargo run --example audio_inference -- --audio input.wav
+//!
+//! Example with microphone (EIM mode):
 //!   cargo run --example audio_inference -- --model model.eim
 //!
-//! Example with audio file:
+//! Example with audio file (EIM mode):
 //!   cargo run --example audio_inference -- --model model.eim --audio input.wav
 
 use clap::Parser;
@@ -29,9 +37,9 @@ use std::path::Path;
 /// Command line parameters for the real-time audio classification example
 #[derive(Parser, Debug)]
 struct AudioClassifyParams {
-    /// Path to the Edge Impulse model file (.eim)
+    /// Path to the Edge Impulse model file (.eim) - EIM mode only (legacy)
     #[clap(short, long)]
-    model: String,
+    model: Option<String>,
 
     /// Optional path to input audio file
     #[clap(short, long)]
@@ -43,7 +51,7 @@ struct AudioClassifyParams {
 }
 
 fn create_pipeline(
-    model_path: &Path,
+    model_path: Option<&Path>,
     audio_path: Option<&Path>,
     thresholds: &[String],
 ) -> Result<gst::Pipeline, Box<dyn std::error::Error>> {
@@ -68,8 +76,12 @@ fn create_pipeline(
     let audioconvert1 = gst::ElementFactory::make("audioconvert").build()?;
     let audioresample1 = gst::ElementFactory::make("audioresample").build()?;
     let capsfilter2 = gst::ElementFactory::make("capsfilter").build()?;
-    let mut edgeimpulseinfer_factory = gst::ElementFactory::make("edgeimpulseaudioinfer")
-        .property("model-path", model_path.to_str().unwrap());
+    let mut edgeimpulseinfer_factory = gst::ElementFactory::make("edgeimpulseaudioinfer");
+
+    // Set model path if provided (EIM mode)
+    if let Some(path) = model_path {
+        edgeimpulseinfer_factory = edgeimpulseinfer_factory.property("model-path", path.to_str().unwrap());
+    }
 
     // Set thresholds if provided
     for threshold in thresholds {
@@ -156,7 +168,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create pipeline using model path and audio source
-    let pipeline = create_pipeline(&Path::new(&params.model), audio_path, &params.threshold)?;
+    let model_path = params.model.as_deref().map(Path::new);
+    let pipeline = create_pipeline(model_path, audio_path, &params.threshold)?;
 
     // Start playing
     println!("Setting pipeline state to Playing...");

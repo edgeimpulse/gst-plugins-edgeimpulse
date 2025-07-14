@@ -30,18 +30,20 @@ pub trait DebugState {
 ///
 /// ```bash
 /// # Setting properties in gst-launch-1.0:
-/// gst-launch-1.0 edgeimpulsevideoinfer model-path=/path/to/model.eim ! ...
+/// # FFI mode (default):
 /// gst-launch-1.0 edgeimpulsevideoinfer debug=true ! ...
+/// # EIM mode (legacy):
+/// gst-launch-1.0 edgeimpulsevideoinfer model-path=/path/to/model.eim ! ...
 /// ```
 pub fn create_common_properties() -> Vec<glib::ParamSpec> {
     let base_properties = vec![
         glib::ParamSpecString::builder("model-path")
             .nick("Model Path")
-            .blurb("Path to Edge Impulse model file (.eim for EIM mode only)")
+            .blurb("Path to Edge Impulse model file (.eim for EIM mode only, legacy)")
             .build(),
         glib::ParamSpecString::builder("model-path-with-debug")
             .nick("Model Path With Debug")
-            .blurb("Path to Edge Impulse model file (debug mode enabled, EIM mode only)")
+            .blurb("Path to Edge Impulse model file (debug mode enabled, EIM mode only, legacy)")
             .build(),
         glib::ParamSpecString::builder("threshold")
             .nick("Model Block Threshold")
@@ -81,7 +83,7 @@ pub fn set_common_property<T>(
         "model-path" => {
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
-            // Runtime mode selection: if model path is provided, use EIM mode
+            // Runtime mode selection: if model path is provided, use EIM mode (legacy)
             // model_path is only used in EIM feature blocks, but we need to handle the case when EIM is not enabled
             if let Some(_model_path) = model_path {
                 #[cfg(feature = "eim")]
@@ -92,7 +94,7 @@ pub fn set_common_property<T>(
                             gst::debug!(
                                 cat,
                                 obj = obj,
-                                "Successfully loaded EIM model from {} (debug=false)",
+                                "Successfully loaded EIM model from {} (debug=false, legacy mode)",
                                 _model_path
                             );
                             let mut state_guard = state.lock().unwrap();
@@ -108,22 +110,22 @@ pub fn set_common_property<T>(
                     gst::error!(
                         cat,
                         obj = obj,
-                        "EIM mode not enabled. Enable the 'eim' feature to use model files."
+                        "EIM mode not enabled. Enable the 'eim' feature to use model files (legacy mode)."
                     );
                 }
             } else {
-                // No model path provided, use FFI mode
+                // No model path provided, use FFI mode (default)
                 #[cfg(feature = "ffi")]
                 {
                     gst::debug!(
                         cat,
                         obj = obj,
-                        "FFI mode: model will be created lazily on first inference"
+                        "FFI mode (default): model will be created lazily on first inference"
                     );
                 }
                 #[cfg(not(feature = "ffi"))]
                 {
-                    gst::error!(cat, obj = obj, "FFI mode not enabled. Enable the 'ffi' feature or provide a model path for EIM mode.");
+                    gst::error!(cat, obj = obj, "FFI mode not enabled. Enable the 'ffi' feature or provide a model path for EIM mode (legacy).");
                 }
             }
         }
@@ -131,7 +133,7 @@ pub fn set_common_property<T>(
             let mut state = state.lock().unwrap();
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
-            // Runtime mode selection: if model path is provided, use EIM mode
+            // Runtime mode selection: if model path is provided, use EIM mode (legacy)
             // model_path is only used in EIM feature blocks, but we need to handle the case when EIM is not enabled
             if let Some(_model_path) = model_path {
                 #[cfg(feature = "eim")]
@@ -142,7 +144,7 @@ pub fn set_common_property<T>(
                             gst::debug!(
                                 cat,
                                 obj = obj,
-                                "Successfully loaded EIM model from {} (debug=true)",
+                                "Successfully loaded EIM model from {} (debug=true, legacy mode)",
                                 _model_path
                             );
                             *state.as_mut() = Some(model);
@@ -157,11 +159,11 @@ pub fn set_common_property<T>(
                     gst::error!(
                         cat,
                         obj = obj,
-                        "EIM mode not enabled. Enable the 'eim' feature to use model files."
+                        "EIM mode not enabled. Enable the 'eim' feature to use model files (legacy mode)."
                     );
                 }
             } else {
-                // No model path provided, use FFI mode with debug
+                // No model path provided, use FFI mode with debug (default)
                 #[cfg(feature = "ffi")]
                 {
                     // Set debug mode for lazy initialization
@@ -169,12 +171,12 @@ pub fn set_common_property<T>(
                     gst::debug!(
                         cat,
                         obj = obj,
-                        "FFI mode: debug mode enabled, model will be created lazily on first inference"
+                        "FFI mode with debug (default): model will be created lazily on first inference"
                     );
                 }
                 #[cfg(not(feature = "ffi"))]
                 {
-                    gst::error!(cat, obj = obj, "FFI mode not enabled. Enable the 'ffi' feature or provide a model path for EIM mode.");
+                    gst::error!(cat, obj = obj, "FFI mode not enabled. Enable the 'ffi' feature or provide a model path for EIM mode (legacy).");
                 }
             }
         }

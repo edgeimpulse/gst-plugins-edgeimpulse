@@ -16,7 +16,6 @@
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_video as gst_video;
 use serde_json;
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -220,15 +219,7 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     // Check for FFI mode
     let is_ffi_mode = args.model.is_none();
     if is_ffi_mode {
-        let api_key = std::env::var("EI_API_KEY").ok();
-        let project_id = std::env::var("EI_PROJECT_ID").ok();
-
-        if api_key.is_some() && project_id.is_some() {
-            println!("✅ FFI Mode: Environment variables are set, model will be loaded automatically.");
-        } else {
-            println!("❌ FFI Mode: Missing EI_API_KEY or EI_PROJECT_ID environment variables");
-            return Err("FFI mode requires EI_API_KEY and EI_PROJECT_ID environment variables".into());
-        }
+        println!("✅ FFI Mode: No model path provided, will use FFI backend");
     } else {
         println!("🔧 EIM Mode: Using model path: {}", args.model.as_ref().unwrap());
     }

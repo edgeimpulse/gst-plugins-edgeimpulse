@@ -193,13 +193,11 @@ use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
-use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
+use gstreamer_video::{VideoFormat, VideoInfo};
 use once_cell::sync::Lazy;
-use serde_json::Value;
 use std::sync::Mutex;
 
 use super::VideoClassificationMeta;
-use crate::video::meta::{VideoAnomalyMeta, VideoRegionOfInterestMeta};
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(

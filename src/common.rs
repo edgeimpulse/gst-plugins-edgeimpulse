@@ -82,17 +82,18 @@ pub fn set_common_property<T>(
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
             // Runtime mode selection: if model path is provided, use EIM mode
-            if let Some(model_path) = model_path {
+            // model_path is only used in EIM feature blocks, but we need to handle the case when EIM is not enabled
+            if let Some(_model_path) = model_path {
                 #[cfg(feature = "eim")]
                 {
-                    let model_result = EdgeImpulseModel::new_eim(&model_path);
+                    let model_result = EdgeImpulseModel::new_eim(&_model_path);
                     match model_result {
                         Ok(model) => {
                             gst::debug!(
                                 cat,
                                 obj = obj,
                                 "Successfully loaded EIM model from {} (debug=false)",
-                                model_path
+                                _model_path
                             );
                             let mut state_guard = state.lock().unwrap();
                             *state_guard.as_mut() = Some(model);
@@ -127,17 +128,18 @@ pub fn set_common_property<T>(
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
             // Runtime mode selection: if model path is provided, use EIM mode
-            if let Some(model_path) = model_path {
+            // model_path is only used in EIM feature blocks, but we need to handle the case when EIM is not enabled
+            if let Some(_model_path) = model_path {
                 #[cfg(feature = "eim")]
                 {
-                    let model_result = EdgeImpulseModel::new_eim_with_debug(&model_path, true);
+                    let model_result = EdgeImpulseModel::new_eim_with_debug(&_model_path, true);
                     match model_result {
                         Ok(model) => {
                             gst::debug!(
                                 cat,
                                 obj = obj,
                                 "Successfully loaded EIM model from {} (debug=true)",
-                                model_path
+                                _model_path
                             );
                             *state.as_mut() = Some(model);
                         }

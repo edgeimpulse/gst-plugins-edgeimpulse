@@ -83,6 +83,13 @@ pub fn set_common_property<T>(
         "model-path" => {
             let model_path: Option<String> = value.get().expect("type checked upstream");
 
+            gst::debug!(
+                cat,
+                obj = obj,
+                "Setting model-path property: {:?}",
+                model_path
+            );
+
             // Runtime mode selection: if model path is provided, use EIM mode (legacy)
             // model_path is only used in EIM feature blocks, but we need to handle the case when EIM is not enabled
             if let Some(_model_path) = model_path {
@@ -120,7 +127,7 @@ pub fn set_common_property<T>(
                     gst::debug!(
                         cat,
                         obj = obj,
-                        "FFI mode (default): model will be created lazily on first inference"
+                        "No model path provided, using FFI mode (default): model will be created lazily on first inference"
                     );
                 }
                 #[cfg(not(feature = "ffi"))]
@@ -132,6 +139,13 @@ pub fn set_common_property<T>(
         "model-path-with-debug" => {
             let mut state = state.lock().unwrap();
             let model_path: Option<String> = value.get().expect("type checked upstream");
+
+            gst::debug!(
+                cat,
+                obj = obj,
+                "Setting model-path-with-debug property: {:?}",
+                model_path
+            );
 
             // Runtime mode selection: if model path is provided, use EIM mode (legacy)
             // model_path is only used in EIM feature blocks, but we need to handle the case when EIM is not enabled
@@ -171,7 +185,7 @@ pub fn set_common_property<T>(
                     gst::debug!(
                         cat,
                         obj = obj,
-                        "FFI mode with debug (default): model will be created lazily on first inference"
+                        "No model path provided, using FFI mode with debug (default): model will be created lazily on first inference"
                     );
                 }
                 #[cfg(not(feature = "ffi"))]
@@ -186,11 +200,10 @@ pub fn set_common_property<T>(
                 let debug_enabled: bool = value.get().expect("type checked upstream");
                 let mut state = state.lock().unwrap();
 
-                // Store debug preference for lazy initialization
                 gst::debug!(
                     cat,
                     obj = obj,
-                    "Debug mode set to {} (model will be created lazily)",
+                    "Setting debug property: {} (model will be created lazily on first inference)",
                     debug_enabled
                 );
 
@@ -209,6 +222,13 @@ pub fn set_common_property<T>(
         "threshold" => {
             let mut state = state.lock().unwrap();
             let threshold_str: Option<String> = value.get().expect("type checked upstream");
+
+            gst::debug!(
+                cat,
+                obj = obj,
+                "Setting threshold property: {:?}",
+                threshold_str
+            );
 
             if let Some(threshold_str) = threshold_str {
                 if let Some(_model) = state.as_mut() {

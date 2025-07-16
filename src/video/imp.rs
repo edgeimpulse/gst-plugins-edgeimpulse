@@ -432,24 +432,63 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let width = state.width.unwrap_or(0);
             let height = state.height.unwrap_or(0);
             let format = state.format;
+            let model_exists = state.model.is_some();
+
+            #[cfg(feature = "ffi")]
+            {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Transform called with current state: width={}, height={}, format={:?}, model_exists={}, debug_enabled={}",
+                    width,
+                    height,
+                    format,
+                    model_exists,
+                    state.debug_enabled
+                );
+            }
+            #[cfg(not(feature = "ffi"))]
+            {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Transform called with current state: width={}, height={}, format={:?}, model_exists={}, debug_enabled=false",
+                    width,
+                    height,
+                    format,
+                    model_exists
+                );
+            }
 
             // Try to get existing model first
             let model = if let Some(model) = state.model.take() {
+                gst::debug!(CAT, obj = self.obj(), "Using existing model from state");
                 Some(model)
             } else {
                 // No model exists, try lazy initialization (FFI mode only)
                 #[cfg(feature = "ffi")]
                 {
-                    match if state.debug_enabled {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "No model in state, attempting lazy FFI initialization (debug={})",
+                        state.debug_enabled
+                    );
+
+                    let model_result = if state.debug_enabled {
+                        gst::debug!(CAT, obj = self.obj(), "Creating FFI model with debug enabled");
                         EdgeImpulseModel::new_with_debug(true)
                     } else {
+                        gst::debug!(CAT, obj = self.obj(), "Creating FFI model without debug");
                         EdgeImpulseModel::new()
-                    } {
+                    };
+
+                    match model_result {
                         Ok(model) => {
                             gst::debug!(
                                 CAT,
                                 obj = self.obj(),
-                                "Lazily created FFI model (debug={})",
+                                "Successfully created FFI model lazily (debug={})",
                                 state.debug_enabled
                             );
                             Some(model)
@@ -458,7 +497,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             gst::error!(
                                 CAT,
                                 obj = self.obj(),
-                                "Failed to create FFI model lazily: {}",
+                                "Failed to create FFI model lazily (debug={}): {}",
+                                state.debug_enabled,
                                 err
                             );
                             None
@@ -467,6 +507,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
                 #[cfg(not(feature = "ffi"))]
                 {
+                    gst::debug!(CAT, obj = self.obj(), "FFI feature not enabled, cannot create model lazily");
                     None
                 }
             };
@@ -845,7 +886,27 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let mut state = self.state.lock().unwrap();
             state.model = Some(model);
         } else {
-            gst::debug!(CAT, obj = self.obj(), "No model loaded, skipping inference");
+            #[cfg(feature = "ffi")]
+            {
+                let debug_enabled = {
+                    let state = self.state.lock().unwrap();
+                    state.debug_enabled
+                };
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "No model loaded, skipping inference. FFI mode enabled with debug={}, lazy initialization may have failed",
+                    debug_enabled
+                );
+            }
+            #[cfg(not(feature = "ffi"))]
+            {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "No model loaded, skipping inference. FFI mode not enabled, EIM mode requires model-path property"
+                );
+            }
         }
 
         // Drop the input mapping at the end

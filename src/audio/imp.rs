@@ -292,24 +292,60 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
 
         // Run inference if we have enough samples and a model is loaded
         let mut state = self.state.lock().unwrap();
+        let model_exists = state.model.is_some();
+        let sample_rate = state.sample_rate;
+
+                    #[cfg(feature = "ffi")]
+            {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Audio transform called with current state: sample_rate={:?}, model_exists={}, debug_enabled={}",
+                    sample_rate,
+                    model_exists,
+                    state.debug_enabled
+                );
+            }
+            #[cfg(not(feature = "ffi"))]
+            {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Audio transform called with current state: sample_rate={:?}, model_exists={}, debug_enabled=false",
+                    sample_rate,
+                    model_exists
+                );
+            }
 
         // Try to get existing model or create lazily
         let model = if let Some(model) = state.model.take() {
+            gst::debug!(CAT, obj = self.obj(), "Using existing model from state");
             Some(model)
         } else {
             // No model exists, try lazy initialization (FFI mode only)
             #[cfg(feature = "ffi")]
             {
-                match if state.debug_enabled {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "No model in state, attempting lazy FFI initialization (debug={})",
+                    state.debug_enabled
+                );
+
+                let model_result = if state.debug_enabled {
+                    gst::debug!(CAT, obj = self.obj(), "Creating FFI model with debug enabled");
                     EdgeImpulseModel::new_with_debug(true)
                 } else {
+                    gst::debug!(CAT, obj = self.obj(), "Creating FFI model without debug");
                     EdgeImpulseModel::new()
-                } {
+                };
+
+                match model_result {
                     Ok(model) => {
                         gst::debug!(
                             CAT,
                             obj = self.obj(),
-                            "Lazily created FFI model (debug={})",
+                            "Successfully created FFI model lazily (debug={})",
                             state.debug_enabled
                         );
                         Some(model)
@@ -318,7 +354,8 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                         gst::error!(
                             CAT,
                             obj = self.obj(),
-                            "Failed to create FFI model lazily: {}",
+                            "Failed to create FFI model lazily (debug={}): {}",
+                            state.debug_enabled,
                             err
                         );
                         None
@@ -327,6 +364,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
             }
             #[cfg(not(feature = "ffi"))]
             {
+                gst::debug!(CAT, obj = self.obj(), "FFI feature not enabled, cannot create model lazily");
                 None
             }
         };

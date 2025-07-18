@@ -228,11 +228,12 @@ cargo build --release --no-default-features --features eim
 - `USE_FULL_TFLITE`: Set to `1` to use full TensorFlow Lite instead of EON
 
 **Platform-Specific Variables:**
-- `TARGET_MAC_ARM64=1`: Build for Apple Silicon (M1/M2/M3)
-- `TARGET_MAC_X86_64=1`: Build for Intel Mac
-- `TARGET_LINUX_X86=1`: Build for Linux x86_64
-- `TARGET_LINUX_AARCH64=1`: Build for Linux ARM64
-- `TARGET_LINUX_ARMV7=1`: Build for Linux ARMv7
+- `TARGET`: Standard Rust target triple (e.g., `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`)
+- `TARGET_MAC_ARM64=1`: Build for Apple Silicon (M1/M2/M3) - legacy
+- `TARGET_MAC_X86_64=1`: Build for Intel Mac - legacy
+- `TARGET_LINUX_X86=1`: Build for Linux x86_64 - legacy
+- `TARGET_LINUX_AARCH64=1`: Build for Linux ARM64 - legacy
+- `TARGET_LINUX_ARMV7=1`: Build for Linux ARMv7 - legacy
 
 **Example:**
 ```bash
@@ -288,35 +289,34 @@ export EI_MODEL="~/Downloads/new-model-directory"
 cargo build --release
 ```
 
-#### Cross-compilation for ARM64
-To build a Linux ARM64-compatible .so file from macOS, you'll need Docker.
+### Docker-based Cross Compilation
 
-You'll also need to provide your SSH key for accessing private repositories.
-The build process supports different SSH key types (id_rsa, id_ed25519, etc.).
-Replace `id_ed25519` in the following commands with your SSH key name if different:
+For cross-compilation to ARM64 Linux from macOS or other platforms, we provide a Docker-based setup:
 
-First, build the Docker image:
+**Prerequisites:**
+- Docker and Docker Compose installed
+
+**Quick Start:**
+```bash
+# Set up environment variables
+export EI_PROJECT_ID="your_project_id"
+export EI_API_KEY="your_api_key"
+export EI_MODEL="/path/to/your/model"  # Optional: for local models
 
 ```bash
-docker build -t gst-plugins-edgeimpulse-builder .
+# Build the Docker image
+docker-compose build
+
+# Build the plugin for ARM64
+docker-compose run --rm aarch64-build
+
+# Test a specific example
+docker-compose run --rm aarch64-build bash -c "
+    ./target/aarch64-unknown-linux-gnu/release/examples/audio_inference --audio examples/assets/test_audio.wav
+"
 ```
 
-Then, add the aarch64 target to your Rust toolchain:
-```bash
-rustup target add aarch64-unknown-linux-gnu
-```
-
-Finally, run the build. Replace `id_ed25519` with your SSH key name if different:
-```bash
-docker run -it \
-    -v $(pwd):/app \
-    -v $HOME/.ssh/id_ed25519:/root/.ssh/id_ed25519 \
-    -e SSH_KEY_NAME=id_ed25519 \
-    gst-plugins-edgeimpulse-builder \
-    cargo build --release --target aarch64-unknown-linux-gnu
-```
-
-The compiled .so file will be available in `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.
+The compiled plugin will be available at `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.
 
 ## Elements
 

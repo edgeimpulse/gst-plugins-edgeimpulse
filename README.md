@@ -182,15 +182,18 @@ The plugin supports two inference modes:
 - Models are compiled into the binary
 - Faster startup and inference times
 - **Usage:** No model path needed - the model is statically linked
-- **Requirement:** Must have environment variables set for model download during build:
+- **Requirement:** Must have environment variables set for model download during build.
+Either:
   - `EI_PROJECT_ID`: Your Edge Impulse project ID
   - `EI_API_KEY`: Your Edge Impulse API key
-  - `EI_MODEL`: Path to your Edge Impulse model directory (optional, for local models)
+Or:
+  - `EI_MODEL` pointing to the path to your local Edge Impulse model directory.
 
 ```bash
-# Set environment variables (required for FFI mode)
+# Set environment variables to download your model from Edge Impulse
 export EI_PROJECT_ID="your_project_id"
 export EI_API_KEY="your_api_key"
+# Or
 export EI_MODEL="~/Downloads/your-model-directory"  # Optional: for local models
 
 # Build with FFI feature (default)
@@ -199,7 +202,7 @@ cargo build --release
 
 **EIM Mode (Legacy):**
 - Uses Edge Impulse model files (.eim) for inference
-- Requires model files to be present on the filesystem
+- Requires EIM model files to be present on the filesystem
 - Compatible with all Edge Impulse deployment targets
 - **Usage:** Set the `model-path` or `model-path-with-debug` property to the .eim file path
 
@@ -219,8 +222,8 @@ cargo build --release --no-default-features --features eim
 #### Environment Variables
 
 **Required for FFI Mode:**
-- `EI_PROJECT_ID`: Your Edge Impulse project ID (found in your project settings)
-- `EI_API_KEY`: Your Edge Impulse API key (found in your project settings)
+- `EI_PROJECT_ID`: Your Edge Impulse project ID (found in your project dashboard)
+- `EI_API_KEY`: Your Edge Impulse API key (found in your project dashboard)
 
 **Common Optional Variables:**
 - `EI_MODEL`: Path to a local Edge Impulse model directory (e.g., `~/Downloads/visual-ad-v16`)
@@ -239,7 +242,6 @@ cargo build --release --no-default-features --features eim
 ```bash
 export EI_PROJECT_ID="12345"
 export EI_API_KEY="ei_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-export EI_MODEL="~/Downloads/visual-ad-v16"
 export EI_ENGINE="tflite"
 export USE_FULL_TFLITE="1"
 ```
@@ -441,7 +443,7 @@ Key features:
 - Accepts RGB video frames of any resolution
 - Passes frames through unchanged
 - Performs inference when model is loaded
-- Supports both classification and object detection models
+- Supports classification, object detection and anomaly detection models
 - Emits inference results as messages (see [Public API](#public-api-inference-output))
 - Attaches VideoRegionOfInterestMeta to each video frame (see [Public API](#public-api-inference-output))
 
@@ -533,7 +535,7 @@ Pad Templates:
   ```
 
 Key features:
-- Draws bounding boxes for object detection results (from VideoRegionOfInterestMeta)
+- Draws bounding boxes for object detection and visual anomaly detection results (from VideoRegionOfInterestMeta)
 - Displays class labels with confidence scores
 - Supports wide range of video formats
 

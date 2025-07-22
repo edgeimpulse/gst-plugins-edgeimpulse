@@ -57,7 +57,6 @@ impl VideoClassificationMeta {
 }
 
 impl VideoAnomalyMeta {
-    #[allow(dead_code)]
     pub fn add(buffer: &mut gst::BufferRef) -> gst::MetaRefMut<'_, Self, gst::meta::Standalone> {
         unsafe {
             // First add it with empty params
@@ -84,7 +83,6 @@ impl VideoAnomalyMeta {
         self.0.anomaly
     }
 
-    #[allow(dead_code)]
     pub fn set_anomaly(&mut self, value: f32) {
         self.0.anomaly = value;
     }
@@ -93,7 +91,6 @@ impl VideoAnomalyMeta {
         self.0.visual_anomaly_max
     }
 
-    #[allow(dead_code)]
     pub fn set_visual_anomaly_max(&mut self, value: f32) {
         self.0.visual_anomaly_max = value;
     }
@@ -102,7 +99,6 @@ impl VideoAnomalyMeta {
         self.0.visual_anomaly_mean
     }
 
-    #[allow(dead_code)]
     pub fn set_visual_anomaly_mean(&mut self, value: f32) {
         self.0.visual_anomaly_mean = value;
     }
@@ -111,7 +107,6 @@ impl VideoAnomalyMeta {
         &self.0.visual_anomaly_grid
     }
 
-    #[allow(dead_code)]
     pub fn set_visual_anomaly_grid(&mut self, value: Vec<VideoRegionOfInterestMeta>) {
         self.0.visual_anomaly_grid = value;
     }
@@ -211,7 +206,6 @@ mod imp {
     }
 
     // Initialization function for our meta
-    #[allow(dead_code)]
     unsafe extern "C" fn video_classification_meta_init(
         meta: *mut gst::ffi::GstMeta,
         _params: glib::ffi::gpointer,
@@ -225,7 +219,6 @@ mod imp {
         true.into_glib()
     }
 
-    #[allow(dead_code)]
     unsafe extern "C" fn video_anomaly_meta_init(
         meta: *mut gst::ffi::GstMeta,
         _params: glib::ffi::gpointer,
@@ -243,7 +236,6 @@ mod imp {
     }
 
     // Free function for our meta
-    #[allow(dead_code)]
     unsafe extern "C" fn video_classification_meta_free(
         meta: *mut gst::ffi::GstMeta,
         _buffer: *mut gst::ffi::GstBuffer,
@@ -254,7 +246,6 @@ mod imp {
         ptr::drop_in_place(&mut meta.params);
     }
 
-    #[allow(dead_code)]
     unsafe extern "C" fn video_anomaly_meta_free(
         meta: *mut gst::ffi::GstMeta,
         _buffer: *mut gst::ffi::GstBuffer,
@@ -266,7 +257,6 @@ mod imp {
     }
 
     // Transform function for our meta
-    #[allow(dead_code)]
     unsafe extern "C" fn video_classification_meta_transform(
         dest: *mut gst::ffi::GstBuffer,
         meta: *mut gst::ffi::GstMeta,
@@ -283,7 +273,6 @@ mod imp {
         true.into_glib()
     }
 
-    #[allow(dead_code)]
     unsafe extern "C" fn video_anomaly_meta_transform(
         dest: *mut gst::ffi::GstBuffer,
         meta: *mut gst::ffi::GstMeta,
@@ -304,7 +293,6 @@ mod imp {
     }
 
     // Register the meta itself with its functions
-    #[allow(dead_code)]
     pub(super) fn video_classification_meta_get_info() -> *const gst::ffi::GstMetaInfo {
         struct MetaInfo(ptr::NonNull<gst::ffi::GstMetaInfo>);
         unsafe impl Send for MetaInfo {}
@@ -327,7 +315,6 @@ mod imp {
         META_INFO.0.as_ptr()
     }
 
-    #[allow(dead_code)]
     pub(super) fn video_anomaly_meta_get_info() -> *const gst::ffi::GstMetaInfo {
         struct MetaInfo(ptr::NonNull<gst::ffi::GstMetaInfo>);
         unsafe impl Send for MetaInfo {}

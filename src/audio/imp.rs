@@ -295,9 +295,9 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
         let model_exists = state.model.is_some();
         let sample_rate = state.sample_rate;
 
-                    #[cfg(feature = "ffi")]
-            {
-                gst::debug!(
+        #[cfg(feature = "ffi")]
+        {
+            gst::debug!(
                     CAT,
                     obj = self.obj(),
                     "Audio transform called with current state: sample_rate={:?}, model_exists={}, debug_enabled={}",
@@ -305,17 +305,17 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                     model_exists,
                     state.debug_enabled
                 );
-            }
-            #[cfg(not(feature = "ffi"))]
-            {
-                gst::debug!(
+        }
+        #[cfg(not(feature = "ffi"))]
+        {
+            gst::debug!(
                     CAT,
                     obj = self.obj(),
                     "Audio transform called with current state: sample_rate={:?}, model_exists={}, debug_enabled=false",
                     sample_rate,
                     model_exists
                 );
-            }
+        }
 
         // Try to get existing model or create lazily
         let model = if let Some(model) = state.model.take() {
@@ -333,7 +333,11 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                 );
 
                 let model_result = if state.debug_enabled {
-                    gst::debug!(CAT, obj = self.obj(), "Creating FFI model with debug enabled");
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Creating FFI model with debug enabled"
+                    );
                     EdgeImpulseModel::new_with_debug(true)
                 } else {
                     gst::debug!(CAT, obj = self.obj(), "Creating FFI model without debug");
@@ -364,7 +368,11 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
             }
             #[cfg(not(feature = "ffi"))]
             {
-                gst::debug!(CAT, obj = self.obj(), "FFI feature not enabled, cannot create model lazily");
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "FFI feature not enabled, cannot create model lazily"
+                );
                 None
             }
         };

@@ -476,7 +476,11 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     );
 
                     let model_result = if state.debug_enabled {
-                        gst::debug!(CAT, obj = self.obj(), "Creating FFI model with debug enabled");
+                        gst::debug!(
+                            CAT,
+                            obj = self.obj(),
+                            "Creating FFI model with debug enabled"
+                        );
                         EdgeImpulseModel::new_with_debug(true)
                     } else {
                         gst::debug!(CAT, obj = self.obj(), "Creating FFI model without debug");
@@ -507,7 +511,11 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
                 #[cfg(not(feature = "ffi"))]
                 {
-                    gst::debug!(CAT, obj = self.obj(), "FFI feature not enabled, cannot create model lazily");
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "FFI feature not enabled, cannot create model lazily"
+                    );
                     None
                 }
             };

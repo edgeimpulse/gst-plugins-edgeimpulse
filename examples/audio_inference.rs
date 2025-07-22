@@ -80,7 +80,8 @@ fn create_pipeline(
 
     // Set model path if provided (EIM mode)
     if let Some(path) = model_path {
-        edgeimpulseinfer_factory = edgeimpulseinfer_factory.property("model-path", path.to_str().unwrap());
+        edgeimpulseinfer_factory =
+            edgeimpulseinfer_factory.property("model-path", path.to_str().unwrap());
     }
 
     // Set thresholds if provided

@@ -265,14 +265,18 @@ pub fn set_common_property<T>(
 
                         // Create appropriate threshold config based on key
                         let threshold_config = match key.as_str() {
-                            "min_score" => edge_impulse_runner::types::ModelThreshold::ObjectDetection {
-                                id,
-                                min_score: value,
-                            },
-                            "min_anomaly_score" => edge_impulse_runner::types::ModelThreshold::AnomalyGMM {
-                                id,
-                                min_anomaly_score: value,
-                            },
+                            "min_score" => {
+                                edge_impulse_runner::types::ModelThreshold::ObjectDetection {
+                                    id,
+                                    min_score: value,
+                                }
+                            }
+                            "min_anomaly_score" => {
+                                edge_impulse_runner::types::ModelThreshold::AnomalyGMM {
+                                    id,
+                                    min_anomaly_score: value,
+                                }
+                            }
                             _ => {
                                 gst::error!(
                                     cat,
@@ -291,16 +295,13 @@ pub fn set_common_property<T>(
                                     cat,
                                     obj = obj,
                                     "Successfully set threshold: {}={} for block ID {}",
-                                    key, value, id
+                                    key,
+                                    value,
+                                    id
                                 );
                             }
                             Err(err) => {
-                                gst::error!(
-                                    cat,
-                                    obj = obj,
-                                    "Failed to set threshold: {}",
-                                    err
-                                );
+                                gst::error!(cat, obj = obj, "Failed to set threshold: {}", err);
                             }
                         }
                     } else {

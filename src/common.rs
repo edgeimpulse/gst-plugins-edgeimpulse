@@ -326,10 +326,17 @@ where
         "model-path" => {
             let state = state.lock().unwrap();
             if let Some(ref _model) = *state.as_ref() {
-                // Note: EdgeImpulseModel doesn't have a path() method, so we return None
-                None::<String>.to_value()
+                // EdgeImpulseModel now has a path() method, so we return the actual path if available
+                #[cfg(feature = "eim")]
+                {
+                    if let Some(path) = _model.path() {
+                        return path.display().to_string().to_value();
+                    }
+                }
+                // Return empty string if no path available (FFI mode or no model)
+                "".to_value()
             } else {
-                None::<String>.to_value()
+                "".to_value()
             }
         }
         "model-path-with-debug" => None::<String>.to_value(),

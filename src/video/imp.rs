@@ -565,7 +565,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let _model_height = params.image_input_height;
             let channels = params.image_channel_count;
             let is_object_detection = params.model_type == "constrained_object_detection"
-                || params.model_type == "object_detection";
+                || params.model_type == "object_detection"
+                || params.model_type == "object-detection";
             let is_anomaly_detection = params.model_type == "anomaly_detection"
                 || matches!(
                     params.has_anomaly,

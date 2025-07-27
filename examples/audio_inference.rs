@@ -72,10 +72,9 @@ fn create_pipeline(
     };
 
     // Create pipeline elements
-    let capsfilter1 = gst::ElementFactory::make("capsfilter").build()?;
     let audioconvert1 = gst::ElementFactory::make("audioconvert").build()?;
     let audioresample1 = gst::ElementFactory::make("audioresample").build()?;
-    let capsfilter2 = gst::ElementFactory::make("capsfilter").build()?;
+    let capsfilter1 = gst::ElementFactory::make("capsfilter").build()?;
     let mut edgeimpulseinfer_factory = gst::ElementFactory::make("edgeimpulseaudioinfer");
 
     // Set model path if provided (EIM mode)
@@ -92,54 +91,48 @@ fn create_pipeline(
     let edgeimpulseinfer = edgeimpulseinfer_factory.build()?;
     let audioconvert2 = gst::ElementFactory::make("audioconvert").build()?;
     let audioresample2 = gst::ElementFactory::make("audioresample").build()?;
-    let capsfilter3 = gst::ElementFactory::make("capsfilter").build()?;
-    let sink = gst::ElementFactory::make("autoaudiosink").build()?;
+    let capsfilter2 = gst::ElementFactory::make("capsfilter").build()?;
+    let sink = gst::ElementFactory::make("fakesink").build()?;
 
-    // Configure caps
+    // Configure caps - the Edge Impulse element expects S16LE mono audio at 16kHz
     let caps1 = gst::Caps::builder("audio/x-raw")
-        .field("format", "F32LE")
-        .build();
-    capsfilter1.set_property("caps", &caps1);
-
-    let caps2 = gst::Caps::builder("audio/x-raw")
         .field("format", "S16LE")
         .field("channels", 1)
         .field("rate", 16000)
         .field("layout", "interleaved")
         .build();
-    capsfilter2.set_property("caps", &caps2);
+    capsfilter1.set_property("caps", &caps1);
 
-    let caps3 = gst::Caps::builder("audio/x-raw")
+    // Configure output caps for the sink - standard audio format
+    let caps2 = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
         .field("channels", 2)
         .field("rate", 44100)
         .build();
-    capsfilter3.set_property("caps", &caps3);
+    capsfilter2.set_property("caps", &caps2);
 
     // Add elements to pipeline
     pipeline.add_many(&[
-        &capsfilter1,
         &audioconvert1,
         &audioresample1,
-        &capsfilter2,
+        &capsfilter1,
         &edgeimpulseinfer,
         &audioconvert2,
         &audioresample2,
-        &capsfilter3,
+        &capsfilter2,
         &sink,
     ])?;
 
     // Link elements
     gst::Element::link_many(&[
         &source,
-        &capsfilter1,
         &audioconvert1,
         &audioresample1,
-        &capsfilter2,
+        &capsfilter1,
         &edgeimpulseinfer,
         &audioconvert2,
         &audioresample2,
-        &capsfilter3,
+        &capsfilter2,
         &sink,
     ])?;
 

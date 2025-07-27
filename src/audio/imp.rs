@@ -277,7 +277,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
         // Copy the input buffer to the output buffer (passthrough)
         out_map.copy_from_slice(&in_map);
 
-        // Convert input samples from S16LE to f32 normalized [-1, 1] for inference
+        // Convert input samples from S16LE to f32 for inference
         let samples: Vec<f32> = in_map
             .chunks_exact(2)
             .map(|chunk| {
@@ -378,8 +378,13 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
         };
 
         if let Some(mut model) = model {
+            gst::debug!(CAT, obj = self.obj(), "Got model, getting parameters...");
+
             let params = match model.parameters() {
-                Ok(p) => p,
+                Ok(p) => {
+                    gst::debug!(CAT, obj = self.obj(), "Successfully got model parameters");
+                    p
+                }
                 Err(e) => {
                     gst::error!(
                         CAT,
@@ -391,26 +396,46 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                 }
             };
 
-            let slice_size = params.slice_size as usize;
+            // Get the required number of raw audio samples from the model parameters
+            // For FFI mode, we should use the raw sample count from metadata
+            #[cfg(feature = "ffi")]
+            let required_samples =
+                { edge_impulse_runner::ffi::ModelMetadata::get().raw_sample_count };
+            #[cfg(not(feature = "ffi"))]
+            let required_samples = { params.slice_size as usize };
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Model expects {} raw audio samples for inference (ModelMetadata::get().raw_sample_count)",
+                required_samples
+            );
 
-            // Add new samples to buffer
+            // Add new samples to buffer (convert S16LE to f32, no normalization)
             let mut sample_buffer = self.sample_buffer.lock().unwrap();
+            let samples_len = samples.len();
             sample_buffer.extend(samples);
 
-            // Process when we have enough samples
-            if sample_buffer.len() >= slice_size {
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Buffer status: {} samples in buffer, need {} samples, received {} new samples (total: {})",
+                sample_buffer.len(),
+                required_samples,
+                samples_len,
+                sample_buffer.len() + samples_len
+            );
+
+            // Run inference when we have enough samples
+            while sample_buffer.len() >= required_samples {
                 let now = std::time::Instant::now();
-
-                // Extract features for inference
-                let features: Vec<f32> = sample_buffer.drain(..slice_size).collect();
-
+                // Take exactly the number of raw samples we need
+                let features: Vec<f32> = sample_buffer.drain(..required_samples).collect();
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
                     "Running inference with {} samples",
                     features.len()
                 );
-
                 // Run inference
                 match model.infer(features, None) {
                     Ok(result) => {
@@ -463,18 +488,107 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                     }
                     Err(e) => {
                         gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
-                        let s = crate::common::create_error_message(
-                            "audio",
-                            inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
-                            e.to_string(),
-                        );
-                        let _ = self.obj().post_message(gst::message::Element::new(s));
                     }
                 }
             }
 
             // Put the model back in the state
             state.model = Some(model);
+        }
+
+        // Handle end-of-stream inference if we have remaining samples
+        let is_eos = inbuf.size() == 0;
+        if is_eos {
+            let mut sample_buffer = self.sample_buffer.lock().unwrap();
+            if !sample_buffer.is_empty() {
+                // For EIM mode, we need to get the required samples from the model parameters
+                // Since we don't have a model in EIM mode without a valid model path, we'll use a default
+                let required_samples = 16000; // Default for most audio models
+
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "End of stream reached with {} samples in buffer, running final inference",
+                    sample_buffer.len()
+                );
+
+                // Take as many samples as we have, pad with zeros if needed
+                let mut final_samples: Vec<f32> = sample_buffer.drain(..).collect();
+                if final_samples.len() < required_samples {
+                    final_samples.extend(vec![0.0; required_samples - final_samples.len()]);
+                    gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Using {} real samples + {} zero padding = {} total samples for classification",
+                    final_samples.len() - (required_samples - final_samples.len()),
+                    required_samples - final_samples.len(),
+                    final_samples.len()
+                );
+                } else {
+                    // Take exactly the required number of samples
+                    final_samples = final_samples[..required_samples].to_vec();
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Using exactly {} raw audio samples for classification (no padding)",
+                        final_samples.len()
+                    );
+                }
+
+                if let Some(mut model) = state.model.take() {
+                    let now = std::time::Instant::now();
+                    match model.infer(final_samples, None) {
+                        Ok(result) => {
+                            let elapsed = now.elapsed();
+                            let mut result_value = serde_json::to_value(&result.result).unwrap();
+                            if let Some(classification) = result_value.get_mut("classification") {
+                                if classification.is_array() {
+                                    let mut map = serde_json::Map::new();
+                                    for entry in classification.as_array().unwrap() {
+                                        if let (Some(label), Some(value)) =
+                                            (entry.get("label"), entry.get("value"))
+                                        {
+                                            if let (Some(label), Some(value)) =
+                                                (label.as_str(), value.as_f64())
+                                            {
+                                                map.insert(
+                                                    label.to_string(),
+                                                    serde_json::Value::from(value),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    *classification = serde_json::Value::Object(map);
+                                }
+                            }
+                            let result_json =
+                                serde_json::to_string(&result_value).unwrap_or_else(|e| {
+                                    gst::warning!(
+                                        CAT,
+                                        obj = self.obj(),
+                                        "Failed to serialize result: {}",
+                                        e
+                                    );
+                                    String::from("{}")
+                                });
+
+                            let s = crate::common::create_inference_message(
+                                "audio",
+                                inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                                "classification",
+                                result_json,
+                                elapsed.as_millis() as u32,
+                            );
+
+                            let _ = self.obj().post_message(gst::message::Element::new(s));
+                        }
+                        Err(e) => {
+                            gst::error!(CAT, obj = self.obj(), "Final inference failed: {}", e);
+                        }
+                    }
+                    state.model = Some(model);
+                }
+            }
         }
 
         Ok(gst::FlowSuccess::Ok)

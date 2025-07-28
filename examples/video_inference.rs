@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Video Classification Example using edgeimpulseinfer GStreamer plugin
 //!
 //! This example demonstrates how to use the Edge Impulse GStreamer plugin to perform

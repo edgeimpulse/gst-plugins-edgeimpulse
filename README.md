@@ -111,7 +111,7 @@ This plugin depends on:
 * [edge-impulse-runner-rs](https://github.com/edgeimpulse/edge-impulse-runner-rs) - Rust bindings for Edge Impulse Linux SDK
 * [edge-impulse-ffi-rs](https://github.com/edgeimpulse/edge-impulse-ffi-rs) - FFI bindings for Edge Impulse C++ SDK (used by runner-rs)
 * A trained Edge Impulse model file (.eim) or environment variables for FFI mode
-* Rust nightly toolchain (via rustup) - required for edition 2024 support
+
 
 **Note:** The plugin inherits all build flags and environment variables supported by the underlying FFI crate. See the [edge-impulse-ffi-rs documentation](https://github.com/edgeimpulse/edge-impulse-ffi-rs) for the complete list of supported platforms, accelerators, and build options.
 
@@ -126,12 +126,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 Follow the prompts to complete the installation. After installation, restart your terminal to ensure the Rust tools are in your PATH.
-
-**Note:** This plugin requires Rust nightly due to the `edge-impulse-runner` dependency using edition 2024. Switch to nightly after installation:
-
-```bash
-rustup override set nightly
-```
 
 ### 2. Install GStreamer
 Download and install GStreamer from the official binaries:

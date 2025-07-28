@@ -540,15 +540,21 @@ Properties:
    - Color of the text in RGB format
    - Range: 0 - 4294967295
    - Default: white (0xFFFFFF)
+   - If set to default white, automatic brightness-based color selection is used
 
-3. `text-font` (string):
+3. `background-color` (unsigned integer):
+   - Color of the text background in RGB format
+   - Range: 0 - 4294967295
+   - Default: black (0x000000)
+
+4. `text-font` (string):
    - Font family to use for text rendering
    - Default: "Sans"
 
-4. `text-font-size` (unsigned integer):
-   - Size of the text font in pixels
-   - Range: 0 - 4294967295
-   - Default: 14
+5. `font-size-percentage` (double):
+   - Font size as percentage of output image height
+   - Range: 0.0 - 1.0 (0% - 100%, where 0.1 = 10%)
+   - Default: 0.09 (9%)
 
 Example pipeline:
 ```bash
@@ -558,7 +564,7 @@ gst-launch-1.0 avfvideosrc ! \
   videoscale ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   edgeimpulsevideoinfer ! \
-  edgeimpulseoverlay stroke-width=3 text-font-size=20 text-color=0x00FF00 ! \
+  edgeimpulseoverlay stroke-width=3 font-size-percentage=0.12 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 
 # EIM mode (legacy)
@@ -567,7 +573,7 @@ gst-launch-1.0 avfvideosrc ! \
   videoscale ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  edgeimpulseoverlay stroke-width=3 text-font-size=20 text-color=0x00FF00 ! \
+  edgeimpulseoverlay stroke-width=3 font-size-percentage=0.12 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 ```
 
@@ -678,6 +684,15 @@ cargo run --example video_inference \
     --threshold "5.min_score=0.6" \
     --threshold "4.min_anomaly_score=0.35"
 
+# With custom overlay settings
+cargo run --example video_inference \
+    --width 224 \
+    --height 224 \
+    --font-size-percentage 0.12 \
+    --stroke-width 3 \
+    --text-color 0x00FF00 \
+    --background-color 0x000000
+
 # EIM mode (legacy)
 cargo run --example video_inference -- --model path/to/your/model.eim
 ```
@@ -754,6 +769,58 @@ Grid cells:
 ```
 
 The element will automatically detect the model type and emit appropriate messages. Thresholds can be set for both object detection (`min_score`) and anomaly detection (`min_anomaly_score`) blocks. See [Public API](#public-api-inference-output) for output details.
+
+### Image Inference
+Run the image inference example to process a single image file:
+```bash
+# Basic usage (FFI mode - default)
+cargo run --example image_inference -- --image <path-to-image>
+
+# With custom dimensions and overlay settings
+cargo run --example image_inference \
+    --image input.jpg \
+    --width 224 \
+    --height 224 \
+    --font-size-percentage 0.12 \
+    --stroke-width 3 \
+    --text-color 0x00FF00 \
+    --background-color 0x000000
+
+# Save output with overlay
+cargo run --example image_inference \
+    --image input.jpg \
+    --output output_with_overlay.png \
+    --font-size-percentage 0.10
+
+# EIM mode (legacy)
+cargo run --example image_inference \
+    --model path/to/your/model.eim \
+    --image input.jpg
+```
+
+This will process a single image and display inference results. The example supports:
+- **Input formats**: JPEG, PNG, and other formats supported by GStreamer
+- **Output options**: Display with overlay or save to file with overlay
+- **Overlay customization**: Font size percentage, stroke width, and text color
+- **Model thresholds**: Same threshold support as video inference
+
+Example output:
+```
+🚀 Starting Edge Impulse Image Inference
+📁 Input image: input.jpg
+📐 Image dimensions: 224x224
+🎨 Format: RGB
+🔧 Debug mode: false
+▶️  Setting pipeline state to Playing...
+🧠 Inference result: {
+  "classification": {
+    "cat": 0.85,
+    "dog": 0.15
+  }
+}
+✅ End of stream reached
+✅ Image inference completed successfully!
+```
 
 ### Audio Ingestion
 Run the audio ingestion example:

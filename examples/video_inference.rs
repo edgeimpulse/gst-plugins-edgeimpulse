@@ -55,6 +55,22 @@ struct VideoClassifyParams {
     /// Enable performance monitoring
     #[arg(long)]
     perf: bool,
+
+    /// Font size percentage for overlay (0.0-1.0, where 0.1 = 10%)
+    #[arg(long, default_value = "0.09")]
+    font_size_percentage: f64,
+
+    /// Stroke width for bounding boxes
+    #[arg(long, default_value = "2")]
+    stroke_width: i32,
+
+    /// Text color in hex format (e.g., 0xFFFFFF for white)
+    #[arg(long, default_value = "0xFFFFFF")]
+    text_color: String,
+
+    /// Background color in hex format (e.g., 0x000000 for black)
+    #[arg(long, default_value = "0x000000")]
+    background_color: String,
 }
 
 // Performance tracking structure
@@ -336,6 +352,16 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .expect("Could not create queue element.");
 
     let overlay = gst::ElementFactory::make("edgeimpulseoverlay")
+        .property("font-size-percentage", &args.font_size_percentage)
+        .property("stroke-width", &args.stroke_width)
+        .property(
+            "text-color",
+            &u32::from_str_radix(&args.text_color[2..], 16).unwrap_or(0xFFFFFF),
+        )
+        .property(
+            "background-color",
+            &u32::from_str_radix(&args.background_color[2..], 16).unwrap_or(0x000000),
+        )
         .build()
         .expect("Could not create edgeimpulseoverlay element.");
 

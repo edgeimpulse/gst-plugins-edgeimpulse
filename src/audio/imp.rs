@@ -380,7 +380,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
         if let Some(mut model) = model {
             gst::debug!(CAT, obj = self.obj(), "Got model, getting parameters...");
 
-            let params = match model.parameters() {
+            let _params = match model.parameters() {
                 Ok(p) => {
                     gst::debug!(CAT, obj = self.obj(), "Successfully got model parameters");
                     p
@@ -402,7 +402,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
             let required_samples =
                 { edge_impulse_runner::ffi::ModelMetadata::get().raw_sample_count };
             #[cfg(not(feature = "ffi"))]
-            let required_samples = { params.slice_size as usize };
+            let required_samples = { _params.slice_size as usize };
             gst::debug!(
                 CAT,
                 obj = self.obj(),

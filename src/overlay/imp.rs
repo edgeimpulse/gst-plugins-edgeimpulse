@@ -38,7 +38,7 @@
 //! Configurable via GStreamer properties:
 //! - stroke-width: Line width for boxes
 //! - text-color: Override text color
-//! - font-size: Text size
+//! - font-size-percentage: Font size as percentage of output image height
 //! - font-type: Font selection
 //! - text-position: Label placement
 //! - show-labels: Toggle labels
@@ -92,7 +92,8 @@ static COLORS: Lazy<Vec<(u8, u8, u8)>> = Lazy::new(|| {
 pub struct Settings {
     pub stroke_width: i32,
     pub text_color: u32,
-    pub font_size: i32,
+    pub background_color: u32,
+    pub font_size_percentage: f64,
     pub font_type: String,
     pub text_position: String,
     pub show_labels: bool,
@@ -105,7 +106,8 @@ impl Default for Settings {
         Self {
             stroke_width: 2,
             text_color: 0xFFFFFF,
-            font_size: 12,
+            background_color: 0x000000,
+            font_size_percentage: 0.09, // 9% of image height as default
             font_type: "Sans".to_string(),
             text_position: "top-left".to_string(),
             show_labels: true,
@@ -131,7 +133,6 @@ struct TextParams {
     x: i32,
     y: i32,
     settings: Settings,
-    color: (u8, u8, u8),
 }
 
 #[derive(Default)]
@@ -164,11 +165,19 @@ impl ObjectImpl for EdgeImpulseOverlay {
                     .blurb("Color of the text in RGB format (0xRRGGBB)")
                     .default_value(0xFFFFFF)
                     .build(),
-                glib::ParamSpecInt::builder("font-size")
-                    .nick("Font Size")
-                    .blurb("Size of the font")
-                    .minimum(1)
-                    .default_value(12)
+                glib::ParamSpecUInt::builder("background-color")
+                    .nick("Background Color")
+                    .blurb("Color of the text background in RGB format (0xRRGGBB)")
+                    .default_value(0x000000)
+                    .build(),
+                glib::ParamSpecDouble::builder("font-size-percentage")
+                    .nick("Font Size Percentage")
+                    .blurb(
+                        "Font size as percentage of output image height (0.0-1.0, where 0.1 = 10%)",
+                    )
+                    .minimum(0.0)
+                    .maximum(1.0)
+                    .default_value(0.09)
                     .build(),
                 glib::ParamSpecString::builder("font-type")
                     .nick("Font Type")
@@ -211,8 +220,11 @@ impl ObjectImpl for EdgeImpulseOverlay {
             "text-color" => {
                 settings.text_color = value.get().unwrap();
             }
-            "font-size" => {
-                settings.font_size = value.get().unwrap();
+            "background-color" => {
+                settings.background_color = value.get().unwrap();
+            }
+            "font-size-percentage" => {
+                settings.font_size_percentage = value.get().unwrap();
             }
             "font-type" => {
                 settings.font_type = value.get().unwrap();
@@ -238,7 +250,8 @@ impl ObjectImpl for EdgeImpulseOverlay {
         match pspec.name() {
             "stroke-width" => settings.stroke_width.to_value(),
             "text-color" => settings.text_color.to_value(),
-            "font-size" => settings.font_size.to_value(),
+            "background-color" => settings.background_color.to_value(),
+            "font-size-percentage" => settings.font_size_percentage.to_value(),
             "font-type" => settings.font_type.to_value(),
             "text-position" => settings.text_position.to_value(),
             "show-labels" => settings.show_labels.to_value(),
@@ -505,6 +518,10 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw classification text
             let text = format!("{} {:.1}%", label, confidence * 100.0);
+
+            // Calculate dynamic font size based on frame height
+            let dynamic_font_size = self.calculate_font_size(&settings, frame.height() as i32);
+
             let text_x = if settings.text_position == "top-left"
                 || settings.text_position == "bottom-left"
             {
@@ -514,7 +531,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             {
                 // Calculate position based on frame width and text width
                 // Add more padding (20px) from the right edge and use a more conservative text width estimate
-                let estimated_text_width = settings.font_size * (text.len() as i32) / 2;
+                let estimated_text_width = dynamic_font_size * (text.len() as i32) / 2;
                 (frame.width() as i32 - estimated_text_width - 20).max(0)
             } else {
                 10 // Default to left alignment
@@ -525,20 +542,12 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 } else if settings.text_position == "bottom-left"
                     || settings.text_position == "bottom-right"
                 {
-                    frame.height() as i32 - settings.font_size - 10
+                    frame.height() as i32 - dynamic_font_size - 10
                 } else {
                     10 // Default to top
                 };
 
-            // Get or assign color for this label
-            let color = if let Some(color) = label_colors.get(&label) {
-                *color
-            } else {
-                let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
-                let mut label_colors = self.label_colors.lock().unwrap();
-                label_colors.insert(label.clone(), *next_color);
-                *next_color
-            };
+            // Note: Color is no longer used for text background as we now use background_color from settings
 
             if let Err(e) = self.draw_text(
                 frame,
@@ -547,7 +556,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     x: text_x,
                     y: text_y,
                     settings: settings.clone(),
-                    color,
                 },
                 &video_info,
             ) {
@@ -688,7 +696,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                             x: text_x,
                             y: text_y,
                             settings: settings.clone(),
-                            color,
                         },
                         &video_info,
                     ) {
@@ -718,6 +725,14 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
 // Implementation of element specific methods
 impl EdgeImpulseOverlay {
+    /// Calculate dynamic font size based on output image height and percentage
+    fn calculate_font_size(&self, settings: &Settings, frame_height: i32) -> i32 {
+        let font_size = (frame_height as f64 * settings.font_size_percentage) as i32;
+        // Ensure minimum font size of 4px and maximum of 48px for readability
+        // Lower minimum allows for very small percentages to work as expected
+        font_size.clamp(4, 48)
+    }
+
     /// Renders a bounding box with colored borders and semi-transparent fill.
     /// Used for both object detection boxes and anomaly grid cells.
     ///
@@ -874,8 +889,11 @@ impl EdgeImpulseOverlay {
             let layout = create_layout(&cr);
             let mut font_desc = pango::FontDescription::new();
             font_desc.set_family(&params.settings.font_type);
+
+            // Calculate dynamic font size based on frame height
+            let dynamic_font_size = self.calculate_font_size(&params.settings, height);
             // Scale up the font size for high resolution
-            font_desc.set_absolute_size(params.settings.font_size as f64 * pango::SCALE as f64);
+            font_desc.set_absolute_size(dynamic_font_size as f64 * pango::SCALE as f64);
             if height < 200 {
                 font_desc.set_weight(pango::Weight::Bold);
             }
@@ -892,28 +910,36 @@ impl EdgeImpulseOverlay {
             total_width = text_width + (bg_padding * 2.0);
             total_height = text_height + (bg_padding * 2.0);
 
-            // Draw background rectangle at high resolution
+            // Draw background rectangle at high resolution using user-specified background color
             cr.rectangle(params.x as f64, params.y as f64, total_width, total_height);
-            cr.set_source_rgba(
-                params.color.0 as f64 / 255.0,
-                params.color.1 as f64 / 255.0,
-                params.color.2 as f64 / 255.0,
-                0.7,
-            );
+            let bg_r = ((params.settings.background_color >> 16) & 0xFF) as f64 / 255.0;
+            let bg_g = ((params.settings.background_color >> 8) & 0xFF) as f64 / 255.0;
+            let bg_b = (params.settings.background_color & 0xFF) as f64 / 255.0;
+            cr.set_source_rgba(bg_r, bg_g, bg_b, 0.7);
             cr.fill()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo fill failed: {}", e))?;
 
-            // Calculate perceived brightness of background color
-            let brightness = (0.299 * params.color.0 as f64
-                + 0.587 * params.color.1 as f64
-                + 0.114 * params.color.2 as f64)
-                / 255.0;
-
-            // Use white text for dark backgrounds, black text for light backgrounds
-            if brightness < 0.5 {
-                cr.set_source_rgb(1.0, 1.0, 1.0); // White text
+            // Use user-specified text color if provided, otherwise use automatic brightness-based selection
+            if params.settings.text_color != 0xFFFFFF {
+                // Default white color
+                // Extract RGB components from the user-specified color
+                let r = ((params.settings.text_color >> 16) & 0xFF) as f64 / 255.0;
+                let g = ((params.settings.text_color >> 8) & 0xFF) as f64 / 255.0;
+                let b = (params.settings.text_color & 0xFF) as f64 / 255.0;
+                cr.set_source_rgb(r, g, b);
             } else {
-                cr.set_source_rgb(0.0, 0.0, 0.0); // Black text
+                // Calculate perceived brightness of background color for automatic selection
+                let bg_r = ((params.settings.background_color >> 16) & 0xFF) as f64;
+                let bg_g = ((params.settings.background_color >> 8) & 0xFF) as f64;
+                let bg_b = (params.settings.background_color & 0xFF) as f64;
+                let brightness = (0.299 * bg_r + 0.587 * bg_g + 0.114 * bg_b) / 255.0;
+
+                // Use white text for dark backgrounds, black text for light backgrounds
+                if brightness < 0.5 {
+                    cr.set_source_rgb(1.0, 1.0, 1.0); // White text
+                } else {
+                    cr.set_source_rgb(0.0, 0.0, 0.0); // Black text
+                }
             }
 
             // Position text inside the background box with padding

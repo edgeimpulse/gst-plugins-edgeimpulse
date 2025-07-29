@@ -525,7 +525,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             let text_x = if settings.text_position == "top-left"
                 || settings.text_position == "bottom-left"
             {
-                10
+                3
             } else if settings.text_position == "top-right"
                 || settings.text_position == "bottom-right"
             {
@@ -534,17 +534,17 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 let estimated_text_width = dynamic_font_size * (text.len() as i32) / 2;
                 (frame.width() as i32 - estimated_text_width - 20).max(0)
             } else {
-                10 // Default to left alignment
+                3 // Default to left alignment
             };
             let text_y =
                 if settings.text_position == "top-left" || settings.text_position == "top-right" {
-                    10
+                    3
                 } else if settings.text_position == "bottom-left"
                     || settings.text_position == "bottom-right"
                 {
                     frame.height() as i32 - dynamic_font_size - 10
                 } else {
-                    10 // Default to top
+                    3 // Default to top
                 };
 
             // Note: Color is no longer used for text background as we now use background_color from settings

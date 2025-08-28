@@ -1,4 +1,7 @@
-FROM rust:latest
+FROM ubuntu:20.04
+
+# Set environment variables to avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install cross-compilation tools and dependencies
 RUN dpkg --add-architecture arm64 && \
@@ -12,7 +15,7 @@ RUN dpkg --add-architecture arm64 && \
     clang \
     cmake \
     make \
-    libstdc++-11-dev:arm64 \
+    libstdc++-8-dev:arm64 \
     libc6-dev:arm64 \
     curl \
     wget \
@@ -27,7 +30,7 @@ RUN dpkg --add-architecture arm64 && \
     libatk1.0-dev:arm64 \
     libgdk-pixbuf2.0-dev:arm64 \
     libgtk-3-dev:arm64 \
-    # GStreamer and GLib development packages for host (for examples)
+    # GStreamer and GLib development packages for host
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     gstreamer1.0-plugins-base \
@@ -58,15 +61,15 @@ RUN dpkg --add-architecture arm64 && \
     libatlas-base-dev \
     gfortran
 
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 WORKDIR /app
 
 # Install rustfmt for aarch64 target
 RUN rustup target add aarch64-unknown-linux-gnu && \
     rustup component add rustfmt
-
-# Create symlinks to make cargo and rustc available in PATH
-RUN ln -sf /usr/local/rustup/toolchains/*/bin/cargo /usr/local/bin/cargo && \
-    ln -sf /usr/local/rustup/toolchains/*/bin/rustc /usr/local/bin/rustc
 
 # Git SSH configuration
 RUN mkdir -p /root/.ssh && \

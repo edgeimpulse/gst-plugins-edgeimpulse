@@ -529,6 +529,8 @@ Key features:
 - Draws bounding boxes for object detection and visual anomaly detection results (from VideoRegionOfInterestMeta)
 - Displays class labels with confidence scores
 - Supports wide range of video formats
+- Automatic text sizing: Calculates optimal font size based on frame dimensions and bounding box sizes
+- Text scale control: Use `text-scale-ratio` property to fine-tune text size (0.1x to 5.0x scaling)
 
 Properties:
 1. `stroke-width` (integer):
@@ -551,10 +553,11 @@ Properties:
    - Font family to use for text rendering
    - Default: "Sans"
 
-5. `font-size-percentage` (double):
-   - Font size as percentage of output image height
-   - Range: 0.0 - 1.0 (0% - 100%, where 0.1 = 10%)
-   - Default: 0.09 (9%)
+5. `text-scale-ratio` (double):
+   - Scale factor for text size. Values > 1.0 make text larger, < 1.0 make text smaller
+   - Range: 0.1 - 5.0
+   - Default: 1.0 (no scaling)
+   - **Note:** This property overrides the automatic text sizing. The element calculates optimal font size based on frame/bbox dimensions, then applies this scale factor.
 
 Example pipeline:
 ```bash
@@ -564,7 +567,7 @@ gst-launch-1.0 avfvideosrc ! \
   videoscale ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   edgeimpulsevideoinfer ! \
-  edgeimpulseoverlay stroke-width=3 font-size-percentage=0.12 text-color=0x00FF00 background-color=0x000000 ! \
+  edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 
 # EIM mode (legacy)
@@ -573,7 +576,7 @@ gst-launch-1.0 avfvideosrc ! \
   videoscale ! \
   video/x-raw,format=RGB,width=384,height=384 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  edgeimpulseoverlay stroke-width=3 font-size-percentage=0.12 text-color=0x00FF00 background-color=0x000000 ! \
+  edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 ```
 
@@ -688,7 +691,7 @@ cargo run --example video_inference \
 cargo run --example video_inference \
     --width 224 \
     --height 224 \
-    --font-size-percentage 0.12 \
+    --text-scale-ratio 1.5 \
     --stroke-width 3 \
     --text-color 0x00FF00 \
     --background-color 0x000000
@@ -781,7 +784,7 @@ cargo run --example image_inference \
     --image input.jpg \
     --width 224 \
     --height 224 \
-    --font-size-percentage 0.12 \
+    --text-scale-ratio 1.5 \
     --stroke-width 3 \
     --text-color 0x00FF00 \
     --background-color 0x000000
@@ -790,7 +793,7 @@ cargo run --example image_inference \
 cargo run --example image_inference \
     --image input.jpg \
     --output output_with_overlay.png \
-    --font-size-percentage 0.10
+    --text-scale-ratio 0.8
 
 # EIM mode (legacy)
 cargo run --example image_inference \

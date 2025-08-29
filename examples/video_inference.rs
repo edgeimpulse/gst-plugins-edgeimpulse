@@ -56,8 +56,6 @@ struct VideoClassifyParams {
     #[arg(long)]
     perf: bool,
 
-
-
     /// Stroke width for bounding boxes
     #[arg(long, default_value = "2")]
     stroke_width: i32,

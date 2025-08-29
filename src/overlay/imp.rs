@@ -134,7 +134,7 @@ struct TextParams {
     y: i32,
     settings: Settings,
     bbox_color: Option<(u8, u8, u8)>, // Optional bounding box color for text background
-    bbox_height: Option<i32>, // Optional bounding box height for font size calculation
+    bbox_height: Option<i32>,         // Optional bounding box height for font size calculation
 }
 
 #[derive(Default)]
@@ -523,7 +523,8 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             let text = format!("{} {:.1}%", label, confidence * 100.0);
 
             // Calculate dynamic font size based on frame height (no bounding box for classification)
-            let dynamic_font_size = self.calculate_font_size(&settings, frame.height() as i32, None);
+            let dynamic_font_size =
+                self.calculate_font_size(&settings, frame.height() as i32, None);
 
             let text_x = if settings.text_position == "top-left"
                 || settings.text_position == "bottom-left"
@@ -559,7 +560,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     x: text_x,
                     y: text_y,
                     settings: settings.clone(),
-                    bbox_color: None, // No bounding box for classification text
+                    bbox_color: None,  // No bounding box for classification text
                     bbox_height: None, // No bounding box for classification text
                 },
                 &video_info,
@@ -732,8 +733,6 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
 // Implementation of element specific methods
 impl EdgeImpulseOverlay {
-
-
     /// Renders a bounding box with colored borders and semi-transparent fill.
     /// Used for both object detection boxes and anomaly grid cells.
     ///
@@ -892,7 +891,8 @@ impl EdgeImpulseOverlay {
             font_desc.set_family(&params.settings.font_type);
 
             // Calculate dynamic font size based on bounding box height if available
-            let dynamic_font_size = self.calculate_font_size(&params.settings, height, params.bbox_height);
+            let dynamic_font_size =
+                self.calculate_font_size(&params.settings, height, params.bbox_height);
             // Scale up the font size for high resolution
             font_desc.set_absolute_size(dynamic_font_size as f64 * pango::SCALE as f64);
             if height < 200 {
@@ -916,7 +916,11 @@ impl EdgeImpulseOverlay {
             cr.rectangle(params.x as f64, params.y as f64, total_width, total_height);
             let (bg_r, bg_g, bg_b) = if let Some(bbox_color) = params.bbox_color {
                 // Use bounding box color for text background
-                (bbox_color.0 as f64 / 255.0, bbox_color.1 as f64 / 255.0, bbox_color.2 as f64 / 255.0)
+                (
+                    bbox_color.0 as f64 / 255.0,
+                    bbox_color.1 as f64 / 255.0,
+                    bbox_color.2 as f64 / 255.0,
+                )
             } else {
                 // Use user-specified background color
                 let bg_r = ((params.settings.background_color >> 16) & 0xFF) as f64 / 255.0;
@@ -1053,7 +1057,12 @@ impl EdgeImpulseOverlay {
     /// For bounding box labels, uses a size proportional to the box height.
     /// For classification text, uses a size proportional to frame height.
     /// Ensures minimum readable size based on screen dimensions.
-    fn calculate_font_size(&self, settings: &Settings, frame_height: i32, bbox_height: Option<i32>) -> i32 {
+    fn calculate_font_size(
+        &self,
+        settings: &Settings,
+        frame_height: i32,
+        bbox_height: Option<i32>,
+    ) -> i32 {
         // Calculate minimum readable font size based on screen dimensions
         // For small screens (e.g., mobile), use larger minimum
         // For large screens, we can use smaller minimum
@@ -1088,7 +1097,7 @@ impl EdgeImpulseOverlay {
         // Ensure the scaled size doesn't go below minimum or above reasonable maximum
         let max_size = match bbox_height {
             Some(height) => height.min(20), // For bounding box labels
-            None => 30, // For classification text
+            None => 30,                     // For classification text
         };
 
         scaled_size.max(1).min(max_size) // Ensure at least 1px and not more than max

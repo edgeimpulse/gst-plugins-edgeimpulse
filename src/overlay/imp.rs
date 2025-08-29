@@ -38,7 +38,7 @@
 //! Configurable via GStreamer properties:
 //! - stroke-width: Line width for boxes
 //! - text-color: Override text color
-//! - font-size-percentage: Font size as percentage of output image height
+//! - text-scale-ratio: Scale factor for text size (0.1 to 5.0, default 1.0)
 //! - font-type: Font selection
 //! - text-position: Label placement
 //! - show-labels: Toggle labels
@@ -93,12 +93,12 @@ pub struct Settings {
     pub stroke_width: i32,
     pub text_color: u32,
     pub background_color: u32,
-    pub font_size_percentage: f64,
     pub font_type: String,
     pub text_position: String,
     pub show_labels: bool,
     pub model_input_width: i32,
     pub model_input_height: i32,
+    pub text_scale_ratio: f64,
 }
 
 impl Default for Settings {
@@ -107,12 +107,12 @@ impl Default for Settings {
             stroke_width: 2,
             text_color: 0xFFFFFF,
             background_color: 0x000000,
-            font_size_percentage: 0.09, // 9% of image height as default
             font_type: "Sans".to_string(),
             text_position: "top-left".to_string(),
             show_labels: true,
             model_input_width: 160,
             model_input_height: 160,
+            text_scale_ratio: 1.0, // Default scale ratio (no scaling)
         }
     }
 }
@@ -133,6 +133,8 @@ struct TextParams {
     x: i32,
     y: i32,
     settings: Settings,
+    bbox_color: Option<(u8, u8, u8)>, // Optional bounding box color for text background
+    bbox_height: Option<i32>, // Optional bounding box height for font size calculation
 }
 
 #[derive(Default)]
@@ -170,15 +172,7 @@ impl ObjectImpl for EdgeImpulseOverlay {
                     .blurb("Color of the text background in RGB format (0xRRGGBB)")
                     .default_value(0x000000)
                     .build(),
-                glib::ParamSpecDouble::builder("font-size-percentage")
-                    .nick("Font Size Percentage")
-                    .blurb(
-                        "Font size as percentage of output image height (0.0-1.0, where 0.1 = 10%)",
-                    )
-                    .minimum(0.0)
-                    .maximum(1.0)
-                    .default_value(0.09)
-                    .build(),
+
                 glib::ParamSpecString::builder("font-type")
                     .nick("Font Type")
                     .blurb("Type of font to use")
@@ -206,6 +200,13 @@ impl ObjectImpl for EdgeImpulseOverlay {
                     .minimum(1)
                     .default_value(160)
                     .build(),
+                glib::ParamSpecDouble::builder("text-scale-ratio")
+                    .nick("Text Scale Ratio")
+                    .blurb("Scale factor for text size. Values > 1.0 make text larger, < 1.0 make text smaller. Default is 1.0 (no scaling)")
+                    .minimum(0.1)
+                    .maximum(5.0)
+                    .default_value(1.0)
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -223,9 +224,7 @@ impl ObjectImpl for EdgeImpulseOverlay {
             "background-color" => {
                 settings.background_color = value.get().unwrap();
             }
-            "font-size-percentage" => {
-                settings.font_size_percentage = value.get().unwrap();
-            }
+
             "font-type" => {
                 settings.font_type = value.get().unwrap();
             }
@@ -241,6 +240,9 @@ impl ObjectImpl for EdgeImpulseOverlay {
             "model-input-height" => {
                 settings.model_input_height = value.get().unwrap();
             }
+            "text-scale-ratio" => {
+                settings.text_scale_ratio = value.get().unwrap();
+            }
             _ => unimplemented!(),
         }
     }
@@ -251,12 +253,13 @@ impl ObjectImpl for EdgeImpulseOverlay {
             "stroke-width" => settings.stroke_width.to_value(),
             "text-color" => settings.text_color.to_value(),
             "background-color" => settings.background_color.to_value(),
-            "font-size-percentage" => settings.font_size_percentage.to_value(),
+
             "font-type" => settings.font_type.to_value(),
             "text-position" => settings.text_position.to_value(),
             "show-labels" => settings.show_labels.to_value(),
             "model-input-width" => settings.model_input_width.to_value(),
             "model-input-height" => settings.model_input_height.to_value(),
+            "text-scale-ratio" => settings.text_scale_ratio.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -519,8 +522,8 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             // Draw classification text
             let text = format!("{} {:.1}%", label, confidence * 100.0);
 
-            // Calculate dynamic font size based on frame height
-            let dynamic_font_size = self.calculate_font_size(&settings, frame.height() as i32);
+            // Calculate dynamic font size based on frame height (no bounding box for classification)
+            let dynamic_font_size = self.calculate_font_size(&settings, frame.height() as i32, None);
 
             let text_x = if settings.text_position == "top-left"
                 || settings.text_position == "bottom-left"
@@ -556,6 +559,8 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     x: text_x,
                     y: text_y,
                     settings: settings.clone(),
+                    bbox_color: None, // No bounding box for classification text
+                    bbox_height: None, // No bounding box for classification text
                 },
                 &video_info,
             ) {
@@ -696,6 +701,8 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                             x: text_x,
                             y: text_y,
                             settings: settings.clone(),
+                            bbox_color: Some(color), // Use bounding box color for text background
+                            bbox_height: Some(height), // Use actual bounding box height for font size
                         },
                         &video_info,
                     ) {
@@ -725,13 +732,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
 // Implementation of element specific methods
 impl EdgeImpulseOverlay {
-    /// Calculate dynamic font size based on output image height and percentage
-    fn calculate_font_size(&self, settings: &Settings, frame_height: i32) -> i32 {
-        let font_size = (frame_height as f64 * settings.font_size_percentage) as i32;
-        // Ensure minimum font size of 4px and maximum of 48px for readability
-        // Lower minimum allows for very small percentages to work as expected
-        font_size.clamp(4, 48)
-    }
+
 
     /// Renders a bounding box with colored borders and semi-transparent fill.
     /// Used for both object detection boxes and anomaly grid cells.
@@ -890,8 +891,8 @@ impl EdgeImpulseOverlay {
             let mut font_desc = pango::FontDescription::new();
             font_desc.set_family(&params.settings.font_type);
 
-            // Calculate dynamic font size based on frame height
-            let dynamic_font_size = self.calculate_font_size(&params.settings, height);
+            // Calculate dynamic font size based on bounding box height if available
+            let dynamic_font_size = self.calculate_font_size(&params.settings, height, params.bbox_height);
             // Scale up the font size for high resolution
             font_desc.set_absolute_size(dynamic_font_size as f64 * pango::SCALE as f64);
             if height < 200 {
@@ -910,11 +911,19 @@ impl EdgeImpulseOverlay {
             total_width = text_width + (bg_padding * 2.0);
             total_height = text_height + (bg_padding * 2.0);
 
-            // Draw background rectangle at high resolution using user-specified background color
+            // Draw background rectangle at high resolution
+            // Use bounding box color if available, otherwise use user-specified background color
             cr.rectangle(params.x as f64, params.y as f64, total_width, total_height);
-            let bg_r = ((params.settings.background_color >> 16) & 0xFF) as f64 / 255.0;
-            let bg_g = ((params.settings.background_color >> 8) & 0xFF) as f64 / 255.0;
-            let bg_b = (params.settings.background_color & 0xFF) as f64 / 255.0;
+            let (bg_r, bg_g, bg_b) = if let Some(bbox_color) = params.bbox_color {
+                // Use bounding box color for text background
+                (bbox_color.0 as f64 / 255.0, bbox_color.1 as f64 / 255.0, bbox_color.2 as f64 / 255.0)
+            } else {
+                // Use user-specified background color
+                let bg_r = ((params.settings.background_color >> 16) & 0xFF) as f64 / 255.0;
+                let bg_g = ((params.settings.background_color >> 8) & 0xFF) as f64 / 255.0;
+                let bg_b = (params.settings.background_color & 0xFF) as f64 / 255.0;
+                (bg_r, bg_g, bg_b)
+            };
             cr.set_source_rgba(bg_r, bg_g, bg_b, 0.7);
             cr.fill()
                 .map_err(|e| gst::loggable_error!(CAT, "Cairo fill failed: {}", e))?;
@@ -1038,6 +1047,51 @@ impl EdgeImpulseOverlay {
                 }
             }
         }
+    }
+
+    /// Calculates font size based on bounding box dimensions or frame height.
+    /// For bounding box labels, uses a size proportional to the box height.
+    /// For classification text, uses a size proportional to frame height.
+    /// Ensures minimum readable size based on screen dimensions.
+    fn calculate_font_size(&self, settings: &Settings, frame_height: i32, bbox_height: Option<i32>) -> i32 {
+        // Calculate minimum readable font size based on screen dimensions
+        // For small screens (e.g., mobile), use larger minimum
+        // For large screens, we can use smaller minimum
+        let min_font_size = if frame_height <= 240 {
+            9 // Small screens (e.g., 320x240)
+        } else if frame_height <= 480 {
+            8 // Medium screens (e.g., 640x480)
+        } else if frame_height <= 720 {
+            6 // Large screens (e.g., 1280x720)
+        } else {
+            5 // Very large screens (e.g., 1920x1080)
+        };
+
+        let base_size = match bbox_height {
+            Some(height) => {
+                // For bounding box labels: use 6% of bounding box height
+                let base_size = (height as f64 * 0.06) as i32;
+                // Ensure minimum readable size, but don't exceed bounding box height
+                base_size.max(min_font_size).min(height.min(14))
+            }
+            None => {
+                // For classification text: use 2.5% of frame height
+                let base_size = (frame_height as f64 * 0.025) as i32;
+                // Ensure minimum readable size with reasonable maximum
+                base_size.max(min_font_size).min(20)
+            }
+        };
+
+        // Apply the text scale ratio
+        let scaled_size = (base_size as f64 * settings.text_scale_ratio) as i32;
+
+        // Ensure the scaled size doesn't go below minimum or above reasonable maximum
+        let max_size = match bbox_height {
+            Some(height) => height.min(20), // For bounding box labels
+            None => 30, // For classification text
+        };
+
+        scaled_size.max(1).min(max_size) // Ensure at least 1px and not more than max
     }
 
     /// Reads a pixel's color from the video frame.

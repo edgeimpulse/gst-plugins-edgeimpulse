@@ -99,8 +99,6 @@ fn create_pipeline(args: &ImageClassifyParams) -> Result<gst::Pipeline, Box<dyn 
             "caps",
             &gst::Caps::builder("video/x-raw")
                 .field("format", &args.format)
-                .field("width", &args.width)
-                .field("height", &args.height)
                 .build(),
         )
         .build()?;
@@ -218,7 +216,6 @@ fn example_main() -> Result<(), Box<dyn Error>> {
     if let Some(output) = &args.output {
         println!("💾 Output image: {}", output);
     }
-    println!("📐 Image dimensions: {}x{}", args.width, args.height);
     println!("🎨 Format: {}", args.format);
     println!("🔧 Debug mode: {}", args.debug);
 

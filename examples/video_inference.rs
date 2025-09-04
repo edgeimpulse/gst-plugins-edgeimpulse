@@ -48,14 +48,6 @@ struct VideoClassifyParams {
     #[clap(long)]
     threshold: Vec<String>,
 
-    /// Input resolution width (default: use camera default)
-    #[arg(long)]
-    width: Option<u32>,
-
-    /// Input resolution height (default: use camera default)
-    #[arg(long)]
-    height: Option<u32>,
-
     /// Add videoscale element to downscale input for better performance
     #[arg(long)]
     downscale: bool,
@@ -393,15 +385,7 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
 
     // Set caps - the edgeimpulsevideoinfer element will automatically resize frames
     // to match model requirements and scale results back
-    let mut caps_builder = gst::Caps::builder("video/x-raw").field("format", "RGB");
-
-    // Add resolution if specified
-    if let Some(width) = args.width {
-        caps_builder = caps_builder.field("width", width as i32);
-    }
-    if let Some(height) = args.height {
-        caps_builder = caps_builder.field("height", height as i32);
-    }
+    let caps_builder = gst::Caps::builder("video/x-raw").field("format", "RGB");
 
     let caps1_struct = caps_builder.build();
     caps1.set_property("caps", &caps1_struct);

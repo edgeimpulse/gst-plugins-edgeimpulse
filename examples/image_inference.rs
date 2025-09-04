@@ -5,12 +5,16 @@
 //! This example demonstrates how to use the Edge Impulse GStreamer plugin to perform
 //! image classification using a trained model on a single image file.
 //!
+//! The edgeimpulsevideoinfer element automatically handles frame resizing to match model
+//! input requirements and scales detection results back to the original resolution.
+//!
 //! Usage:
 //!   # EIM mode (requires model path):
 //!   cargo run --example image_inference -- --model <path_to_model> --image <path_to_image>
 //!
 //!   # FFI mode (no model path needed):
 //!   cargo run --example image_inference -- --image <path_to_image>
+//!
 //!
 //! Environment setup:
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
@@ -41,14 +45,6 @@ struct ImageClassifyParams {
     /// Video format (RGB, RGBA, BGR, BGRA)
     #[arg(short, long, default_value = "RGB")]
     format: String,
-
-    /// Input width
-    #[arg(short = 'W', long, default_value = "96")]
-    width: i32,
-
-    /// Input height
-    #[arg(short = 'H', long, default_value = "96")]
-    height: i32,
 
     /// Enable debug output
     #[arg(short, long)]
@@ -103,8 +99,6 @@ fn create_pipeline(args: &ImageClassifyParams) -> Result<gst::Pipeline, Box<dyn 
             "caps",
             &gst::Caps::builder("video/x-raw")
                 .field("format", &args.format)
-                .field("width", &args.width)
-                .field("height", &args.height)
                 .build(),
         )
         .build()?;
@@ -222,7 +216,6 @@ fn example_main() -> Result<(), Box<dyn Error>> {
     if let Some(output) = &args.output {
         println!("💾 Output image: {}", output);
     }
-    println!("📐 Image dimensions: {}x{}", args.width, args.height);
     println!("🎨 Format: {}", args.format);
     println!("🔧 Debug mode: {}", args.debug);
 

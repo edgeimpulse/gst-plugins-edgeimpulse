@@ -29,7 +29,6 @@ struct Args {
     #[arg(short = 'n', long, default_value = "100")]
     max_images: usize,
 
-
     /// Slideshow framerate (images per second, default: 1)
     #[arg(long, default_value = "1")]
     framerate: i32,

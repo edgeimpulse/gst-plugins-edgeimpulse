@@ -408,12 +408,14 @@ pub fn create_inference_message(
     result_type: &str,
     result_json: String,
     timing_ms: u32,
+    resize_timing_ms: u32,
 ) -> gst::Structure {
     gst::Structure::builder(format!("edge-impulse-{element_type}-inference-result"))
         .field("timestamp", timestamp)
         .field("type", result_type)
         .field("result", result_json)
         .field("timing_ms", timing_ms)
+        .field("resize_timing_ms", resize_timing_ms)
         .build()
 }
 

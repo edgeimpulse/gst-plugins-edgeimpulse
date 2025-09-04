@@ -205,9 +205,10 @@ use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoInfo};
-use image::{ImageBuffer, Rgb, RgbImage};
+use image::{ImageBuffer, RgbImage};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use super::meta::VideoRegionOfInterestMeta;
 use super::VideoAnomalyMeta;
@@ -255,7 +256,43 @@ impl Default for VideoState {
 
 impl VideoState {}
 
-/// Helper function to resize RGB image data
+/// Fast resize for simple cases (powers of 2 scaling)
+fn fast_resize_rgb(
+    data: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Option<Vec<u8>> {
+    // Check if this is a simple power-of-2 downscaling
+    let scale_x = src_width as f32 / dst_width as f32;
+    let scale_y = src_height as f32 / dst_height as f32;
+
+    // Only use fast path for exact power-of-2 scaling (2x, 4x, 8x, etc.)
+    if scale_x == scale_y && scale_x == scale_x.round() && scale_x >= 2.0 {
+        let scale = scale_x as u32;
+        if src_width % scale == 0 && src_height % scale == 0 {
+            let mut result = Vec::with_capacity((dst_width * dst_height * 3) as usize);
+
+            for y in 0..dst_height {
+                for x in 0..dst_width {
+                    let src_x = x * scale;
+                    let src_y = y * scale;
+                    let src_idx = ((src_y * src_width + src_x) * 3) as usize;
+
+                    // Copy RGB pixel
+                    result.push(data[src_idx]); // R
+                    result.push(data[src_idx + 1]); // G
+                    result.push(data[src_idx + 2]); // B
+                }
+            }
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Helper function to resize RGB image data with optimized performance
 fn resize_rgb_image(
     data: &[u8],
     src_width: u32,
@@ -263,18 +300,71 @@ fn resize_rgb_image(
     dst_width: u32,
     dst_height: u32,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Create image buffer from input data
+    // Try fast resize first for simple cases
+    if let Some(result) = fast_resize_rgb(data, src_width, src_height, dst_width, dst_height) {
+        return Ok(result);
+    }
+
+    // Choose filter type based on scaling ratio for optimal performance
+    let filter_type = if (src_width as f32 / dst_width as f32) > 2.0
+        || (src_height as f32 / dst_height as f32) > 2.0
+    {
+        // Large downscaling - use nearest neighbor for speed
+        image::imageops::FilterType::Nearest
+    } else if dst_width > src_width || dst_height > src_height {
+        // Upscaling - use linear for better quality
+        image::imageops::FilterType::Triangle
+    } else {
+        // Small downscaling - use linear for good balance
+        image::imageops::FilterType::Triangle
+    };
+
+    // Create image buffer from input data (avoid unnecessary copy)
     let img: RgbImage = ImageBuffer::from_raw(src_width, src_height, data.to_vec())
         .ok_or("Failed to create image buffer")?;
 
-    // Resize the image
-    let resized = image::imageops::resize(&img, dst_width, dst_height, image::imageops::FilterType::Lanczos3);
+    // Resize the image with optimized filter
+    let resized = image::imageops::resize(&img, dst_width, dst_height, filter_type);
 
     // Convert back to bytes
     Ok(resized.into_raw())
 }
 
-/// Helper function to resize grayscale image data
+/// Fast resize for grayscale images (powers of 2 scaling)
+fn fast_resize_gray(
+    data: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Option<Vec<u8>> {
+    // Check if this is a simple power-of-2 downscaling
+    let scale_x = src_width as f32 / dst_width as f32;
+    let scale_y = src_height as f32 / dst_height as f32;
+
+    // Only use fast path for exact power-of-2 scaling (2x, 4x, 8x, etc.)
+    if scale_x == scale_y && scale_x == scale_x.round() && scale_x >= 2.0 {
+        let scale = scale_x as u32;
+        if src_width % scale == 0 && src_height % scale == 0 {
+            let mut result = Vec::with_capacity((dst_width * dst_height) as usize);
+
+            for y in 0..dst_height {
+                for x in 0..dst_width {
+                    let src_x = x * scale;
+                    let src_y = y * scale;
+                    let src_idx = (src_y * src_width + src_x) as usize;
+
+                    // Copy grayscale pixel
+                    result.push(data[src_idx]);
+                }
+            }
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Helper function to resize grayscale image data with optimized performance
 fn resize_gray_image(
     data: &[u8],
     src_width: u32,
@@ -282,12 +372,32 @@ fn resize_gray_image(
     dst_width: u32,
     dst_height: u32,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Create grayscale image buffer from input data
-    let img = ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(src_width, src_height, data.to_vec())
-        .ok_or("Failed to create grayscale image buffer")?;
+    // Try fast resize first for simple cases
+    if let Some(result) = fast_resize_gray(data, src_width, src_height, dst_width, dst_height) {
+        return Ok(result);
+    }
 
-    // Resize the image
-    let resized = image::imageops::resize(&img, dst_width, dst_height, image::imageops::FilterType::Lanczos3);
+    // Choose filter type based on scaling ratio for optimal performance
+    let filter_type = if (src_width as f32 / dst_width as f32) > 2.0
+        || (src_height as f32 / dst_height as f32) > 2.0
+    {
+        // Large downscaling - use nearest neighbor for speed
+        image::imageops::FilterType::Nearest
+    } else if dst_width > src_width || dst_height > src_height {
+        // Upscaling - use linear for better quality
+        image::imageops::FilterType::Triangle
+    } else {
+        // Small downscaling - use linear for good balance
+        image::imageops::FilterType::Triangle
+    };
+
+    // Create grayscale image buffer from input data
+    let img =
+        ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(src_width, src_height, data.to_vec())
+            .ok_or("Failed to create grayscale image buffer")?;
+
+    // Resize the image with optimized filter
+    let resized = image::imageops::resize(&img, dst_width, dst_height, filter_type);
 
     // Convert back to bytes
     Ok(resized.into_raw())
@@ -390,18 +500,22 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
     }
 
     fn set_property(&self, id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-        crate::common::set_common_property::<VideoState>(
-            &self.state,
-            id,
-            value,
-            pspec,
-            &*self.obj(),
-            &CAT,
-        );
+        {
+            crate::common::set_common_property::<VideoState>(
+                &self.state,
+                id,
+                value,
+                pspec,
+                &*self.obj(),
+                &CAT,
+            );
+        }
     }
 
     fn property(&self, id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        crate::common::get_common_property::<VideoState>(&self.state, id, pspec)
+        {
+            crate::common::get_common_property::<VideoState>(&self.state, id, pspec)
+        }
     }
 }
 
@@ -659,38 +773,66 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             );
 
             // Check if we need to resize the frame for the model
-            let (frame_data, inference_width, inference_height) = if width != model_width || height != model_height {
+            let (frame_data, inference_width, inference_height, resize_time_ms) = if width
+                != model_width
+                || height != model_height
+            {
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
                     "Frame size mismatch: input={}x{}, model requires={}x{}, resizing frame",
-                    width, height, model_width, model_height
+                    width,
+                    height,
+                    model_width,
+                    model_height
                 );
 
-                // Resize the frame data
+                // Time the resizing operation
+                let resize_start = Instant::now();
                 let resized_data = if format == Some(VideoFormat::Gray8) {
-                    resize_gray_image(&in_map, width, height, model_width, model_height)
-                        .map_err(|e| {
-                            gst::error!(CAT, obj = self.obj(), "Failed to resize grayscale frame: {}", e);
+                    resize_gray_image(&in_map, width, height, model_width, model_height).map_err(
+                        |e| {
+                            gst::error!(
+                                CAT,
+                                obj = self.obj(),
+                                "Failed to resize grayscale frame: {}",
+                                e
+                            );
                             gst::FlowError::Error
-                        })?
+                        },
+                    )?
                 } else {
-                    resize_rgb_image(&in_map, width, height, model_width, model_height)
-                        .map_err(|e| {
+                    resize_rgb_image(&in_map, width, height, model_width, model_height).map_err(
+                        |e| {
                             gst::error!(CAT, obj = self.obj(), "Failed to resize RGB frame: {}", e);
                             gst::FlowError::Error
-                        })?
+                        },
+                    )?
                 };
+                let resize_duration = resize_start.elapsed();
+                let resize_time_ms = resize_duration.as_millis() as u32;
 
-                (resized_data, model_width, model_height)
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Frame resizing completed in {}ms ({}x{} -> {}x{})",
+                    resize_time_ms,
+                    width,
+                    height,
+                    model_width,
+                    model_height
+                );
+
+                (resized_data, model_width, model_height, resize_time_ms)
             } else {
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
                     "Frame size matches model requirements: {}x{}",
-                    width, height
+                    width,
+                    height
                 );
-                (in_map.to_vec(), width, height)
+                (in_map.to_vec(), width, height, 0u32)
             };
 
             // Pre-allocate features vector with exact capacity
@@ -812,7 +954,13 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     // Convert grid cells to VideoRegionOfInterestMeta format
                     let mut grid_rois = Vec::new();
                     for cell in grid {
-                        if let (Some(x), Some(y), Some(cell_width), Some(cell_height), Some(score)) = (
+                        if let (
+                            Some(x),
+                            Some(y),
+                            Some(cell_width),
+                            Some(cell_height),
+                            Some(score),
+                        ) = (
                             cell["x"].as_u64(),
                             cell["y"].as_u64(),
                             cell["width"].as_u64(),
@@ -820,15 +968,21 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             cell["value"].as_f64(),
                         ) {
                             // Scale coordinates back to original resolution if frame was resized
-                            let (scaled_x, scaled_y, scaled_width, scaled_height) = if inference_width != width || inference_height != height {
-                                scale_bounding_box(
-                                    x as u32, y as u32, cell_width as u32, cell_height as u32,
-                                    inference_width, inference_height,
-                                    width, height
-                                )
-                            } else {
-                                (x as u32, y as u32, cell_width as u32, cell_height as u32)
-                            };
+                            let (scaled_x, scaled_y, scaled_width, scaled_height) =
+                                if inference_width != width || inference_height != height {
+                                    scale_bounding_box(
+                                        x as u32,
+                                        y as u32,
+                                        cell_width as u32,
+                                        cell_height as u32,
+                                        inference_width,
+                                        inference_height,
+                                        width,
+                                        height,
+                                    )
+                                } else {
+                                    (x as u32, y as u32, cell_width as u32, cell_height as u32)
+                                };
 
                             grid_rois.push(VideoRegionOfInterestMeta {
                                 x: scaled_x,
@@ -858,6 +1012,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         "visual-anomaly",
                         result_json.clone(),
                         elapsed.as_millis() as u32,
+                        resize_time_ms,
                     );
                     let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
@@ -888,15 +1043,21 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             bbox["height"].as_u64(),
                         ) {
                             // Scale coordinates back to original resolution if frame was resized
-                            let (scaled_x, scaled_y, scaled_width, scaled_height) = if inference_width != width || inference_height != height {
-                                scale_bounding_box(
-                                    x as u32, y as u32, bbox_width as u32, bbox_height as u32,
-                                    inference_width, inference_height,
-                                    width, height
-                                )
-                            } else {
-                                (x as u32, y as u32, bbox_width as u32, bbox_height as u32)
-                            };
+                            let (scaled_x, scaled_y, scaled_width, scaled_height) =
+                                if inference_width != width || inference_height != height {
+                                    scale_bounding_box(
+                                        x as u32,
+                                        y as u32,
+                                        bbox_width as u32,
+                                        bbox_height as u32,
+                                        inference_width,
+                                        inference_height,
+                                        width,
+                                        height,
+                                    )
+                                } else {
+                                    (x as u32, y as u32, bbox_width as u32, bbox_height as u32)
+                                };
 
                             let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
                                 outbuf,
@@ -916,6 +1077,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         "object-detection",
                         result_json,
                         elapsed.as_millis() as u32,
+                        resize_time_ms,
                     );
                     let _ = self.obj().post_message(gst::message::Element::new(s));
                 } else {
@@ -956,6 +1118,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         "classification",
                         result_json,
                         elapsed.as_millis() as u32,
+                        resize_time_ms,
                     );
                     let _ = self.obj().post_message(gst::message::Element::new(s));
                 }
@@ -997,6 +1160,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     "classification",
                     result_json,
                     elapsed.as_millis() as u32,
+                    resize_time_ms,
                 );
                 let _ = self.obj().post_message(gst::message::Element::new(s));
             }

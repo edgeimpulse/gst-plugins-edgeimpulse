@@ -46,7 +46,6 @@ struct ImageClassifyParams {
     #[arg(short, long, default_value = "RGB")]
     format: String,
 
-
     /// Enable debug output
     #[arg(short, long)]
     debug: bool,

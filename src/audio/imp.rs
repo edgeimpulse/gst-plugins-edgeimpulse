@@ -481,6 +481,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                             "classification",
                             result_json,
                             elapsed.as_millis() as u32,
+                            0u32, // No resizing for audio
                         );
 
                         // Post the message
@@ -578,6 +579,7 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                                 "classification",
                                 result_json,
                                 elapsed.as_millis() as u32,
+                                0u32, // No resizing for audio
                             );
 
                             let _ = self.obj().post_message(gst::message::Element::new(s));

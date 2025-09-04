@@ -10,9 +10,10 @@
 //! 2. Input frames are copied directly to output (always)
 //! 3. If a model is loaded, frames are also:
 //!    - Mapped to raw RGB data
+//!    - Resized to match model input requirements if needed (internal resize)
 //!    - Converted to features based on model requirements (RGB or grayscale)
 //!    - Processed through the Edge Impulse model
-//!    - Results are emitted as GStreamer messages
+//!    - Results are scaled back to original resolution and emitted as GStreamer messages
 //!
 //! # Result Output Mechanisms
 //! For object detection models, the element provides two mechanisms to consume results:
@@ -32,7 +33,7 @@
 //! visualization tools to work with the detection results.
 //!
 //! # Properties
-//! - `model-path`: Path to the Edge Impulse model file (.eim) - EIM mode only (legacy)
+//! - `model-path`: Path to the Edge Impulse model file (.eim) - EIM mode only
 //!   - When set, loads the model and begins inference
 //!   - When unset, uses FFI mode (default)
 //! - `debug`: Enable debug mode for FFI inference (FFI mode only)
@@ -76,28 +77,22 @@
 //!   avfvideosrc ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
 //!   videoconvert n-threads=4 ! \
-//!   videoscale method=nearest-neighbour ! \
-//!   video/x-raw,format=RGB,width=384,height=384 ! \
+//!   video/x-raw,format=RGB,width=1920,height=1080 ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
 //!   edgeimpulsevideoinfer ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
-//!   videoscale method=nearest-neighbour ! \
-//!   video/x-raw,width=480,height=480 ! \
 //!   videoconvert n-threads=4 ! \
 //!   autovideosink sync=false
 //!
-//! # EIM mode (legacy)
+//! # EIM mode
 //! gst-launch-1.0 \
 //!   avfvideosrc ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
 //!   videoconvert n-threads=4 ! \
-//!   videoscale method=nearest-neighbour ! \
-//!   video/x-raw,format=RGB,width=384,height=384 ! \
+//!   video/x-raw,format=RGB,width=1920,height=1080 ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
 //!   edgeimpulsevideoinfer model-path=<model path> ! \
 //!   queue max-size-buffers=2 leaky=downstream ! \
-//!   videoscale method=nearest-neighbour ! \
-//!   video/x-raw,width=480,height=480 ! \
 //!   videoconvert n-threads=4 ! \
 //!   autovideosink sync=false
 //! ```
@@ -138,10 +133,10 @@
 //!    - Message type: "object-detection"
 //!
 //! ## Video Format Requirements
-//! - Format must be RGB (no other color formats supported)
-//! - Width and height must match model input dimensions
+//! - Format must be RGB or GRAY8 (no other color formats supported)
+//! - Width and height can be any size - the element will automatically resize to model requirements
 //! - Frame rate is unrestricted
-//! - Stride must be width * 3 (no padding supported)
+//! - Stride must be width * 3 for RGB or width * 1 for GRAY8 (no padding supported)
 //!
 //! ## Error Handling
 //! The element handles errors gracefully:
@@ -164,9 +159,9 @@
 //!
 //! ## Performance Considerations
 //! - Single frame copy operation
+//! - Automatic internal resizing when input size differs from model requirements
 //! - Feature conversion optimized for both RGB and grayscale
-//! - No additional scaling or format conversion
-//! - Pipeline should handle any necessary pre-processing
+//! - Results are automatically scaled back to original resolution
 //! - Inference runs in transform thread
 //!
 //! ## Pad Templates
@@ -191,7 +186,7 @@
 //! ## Element Information
 //! - Name: "edgeimpulsevideoinfer"
 //! - Classification: Filter/Video/AI
-//! - Description: "Runs video inference on Edge Impulse models (FFI default, EIM legacy)"
+//! - Description: "Runs video inference on Edge Impulse models (FFI default, EIM mode)"
 //!
 //! ## Debug Categories
 //! The element uses the "edgeimpulsevideoinfer" debug category for logging.
@@ -210,6 +205,7 @@ use gstreamer_base::subclass::prelude::*;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_video as gst_video;
 use gstreamer_video::{VideoFormat, VideoInfo};
+use image::{ImageBuffer, Rgb, RgbImage};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -258,6 +254,66 @@ impl Default for VideoState {
 }
 
 impl VideoState {}
+
+/// Helper function to resize RGB image data
+fn resize_rgb_image(
+    data: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // Create image buffer from input data
+    let img: RgbImage = ImageBuffer::from_raw(src_width, src_height, data.to_vec())
+        .ok_or("Failed to create image buffer")?;
+
+    // Resize the image
+    let resized = image::imageops::resize(&img, dst_width, dst_height, image::imageops::FilterType::Lanczos3);
+
+    // Convert back to bytes
+    Ok(resized.into_raw())
+}
+
+/// Helper function to resize grayscale image data
+fn resize_gray_image(
+    data: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // Create grayscale image buffer from input data
+    let img = ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(src_width, src_height, data.to_vec())
+        .ok_or("Failed to create grayscale image buffer")?;
+
+    // Resize the image
+    let resized = image::imageops::resize(&img, dst_width, dst_height, image::imageops::FilterType::Lanczos3);
+
+    // Convert back to bytes
+    Ok(resized.into_raw())
+}
+
+/// Helper function to scale bounding box coordinates from model resolution to original resolution
+fn scale_bounding_box(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    model_width: u32,
+    model_height: u32,
+    original_width: u32,
+    original_height: u32,
+) -> (u32, u32, u32, u32) {
+    let scale_x = original_width as f32 / model_width as f32;
+    let scale_y = original_height as f32 / model_height as f32;
+
+    let scaled_x = (x as f32 * scale_x) as u32;
+    let scaled_y = (y as f32 * scale_y) as u32;
+    let scaled_width = (width as f32 * scale_x) as u32;
+    let scaled_height = (height as f32 * scale_y) as u32;
+
+    (scaled_x, scaled_y, scaled_width, scaled_height)
+}
 
 impl crate::common::DebugState for VideoState {
     fn set_debug(&mut self, enabled: bool) {
@@ -357,7 +413,7 @@ impl ElementImpl for EdgeImpulseVideoInfer {
             gst::subclass::ElementMetadata::new(
                 "Edge Impulse Video Inference",
                 "Filter/Video/AI",
-                "Runs video inference on Edge Impulse models (FFI default, EIM legacy)",
+                "Runs video inference on Edge Impulse models (FFI default, EIM mode)",
                 "Fernando Jiménez Moreno <fernando@edgeimpulse.com>",
             )
         });
@@ -561,8 +617,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
             };
 
-            let _model_width = params.image_input_width;
-            let _model_height = params.image_input_height;
+            let model_width = params.image_input_width;
+            let model_height = params.image_input_height;
             let channels = params.image_channel_count;
             let is_object_detection = params.model_type == "constrained_object_detection"
                 || params.model_type == "object_detection"
@@ -595,18 +651,50 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 CAT,
                 obj = self.obj(),
                 "Model parameters: width={}, height={}, channels={}, type={}, has_anomaly={:?}",
-                _model_width,
-                _model_height,
+                model_width,
+                model_height,
                 channels,
                 params.model_type,
                 params.has_anomaly
             );
 
-            // Use the already mapped input buffer data directly for feature conversion
-            let frame_data = &in_map;
+            // Check if we need to resize the frame for the model
+            let (frame_data, inference_width, inference_height) = if width != model_width || height != model_height {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Frame size mismatch: input={}x{}, model requires={}x{}, resizing frame",
+                    width, height, model_width, model_height
+                );
+
+                // Resize the frame data
+                let resized_data = if format == Some(VideoFormat::Gray8) {
+                    resize_gray_image(&in_map, width, height, model_width, model_height)
+                        .map_err(|e| {
+                            gst::error!(CAT, obj = self.obj(), "Failed to resize grayscale frame: {}", e);
+                            gst::FlowError::Error
+                        })?
+                } else {
+                    resize_rgb_image(&in_map, width, height, model_width, model_height)
+                        .map_err(|e| {
+                            gst::error!(CAT, obj = self.obj(), "Failed to resize RGB frame: {}", e);
+                            gst::FlowError::Error
+                        })?
+                };
+
+                (resized_data, model_width, model_height)
+            } else {
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "Frame size matches model requirements: {}x{}",
+                    width, height
+                );
+                (in_map.to_vec(), width, height)
+            };
 
             // Pre-allocate features vector with exact capacity
-            let pixel_count = (width * height) as usize;
+            let pixel_count = (inference_width * inference_height) as usize;
             let mut features = Vec::with_capacity(pixel_count);
 
             // Optimized feature conversion - avoid redundant VideoFrameRef creation
@@ -671,7 +759,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Standardize object detection: always array of objects for bounding_boxes
             if let Some(bboxes) = result_value.get_mut("bounding_boxes") {
                 if bboxes.is_object() {
-                    // Convert object to array if needed (legacy)
+                    // Convert object to array if needed
                     let mut arr = Vec::new();
                     for (_k, v) in bboxes.as_object().unwrap() {
                         arr.push(v.clone());
@@ -724,18 +812,29 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     // Convert grid cells to VideoRegionOfInterestMeta format
                     let mut grid_rois = Vec::new();
                     for cell in grid {
-                        if let (Some(x), Some(y), Some(width), Some(height), Some(score)) = (
+                        if let (Some(x), Some(y), Some(cell_width), Some(cell_height), Some(score)) = (
                             cell["x"].as_u64(),
                             cell["y"].as_u64(),
                             cell["width"].as_u64(),
                             cell["height"].as_u64(),
                             cell["value"].as_f64(),
                         ) {
+                            // Scale coordinates back to original resolution if frame was resized
+                            let (scaled_x, scaled_y, scaled_width, scaled_height) = if inference_width != width || inference_height != height {
+                                scale_bounding_box(
+                                    x as u32, y as u32, cell_width as u32, cell_height as u32,
+                                    inference_width, inference_height,
+                                    width, height
+                                )
+                            } else {
+                                (x as u32, y as u32, cell_width as u32, cell_height as u32)
+                            };
+
                             grid_rois.push(VideoRegionOfInterestMeta {
-                                x: x as u32,
-                                y: y as u32,
-                                width: width as u32,
-                                height: height as u32,
+                                x: scaled_x,
+                                y: scaled_y,
+                                width: scaled_width,
+                                height: scaled_height,
                                 label: format!("{:.1}", score * 100.0), // Store score as label
                             });
                         }
@@ -778,8 +877,8 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             Some(value),
                             Some(x),
                             Some(y),
-                            Some(width),
-                            Some(height),
+                            Some(bbox_width),
+                            Some(bbox_height),
                         ) = (
                             bbox["label"].as_str(),
                             bbox["value"].as_f64(),
@@ -788,10 +887,21 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             bbox["width"].as_u64(),
                             bbox["height"].as_u64(),
                         ) {
+                            // Scale coordinates back to original resolution if frame was resized
+                            let (scaled_x, scaled_y, scaled_width, scaled_height) = if inference_width != width || inference_height != height {
+                                scale_bounding_box(
+                                    x as u32, y as u32, bbox_width as u32, bbox_height as u32,
+                                    inference_width, inference_height,
+                                    width, height
+                                )
+                            } else {
+                                (x as u32, y as u32, bbox_width as u32, bbox_height as u32)
+                            };
+
                             let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
                                 outbuf,
                                 label,
-                                (x as u32, y as u32, width as u32, height as u32),
+                                (scaled_x, scaled_y, scaled_width, scaled_height),
                             );
                             let s = gst::Structure::builder("detection")
                                 .field("label", label)

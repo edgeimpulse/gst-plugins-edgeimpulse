@@ -191,7 +191,7 @@ export EI_MODEL="~/Downloads/your-model-directory"  # Optional: for local models
 cargo build --release
 ```
 
-**EIM Mode (Legacy):**
+**EIM Mode:**
 - Uses Edge Impulse model files (.eim) for inference
 - Requires EIM model files to be present on the filesystem
 - Compatible with all Edge Impulse deployment targets
@@ -390,7 +390,7 @@ gst-launch-1.0 autoaudiosrc ! \
 ```
 
 ### edgeimpulsevideoinfer
-Video inference element that processes video frames through Edge Impulse models.
+Video inference element that processes video frames through Edge Impulse models. The element automatically handles frame resizing to match model input requirements and scales detection results back to the original resolution.
 
 Element Details:
 - Long name: Edge Impulse Video Inference
@@ -443,22 +443,20 @@ Example pipelines:
 Basic pipeline with built-in overlay:
 ```bash
 # FFI mode (default)
-gst-launch-1.0  avfvideosrc ! \
+gst-launch-1.0 avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
   videoconvert n-threads=4 ! \
-  videoscale method=nearest-neighbour ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   queue max-size-buffers=2 leaky=downstream ! \
   edgeimpulsevideoinfer ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# EIM mode (legacy)
-gst-launch-1.0  avfvideosrc ! \
+# EIM mode
+gst-launch-1.0 avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
   videoconvert n-threads=4 ! \
-  videoscale method=nearest-neighbour ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   queue max-size-buffers=2 leaky=downstream ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
   edgeimpulseoverlay ! \
@@ -470,8 +468,7 @@ Pipeline with threshold settings:
 # FFI mode (default) - Set object detection threshold
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer threshold="5.min_score=0.6" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
@@ -479,28 +476,25 @@ gst-launch-1.0 avfvideosrc ! \
 # FFI mode (default) - Set multiple thresholds
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer \
     threshold="5.min_score=0.6" \
     threshold="4.min_anomaly_score=0.35" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# EIM mode (legacy) - Set object detection threshold
+# EIM mode - Set object detection threshold
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> threshold="5.min_score=0.6" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# EIM mode (legacy) - Set multiple thresholds
+# EIM mode - Set multiple thresholds
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> \
     threshold="5.min_score=0.6" \
     threshold="4.min_anomaly_score=0.35" ! \
@@ -564,17 +558,15 @@ Example pipeline:
 # FFI mode (default)
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer ! \
   edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 
-# EIM mode (legacy)
+# EIM mode
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
   edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
@@ -847,16 +839,15 @@ The repository includes an `image_slideshow` example that demonstrates how to ru
 
 ```bash
 # FFI mode (default)
-cargo run --example image_slideshow -- --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
+cargo run --example image_slideshow -- --folder <path-to-image-folder> [--framerate <fps>] [--max-images <N>]
 
-# EIM mode (legacy)
-cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
+# EIM mode
+cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <path-to-image-folder> [--framerate <fps>] [--max-images <N>]
+
 ```
 
 - `--model` (optional): Path to the Edge Impulse model file (.eim) - only needed for EIM mode
 - `--folder` (required): Path to the folder containing images (jpg, jpeg, png)
-- `-W`, `--width` (required): Input width for inference
-- `-H`, `--height` (required): Input height for inference
 - `--framerate` (optional): Slideshow speed in images per second (default: 1)
 - `--max-images` (optional): Maximum number of images to process (default: 100)
 
@@ -864,7 +855,7 @@ cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <pat
 - All images in the folder are copied and converted to JPEG in a temporary directory for robust GStreamer playback.
 - The pipeline mimics the following structure:
   ```
-  multifilesrc ! decodebin ! videoconvert ! queue ! videoscale ! videorate ! video/x-raw,format=GRAY8,width=...,height=...,framerate=... ! edgeimpulsevideoinfer ! videoconvert ! video/x-raw,format=RGB,width=...,height=... ! edgeimpulseoverlay ! autovideosink
+  multifilesrc ! decodebin ! videoconvert ! queue ! videorate ! video/x-raw,format=GRAY8,width=...,height=...,framerate=... ! edgeimpulsevideoinfer ! videoconvert ! video/x-raw,format=RGB,width=...,height=... ! edgeimpulseoverlay ! autovideosink
   ```
 - The slideshow speed is controlled by the `--framerate` argument.
 - Each image is shown for the correct duration, and the pipeline loops through all images.
@@ -874,10 +865,11 @@ cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <pat
 
 ```bash
 # FFI mode (default)
-cargo run --example image_slideshow -- --folder ./images -W 160 -H 160 --framerate 2
+cargo run --example image_slideshow -- --folder ./images --framerate 2
 
-# EIM mode (legacy)
-cargo run --example image_slideshow -- --model model.eim --folder ./images -W 160 -H 160 --framerate 2
+# EIM mode
+cargo run --example image_slideshow -- --model model.eim --folder ./images --framerate 2
+
 ```
 
 This will show a 2 FPS slideshow of all images in `./images`, running inference and overlaying results.

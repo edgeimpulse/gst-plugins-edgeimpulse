@@ -3,7 +3,10 @@
 //! Video Classification Example using edgeimpulseinfer GStreamer plugin
 //!
 //! This example demonstrates how to use the Edge Impulse GStreamer plugin to perform
-//! video classification using a trained model with performance optimizations.
+//! video classification using a trained model with automatic frame resizing and performance optimizations.
+//!
+//! The edgeimpulsevideoinfer element automatically handles frame resizing to match model
+//! input requirements and scales detection results back to the original resolution.
 //!
 //! Usage:
 //!   # EIM mode (requires model path):
@@ -11,6 +14,7 @@
 //!
 //!   # FFI mode (no model path needed):
 //!   cargo run --example video_inference
+//!
 //!
 //! Environment setup:
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
@@ -36,13 +40,6 @@ struct VideoClassifyParams {
     #[arg(short, long, default_value = "RGB")]
     format: String,
 
-    /// Input width
-    #[arg(short = 'W', long)]
-    width: i32,
-
-    /// Input height
-    #[arg(short = 'H', long)]
-    height: i32,
 
     /// Enable debug output
     #[arg(short, long)]
@@ -286,10 +283,6 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create videoconvert element.");
 
-    let videoscale1 = gst::ElementFactory::make("videoscale")
-        .build()
-        .expect("Could not create videoscale element.");
-
     let caps1 = gst::ElementFactory::make("capsfilter")
         .build()
         .expect("Could not create capsfilter element.");
@@ -365,14 +358,6 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create edgeimpulseoverlay element.");
 
-    let videoscale2 = gst::ElementFactory::make("videoscale")
-        .build()
-        .expect("Could not create videoscale element.");
-
-    let caps2 = gst::ElementFactory::make("capsfilter")
-        .build()
-        .expect("Could not create capsfilter element.");
-
     let videoconvert2 = gst::ElementFactory::make("videoconvert")
         .property("n-threads", 4u32)
         .build()
@@ -383,33 +368,23 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create autovideosink element.");
 
-    // Set caps using provided dimensions
+    // Set caps - the edgeimpulsevideoinfer element will automatically resize frames
+    // to match model requirements and scale results back
     let caps1_struct = gst::Caps::builder("video/x-raw")
         .field("format", "RGB")
-        .field("width", args.width)
-        .field("height", args.height)
         .build();
     caps1.set_property("caps", &caps1_struct);
-
-    let caps2_struct = gst::Caps::builder("video/x-raw")
-        .field("width", 480i32)
-        .field("height", 480i32)
-        .build();
-    caps2.set_property("caps", &caps2_struct);
 
     // Add elements to the pipeline
     pipeline.add_many(&[
         &src,
         &queue1,
         &videoconvert1,
-        &videoscale1,
         &caps1,
         &queue2,
         &classifier,
         &queue3,
         &overlay,
-        &videoscale2,
-        &caps2,
         &videoconvert2,
         &sink,
     ])?;
@@ -419,14 +394,11 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         &src,
         &queue1,
         &videoconvert1,
-        &videoscale1,
         &caps1,
         &queue2,
         &classifier,
         &queue3,
         &overlay,
-        &videoscale2,
-        &caps2,
         &videoconvert2,
         &sink,
     ])?;
@@ -457,10 +429,10 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                         println!("📊 Model type: {}", model_type);
                     }
                     if let Ok(input_width) = structure.get::<u32>("input-width") {
-                        println!("📏 Input width: {}", input_width);
+                        println!("📏 Model input width: {}", input_width);
                     }
                     if let Ok(input_height) = structure.get::<u32>("input-height") {
-                        println!("📏 Input height: {}", input_height);
+                        println!("📏 Model input height: {}", input_height);
                     }
                     if let Ok(channel_count) = structure.get::<u32>("channel-count") {
                         println!("🎨 Channel count: {}", channel_count);
@@ -468,6 +440,8 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                     if let Ok(has_anomaly) = structure.get::<bool>("has-anomaly") {
                         println!("🔍 Has anomaly detection: {}", has_anomaly);
                     }
+                    println!("🔄 Input frames will be resized to match model requirements");
+                    println!("📐 Detection results will be scaled back to original resolution");
                 }
 
                 // Print model info from inference results (for FFI mode)

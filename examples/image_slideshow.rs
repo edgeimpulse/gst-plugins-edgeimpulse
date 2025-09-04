@@ -13,6 +13,7 @@ use image::io::Reader as ImageReader;
 use image::ImageFormat;
 
 /// A GStreamer-based image slideshow that runs inference on images from a folder.
+/// The edgeimpulsevideoinfer element automatically handles frame resizing to match model requirements.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -28,13 +29,6 @@ struct Args {
     #[arg(short = 'n', long, default_value = "100")]
     max_images: usize,
 
-    /// Input width
-    #[arg(short = 'W', long)]
-    width: i32,
-
-    /// Input height
-    #[arg(short = 'H', long)]
-    height: i32,
 
     /// Slideshow framerate (images per second, default: 1)
     #[arg(long, default_value = "1")]
@@ -187,7 +181,7 @@ fn example_main() -> Result<()> {
         .property("max-size-buffers", 1u32)
         .property("max-size-time", 30000000000u64)
         .build()?;
-    let videoscale = ElementFactory::make("videoscale").build()?;
+    // videoscale removed - edgeimpulsevideoinfer now handles resizing
     let videorate = ElementFactory::make("videorate")
         .property("max-rate", args.framerate)
         .build()?;
@@ -203,18 +197,15 @@ fn example_main() -> Result<()> {
         .build()?;
 
     // Set caps for GRAY8 before inference, including framerate to control slideshow speed
+    // The edgeimpulsevideoinfer element will automatically resize to match model requirements
     let caps_gray = gstreamer::Caps::builder("video/x-raw")
         .field("format", "GRAY8")
-        .field("width", args.width)
-        .field("height", args.height)
         .field("framerate", &gstreamer::Fraction::new(args.framerate, 1))
         .build();
     capsfilter_gray.set_property("caps", &caps_gray);
 
     let caps_rgb = gstreamer::Caps::builder("video/x-raw")
         .field("format", "RGB")
-        .field("width", args.width)
-        .field("height", args.height)
         .build();
     capsfilter_rgb.set_property("caps", &caps_rgb);
 
@@ -223,7 +214,6 @@ fn example_main() -> Result<()> {
         &decodebin,
         &videoconvert1,
         &queue,
-        &videoscale,
         &videorate,
         &capsfilter_gray,
         &edgeimpulse,
@@ -259,7 +249,6 @@ fn example_main() -> Result<()> {
     Element::link_many([
         &videoconvert1,
         &queue,
-        &videoscale,
         &videorate,
         &capsfilter_gray,
         &edgeimpulse,

@@ -106,12 +106,33 @@ The plugin exposes results and ingestion status through standardized mechanisms:
 > **Note:** Audio elements only emit bus messages; video elements emit both bus messages and metadata.
 
 ## Dependencies
-This plugin depends on:
-* GStreamer 1.20 or newer
+
+### System Dependencies
+This plugin requires additional system libraries for overlay rendering:
+
+**On macOS (with Homebrew):**
+```bash
+brew install pango cairo xorgproto libx11
+```
+
+**Note:** We recommend installing GStreamer from official binaries (see step 2 above) rather than via Homebrew to avoid potential version conflicts.
+
+**On Ubuntu/Debian:**
+```bash
+sudo apt-get update
+sudo apt-get install libpango1.0-dev libcairo2-dev libx11-dev libxext-dev libxrender-dev \
+    libxcb1-dev libxau-dev libxdmcp-dev libxorg-dev
+```
+
+**On CentOS/RHEL/Fedora:**
+```bash
+sudo dnf install pango-devel cairo-devel libX11-devel libXext-devel libXrender-devel \
+    libxcb-devel libXau-devel libXdmcp-devel xorg-x11-proto-devel
+```
+
+### Edge Impulse Rust Dependencies
 * [edge-impulse-runner-rs](https://github.com/edgeimpulse/edge-impulse-runner-rs) - Rust bindings for Edge Impulse Linux SDK
 * [edge-impulse-ffi-rs](https://github.com/edgeimpulse/edge-impulse-ffi-rs) - FFI bindings for Edge Impulse C++ SDK (used by runner-rs)
-* A trained Edge Impulse model file (.eim) or environment variables for FFI mode
-
 
 **Note:** The plugin inherits all build flags and environment variables supported by the underlying FFI crate. See the [edge-impulse-ffi-rs documentation](https://github.com/edgeimpulse/edge-impulse-ffi-rs) for the complete list of supported platforms, accelerators, and build options.
 
@@ -128,12 +149,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Follow the prompts to complete the installation. After installation, restart your terminal to ensure the Rust tools are in your PATH.
 
 ### 2. Install GStreamer
-Download and install GStreamer from the official binaries:
 
 #### macOS
-Download and install both packages:
+Download and install GStreamer from the official binaries:
 - [Runtime installer](https://gstreamer.freedesktop.org/data/pkg/osx/1.24.12/gstreamer-1.0-1.24.12-universal.pkg)
 - [Development installer](https://gstreamer.freedesktop.org/data/pkg/osx/1.24.12/gstreamer-1.0-devel-1.24.12-universal.pkg)
+
+**Note:** Install both packages for complete GStreamer development support.
 
 #### Linux
 Install from your distribution's package manager. For example:
@@ -191,7 +213,7 @@ export EI_MODEL="~/Downloads/your-model-directory"  # Optional: for local models
 cargo build --release
 ```
 
-**EIM Mode (Legacy):**
+**EIM Mode:**
 - Uses Edge Impulse model files (.eim) for inference
 - Requires EIM model files to be present on the filesystem
 - Compatible with all Edge Impulse deployment targets
@@ -399,7 +421,7 @@ gst-launch-1.0 autoaudiosrc ! \
 ```
 
 ### edgeimpulsevideoinfer
-Video inference element that processes video frames through Edge Impulse models.
+Video inference element that processes video frames through Edge Impulse models. The element automatically handles frame resizing to match model input requirements and scales detection results back to the original resolution.
 
 Element Details:
 - Long name: Edge Impulse Video Inference
@@ -452,22 +474,20 @@ Example pipelines:
 Basic pipeline with built-in overlay:
 ```bash
 # FFI mode (default)
-gst-launch-1.0  avfvideosrc ! \
+gst-launch-1.0 avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
   videoconvert n-threads=4 ! \
-  videoscale method=nearest-neighbour ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   queue max-size-buffers=2 leaky=downstream ! \
   edgeimpulsevideoinfer ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# EIM mode (legacy)
-gst-launch-1.0  avfvideosrc ! \
+# EIM mode
+gst-launch-1.0 avfvideosrc ! \
   queue max-size-buffers=2 leaky=downstream ! \
   videoconvert n-threads=4 ! \
-  videoscale method=nearest-neighbour ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   queue max-size-buffers=2 leaky=downstream ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
   edgeimpulseoverlay ! \
@@ -479,8 +499,7 @@ Pipeline with threshold settings:
 # FFI mode (default) - Set object detection threshold
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer threshold="5.min_score=0.6" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
@@ -488,28 +507,25 @@ gst-launch-1.0 avfvideosrc ! \
 # FFI mode (default) - Set multiple thresholds
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer \
     threshold="5.min_score=0.6" \
     threshold="4.min_anomaly_score=0.35" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# EIM mode (legacy) - Set object detection threshold
+# EIM mode - Set object detection threshold
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> threshold="5.min_score=0.6" ! \
   edgeimpulseoverlay ! \
   autovideosink sync=false
 
-# EIM mode (legacy) - Set multiple thresholds
+# EIM mode - Set multiple thresholds
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> \
     threshold="5.min_score=0.6" \
     threshold="4.min_anomaly_score=0.35" ! \
@@ -538,6 +554,8 @@ Key features:
 - Draws bounding boxes for object detection and visual anomaly detection results (from VideoRegionOfInterestMeta)
 - Displays class labels with confidence scores
 - Supports wide range of video formats
+- Automatic text sizing: Calculates optimal font size based on frame dimensions and bounding box sizes
+- Text scale control: Use `text-scale-ratio` property to fine-tune text size (0.1x to 5.0x scaling)
 
 Properties:
 1. `stroke-width` (integer):
@@ -560,29 +578,28 @@ Properties:
    - Font family to use for text rendering
    - Default: "Sans"
 
-5. `font-size-percentage` (double):
-   - Font size as percentage of output image height
-   - Range: 0.0 - 1.0 (0% - 100%, where 0.1 = 10%)
-   - Default: 0.09 (9%)
+5. `text-scale-ratio` (double):
+   - Scale factor for text size. Values > 1.0 make text larger, < 1.0 make text smaller
+   - Range: 0.1 - 5.0
+   - Default: 1.0 (no scaling)
+   - **Note:** This property overrides the automatic text sizing. The element calculates optimal font size based on frame/bbox dimensions, then applies this scale factor.
 
 Example pipeline:
 ```bash
 # FFI mode (default)
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer ! \
-  edgeimpulseoverlay stroke-width=3 font-size-percentage=0.12 text-color=0x00FF00 background-color=0x000000 ! \
+  edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 
-# EIM mode (legacy)
+# EIM mode
 gst-launch-1.0 avfvideosrc ! \
   videoconvert ! \
-  videoscale ! \
-  video/x-raw,format=RGB,width=384,height=384 ! \
+  video/x-raw,format=RGB,width=1920,height=1080 ! \
   edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  edgeimpulseoverlay stroke-width=3 font-size-percentage=0.12 text-color=0x00FF00 background-color=0x000000 ! \
+  edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
   autovideosink sync=false
 ```
 
@@ -671,6 +688,7 @@ Got element message with name: edge-impulse-inference-result
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 9498000000,
     type: "classification",
+    resize_timing_ms: (guint32) 2,
     result: {
         "classification": {
             "no": 0.015625,
@@ -697,7 +715,7 @@ cargo run --example video_inference \
 cargo run --example video_inference \
     --width 224 \
     --height 224 \
-    --font-size-percentage 0.12 \
+    --text-scale-ratio 1.5 \
     --stroke-width 3 \
     --text-color 0x00FF00 \
     --background-color 0x000000
@@ -714,6 +732,7 @@ Got element message with name: edge-impulse-inference-result
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 1234567890,
     type: "object-detection",
+    resize_timing_ms: (guint32) 3,
     result: {
         "bounding_boxes": [
             {
@@ -736,6 +755,7 @@ Got element message with name: edge-impulse-inference-result
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 1234567890,
     type: "classification",
+    resize_timing_ms: (guint32) 1,
     result: {
         "classification": {
             "cat": 0.85,
@@ -752,6 +772,7 @@ Got element message with name: edge-impulse-inference-result
 Message structure: edge-impulse-inference-result {
     timestamp: (guint64) 1234567890,
     type: "anomaly-detection",
+    resize_timing_ms: (guint32) 2,
     result: {
         "anomaly": 0.35,
         "classification": {
@@ -790,7 +811,7 @@ cargo run --example image_inference \
     --image input.jpg \
     --width 224 \
     --height 224 \
-    --font-size-percentage 0.12 \
+    --text-scale-ratio 1.5 \
     --stroke-width 3 \
     --text-color 0x00FF00 \
     --background-color 0x000000
@@ -799,7 +820,7 @@ cargo run --example image_inference \
 cargo run --example image_inference \
     --image input.jpg \
     --output output_with_overlay.png \
-    --font-size-percentage 0.10
+    --text-scale-ratio 0.8
 
 # EIM mode (legacy)
 cargo run --example image_inference \
@@ -853,16 +874,15 @@ The repository includes an `image_slideshow` example that demonstrates how to ru
 
 ```bash
 # FFI mode (default)
-cargo run --example image_slideshow -- --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
+cargo run --example image_slideshow -- --folder <path-to-image-folder> [--framerate <fps>] [--max-images <N>]
 
-# EIM mode (legacy)
-cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <path-to-image-folder> -W <width> -H <height> [--framerate <fps>] [--max-images <N>]
+# EIM mode
+cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <path-to-image-folder> [--framerate <fps>] [--max-images <N>]
+
 ```
 
 - `--model` (optional): Path to the Edge Impulse model file (.eim) - only needed for EIM mode
 - `--folder` (required): Path to the folder containing images (jpg, jpeg, png)
-- `-W`, `--width` (required): Input width for inference
-- `-H`, `--height` (required): Input height for inference
 - `--framerate` (optional): Slideshow speed in images per second (default: 1)
 - `--max-images` (optional): Maximum number of images to process (default: 100)
 
@@ -870,7 +890,7 @@ cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <pat
 - All images in the folder are copied and converted to JPEG in a temporary directory for robust GStreamer playback.
 - The pipeline mimics the following structure:
   ```
-  multifilesrc ! decodebin ! videoconvert ! queue ! videoscale ! videorate ! video/x-raw,format=GRAY8,width=...,height=...,framerate=... ! edgeimpulsevideoinfer ! videoconvert ! video/x-raw,format=RGB,width=...,height=... ! edgeimpulseoverlay ! autovideosink
+  multifilesrc ! decodebin ! videoconvert ! queue ! videorate ! video/x-raw,format=GRAY8,width=...,height=...,framerate=... ! edgeimpulsevideoinfer ! videoconvert ! video/x-raw,format=RGB,width=...,height=... ! edgeimpulseoverlay ! autovideosink
   ```
 - The slideshow speed is controlled by the `--framerate` argument.
 - Each image is shown for the correct duration, and the pipeline loops through all images.
@@ -880,15 +900,193 @@ cargo run --example image_slideshow -- --model <path-to-model.eim> --folder <pat
 
 ```bash
 # FFI mode (default)
-cargo run --example image_slideshow -- --folder ./images -W 160 -H 160 --framerate 2
+cargo run --example image_slideshow -- --folder ./images --framerate 2
 
-# EIM mode (legacy)
-cargo run --example image_slideshow -- --model model.eim --folder ./images -W 160 -H 160 --framerate 2
+# EIM mode
+cargo run --example image_slideshow -- --model model.eim --folder ./images --framerate 2
+
 ```
 
 This will show a 2 FPS slideshow of all images in `./images`, running inference and overlaying results.
 
 ---
+## Troubleshooting
+
+### Build Issues
+
+#### pkg-config Errors (cairo/pango not found)
+If you encounter errors like:
+```
+The system library `cairo` required by crate `cairo-sys-rs` was not found.
+The system library `pango` required by crate `pango-sys` was not found.
+```
+
+**Solution:**
+1. Ensure all system dependencies are installed (see Dependencies section above)
+2. The build.rs script automatically sets the correct PKG_CONFIG_PATH for macOS. If you still encounter issues, manually set the PKG_CONFIG_PATH:
+
+**On macOS:**
+```bash
+export PKG_CONFIG_PATH="/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig"
+```
+
+**On Linux:**
+```bash
+export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig"
+```
+
+3. Verify pkg-config can find the libraries:
+```bash
+pkg-config --exists cairo && echo "cairo found" || echo "cairo not found"
+pkg-config --exists pango && echo "pango found" || echo "pango not found"
+```
+
+4. If the issue persists, clean and rebuild:
+```bash
+cargo clean
+cargo build --release
+```
+
+#### Missing Model File
+If you get errors about missing Edge Impulse models:
+```
+FFI crate requires a valid Edge Impulse model, but none was found
+```
+
+**Solution:**
+1. Set the EI_MODEL environment variable to point to your model:
+```bash
+export EI_MODEL=/path/to/your/model
+```
+
+2. Or set up Edge Impulse API credentials:
+```bash
+export EI_PROJECT_ID=your-project-id
+export EI_API_KEY=your-api-key
+```
+
+#### TensorFlow Lite Model Issues
+If you get errors like:
+```
+This model cannot run under TensorFlow Lite Micro (EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE is 0)
+```
+
+**Solution:**
+1. For TensorFlow Lite models, you need to set the correct environment variable:
+```bash
+export USE_FULL_TFLITE=1
+```
+
+2. Use the complete build command:
+```bash
+PKG_CONFIG_PATH="/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig" \
+EI_MODEL=/path/to/your/model \
+EI_ENGINE=tflite \
+USE_FULL_TFLITE=1 \
+cargo build --release
+```
+
+3. If the issue persists, clean the cargo cache:
+```bash
+cargo clean
+rm -rf ~/.cargo/git/checkouts/edge-impulse-ffi-rs-*
+```
+
+#### GStreamer Plugin Not Found
+If GStreamer can't find the plugin:
+```
+gst-inspect-1.0 edgeimpulsevideoinfer
+# ERROR: No such element or plugin 'edgeimpulsevideoinfer'
+```
+
+**Solution:**
+1. Ensure the plugin was built successfully
+2. Set the GST_PLUGIN_PATH environment variable:
+```bash
+export GST_PLUGIN_PATH="$(pwd)/target/release"
+```
+
+3. Verify the plugin is available:
+```bash
+gst-inspect-1.0 edgeimpulsevideoinfer
+```
+
+### Runtime Issues
+
+#### Video Inference Not Working
+If video inference fails or produces no results:
+
+1. **Check input format compatibility:**
+```bash
+gst-launch-1.0 videotestsrc ! video/x-raw,format=RGB,width=224,height=224 ! edgeimpulsevideoinfer ! fakesink
+```
+
+2. **Verify model requirements:**
+   - The `edgeimpulsevideoinfer` element automatically resizes frames to match the model's expected input size
+   - Ensure the input format is supported (RGB, GRAY8)
+
+3. **Enable debug output:**
+```bash
+GST_DEBUG=edgeimpulsevideoinfer:4 gst-launch-1.0 ...
+```
+
+#### Audio Inference Issues
+If audio inference fails:
+
+1. **Check audio format:**
+```bash
+gst-launch-1.0 audiotestsrc ! audio/x-raw,format=S16LE,rate=16000,channels=1 ! edgeimpulseaudioinfer ! fakesink
+```
+
+2. **Verify sample rate and channels match model requirements**
+
+#### Overlay Not Displaying
+If the overlay element doesn't show results:
+
+1. **Check that inference is working** (see above)
+2. **Verify overlay element is in the pipeline:**
+```bash
+gst-launch-1.0 videotestsrc ! edgeimpulsevideoinfer ! edgeimpulseoverlay ! autovideosink
+```
+
+3. **Check for X11/display issues on Linux:**
+```bash
+export DISPLAY=:0
+```
+
+### Performance Issues
+
+#### Slow Inference
+If inference is slower than expected:
+
+1. **Check environment variables:**
+```bash
+# Ensure you're using the correct engine
+export EI_ENGINE=tflite  # or eim
+
+# Enable full TensorFlow Lite for better performance
+export USE_FULL_TFLITE=1
+```
+
+2. **For specific accelerators, use FFI crate advanced build flags:**
+```bash
+# Qualcomm QNN example
+export USE_QUALCOMM_QNN=1
+export QNN_SDK_ROOT=/path/to/qnn/sdk
+
+# Other accelerators may have similar environment variables
+# Refer to the [FFI crate documentation](https://github.com/edgeimpulse/edge-impulse-ffi-rs) for your specific hardware
+```
+
+3. **Optimize input resolution:**
+   - Use the minimum resolution required by your model
+   - The automatic resizing feature helps, but smaller inputs are faster
+
+4. **Check system resources:**
+```bash
+htop  # Monitor CPU/memory usage
+```
+
 ## Debugging
 Enable debug output with:
 ```bash

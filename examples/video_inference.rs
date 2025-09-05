@@ -3,7 +3,10 @@
 //! Video Classification Example using edgeimpulseinfer GStreamer plugin
 //!
 //! This example demonstrates how to use the Edge Impulse GStreamer plugin to perform
-//! video classification using a trained model with performance optimizations.
+//! video classification using a trained model with automatic frame resizing and performance optimizations.
+//!
+//! The edgeimpulsevideoinfer element automatically handles frame resizing to match model
+//! input requirements and scales detection results back to the original resolution.
 //!
 //! Usage:
 //!   # EIM mode (requires model path):
@@ -11,6 +14,7 @@
 //!
 //!   # FFI mode (no model path needed):
 //!   cargo run --example video_inference
+//!
 //!
 //! Environment setup:
 //! export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
@@ -36,14 +40,6 @@ struct VideoClassifyParams {
     #[arg(short, long, default_value = "RGB")]
     format: String,
 
-    /// Input width
-    #[arg(short = 'W', long)]
-    width: i32,
-
-    /// Input height
-    #[arg(short = 'H', long)]
-    height: i32,
-
     /// Enable debug output
     #[arg(short, long)]
     debug: bool,
@@ -52,13 +48,13 @@ struct VideoClassifyParams {
     #[clap(long)]
     threshold: Vec<String>,
 
+    /// Add videoscale element to downscale input for better performance
+    #[arg(long)]
+    downscale: bool,
+
     /// Enable performance monitoring
     #[arg(long)]
     perf: bool,
-
-    /// Font size percentage for overlay (0.0-1.0, where 0.1 = 10%)
-    #[arg(long, default_value = "0.09")]
-    font_size_percentage: f64,
 
     /// Stroke width for bounding boxes
     #[arg(long, default_value = "2")]
@@ -71,6 +67,10 @@ struct VideoClassifyParams {
     /// Background color in hex format (e.g., 0x000000 for black)
     #[arg(long, default_value = "0x000000")]
     background_color: String,
+
+    /// Text scale ratio (0.1 to 5.0). Values > 1.0 make text larger, < 1.0 make text smaller
+    #[arg(long, default_value = "1.0")]
+    text_scale_ratio: f64,
 }
 
 // Performance tracking structure
@@ -270,32 +270,40 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     // Create pipeline
     let pipeline = gst::Pipeline::new();
 
-    // Create elements
+    // Create elements with performance optimizations
     let src = gst::ElementFactory::make("avfvideosrc")
+        .property("device-index", 0i32) // Use first available camera
         .build()
         .expect("Could not create avfvideosrc element.");
 
     let queue1 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 2u32)
+        .property("max-size-buffers", 8u32) // Larger buffer for maximum throughput
         .property_from_str("leaky", "downstream")
         .build()
         .expect("Could not create queue element.");
+
+    // Add videoscale element for downscaling if requested
+    let videoscale = if args.downscale {
+        Some(
+            gst::ElementFactory::make("videoscale")
+                .build()
+                .expect("Could not create videoscale element."),
+        )
+    } else {
+        None
+    };
 
     let videoconvert1 = gst::ElementFactory::make("videoconvert")
         .property("n-threads", 4u32)
         .build()
         .expect("Could not create videoconvert element.");
 
-    let videoscale1 = gst::ElementFactory::make("videoscale")
-        .build()
-        .expect("Could not create videoscale element.");
-
     let caps1 = gst::ElementFactory::make("capsfilter")
         .build()
         .expect("Could not create capsfilter element.");
 
     let queue2 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 2u32)
+        .property("max-size-buffers", 8u32) // Larger buffer for maximum throughput
         .property_from_str("leaky", "downstream")
         .build()
         .expect("Could not create queue element.");
@@ -346,13 +354,12 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
     });
 
     let queue3 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 2u32)
+        .property("max-size-buffers", 8u32) // Larger buffer for maximum throughput
         .property_from_str("leaky", "downstream")
         .build()
         .expect("Could not create queue element.");
 
     let overlay = gst::ElementFactory::make("edgeimpulseoverlay")
-        .property("font-size-percentage", &args.font_size_percentage)
         .property("stroke-width", &args.stroke_width)
         .property(
             "text-color",
@@ -362,16 +369,9 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
             "background-color",
             &u32::from_str_radix(&args.background_color[2..], 16).unwrap_or(0x000000),
         )
+        .property("text-scale-ratio", &args.text_scale_ratio)
         .build()
         .expect("Could not create edgeimpulseoverlay element.");
-
-    let videoscale2 = gst::ElementFactory::make("videoscale")
-        .build()
-        .expect("Could not create videoscale element.");
-
-    let caps2 = gst::ElementFactory::make("capsfilter")
-        .build()
-        .expect("Could not create capsfilter element.");
 
     let videoconvert2 = gst::ElementFactory::make("videoconvert")
         .property("n-threads", 4u32)
@@ -379,57 +379,50 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .expect("Could not create videoconvert element.");
 
     let sink = gst::ElementFactory::make("autovideosink")
-        .property("sync", false)
+        .property("sync", false) // Disable sync for maximum throughput
         .build()
         .expect("Could not create autovideosink element.");
 
-    // Set caps using provided dimensions
-    let caps1_struct = gst::Caps::builder("video/x-raw")
-        .field("format", "RGB")
-        .field("width", args.width)
-        .field("height", args.height)
-        .build();
+    // Set caps - the edgeimpulsevideoinfer element will automatically resize frames
+    // to match model requirements and scale results back
+    let caps_builder = gst::Caps::builder("video/x-raw").field("format", "RGB");
+
+    let caps1_struct = caps_builder.build();
     caps1.set_property("caps", &caps1_struct);
 
-    let caps2_struct = gst::Caps::builder("video/x-raw")
-        .field("width", 480i32)
-        .field("height", 480i32)
-        .build();
-    caps2.set_property("caps", &caps2_struct);
-
     // Add elements to the pipeline
-    pipeline.add_many(&[
-        &src,
-        &queue1,
-        &videoconvert1,
-        &videoscale1,
-        &caps1,
-        &queue2,
-        &classifier,
-        &queue3,
-        &overlay,
-        &videoscale2,
-        &caps2,
-        &videoconvert2,
-        &sink,
-    ])?;
+    let mut elements_to_add = vec![&src, &queue1];
+
+    // Add videoscale if enabled
+    if let Some(ref videoscale_elem) = videoscale {
+        elements_to_add.push(videoscale_elem);
+    }
+
+    elements_to_add.extend(&[&videoconvert1, &caps1, &queue2, &classifier, &queue3]);
+
+    elements_to_add.push(&overlay);
+
+    elements_to_add.push(&videoconvert2);
+    elements_to_add.push(&sink);
+
+    pipeline.add_many(&elements_to_add)?;
 
     // Link the elements
-    gst::Element::link_many(&[
-        &src,
-        &queue1,
-        &videoconvert1,
-        &videoscale1,
-        &caps1,
-        &queue2,
-        &classifier,
-        &queue3,
-        &overlay,
-        &videoscale2,
-        &caps2,
-        &videoconvert2,
-        &sink,
-    ])?;
+    let mut elements_to_link = vec![&src, &queue1];
+
+    // Link videoscale if enabled
+    if let Some(ref videoscale_elem) = videoscale {
+        elements_to_link.push(videoscale_elem);
+    }
+
+    elements_to_link.extend(&[&videoconvert1, &caps1, &queue2, &classifier, &queue3]);
+
+    elements_to_link.push(&overlay);
+
+    elements_to_link.push(&videoconvert2);
+    elements_to_link.push(&sink);
+
+    gst::Element::link_many(&elements_to_link)?;
 
     Ok(pipeline)
 }
@@ -457,10 +450,10 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                         println!("📊 Model type: {}", model_type);
                     }
                     if let Ok(input_width) = structure.get::<u32>("input-width") {
-                        println!("📏 Input width: {}", input_width);
+                        println!("📏 Model input width: {}", input_width);
                     }
                     if let Ok(input_height) = structure.get::<u32>("input-height") {
-                        println!("📏 Input height: {}", input_height);
+                        println!("📏 Model input height: {}", input_height);
                     }
                     if let Ok(channel_count) = structure.get::<u32>("channel-count") {
                         println!("🎨 Channel count: {}", channel_count);
@@ -468,6 +461,8 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                     if let Ok(has_anomaly) = structure.get::<bool>("has-anomaly") {
                         println!("🔍 Has anomaly detection: {}", has_anomaly);
                     }
+                    println!("🔄 Input frames will be resized to match model requirements");
+                    println!("📐 Detection results will be scaled back to original resolution");
                 }
 
                 // Print model info from inference results (for FFI mode)
@@ -505,6 +500,7 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                 if structure.name() == "edge-impulse-video-inference-result" {
                     // Extract timing information for performance monitoring
                     let timing_ms = structure.get::<u32>("timing_ms").unwrap_or(0);
+                    let resize_timing_ms = structure.get::<u32>("resize_timing_ms").unwrap_or(0);
                     perf_metrics.update(timing_ms);
 
                     // Always print performance info
@@ -525,10 +521,11 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                         Duration::ZERO
                     };
 
-                    println!("🎯 Frame #{:3} | FPS: {:4.1} | Inference: {:3}ms | Avg: {:4.1}ms | Confidence: {:.1}%",
+                    println!("🎯 Frame #{:3} | FPS: {:4.1} | Inference: {:3}ms | Resize: {:3}ms | Avg: {:4.1}ms | Confidence: {:.1}%",
                         perf_metrics.frame_count,
                         current_fps,
                         timing_ms,
+                        resize_timing_ms,
                         avg_inference.as_millis(),
                         if let Ok(result) = structure.get::<String>("result") {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {

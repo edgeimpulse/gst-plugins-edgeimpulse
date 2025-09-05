@@ -8,7 +8,7 @@
 //!   # FFI mode (default, no model path needed):
 //!   cargo run --example audio_inference [OPTIONS]
 //!
-//!   # EIM mode (legacy, requires model path):
+//!   # EIM mode (requires model path):
 //!   cargo run --example audio_inference -- --model <path_to_model> [OPTIONS]
 //!
 //! Optional arguments:
@@ -37,7 +37,7 @@ use std::path::Path;
 /// Command line parameters for the real-time audio classification example
 #[derive(Parser, Debug)]
 struct AudioClassifyParams {
-    /// Path to the Edge Impulse model file (.eim) - EIM mode only (legacy)
+    /// Path to the Edge Impulse model file (.eim) - EIM mode only
     #[clap(short, long)]
     model: Option<String>,
 

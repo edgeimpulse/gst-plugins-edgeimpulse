@@ -457,24 +457,16 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 .iter()
                 .map(|roi| {
                     let score = roi.label.parse::<f64>().unwrap_or(0.0);
-                    // Scale coordinates based on input and output dimensions
-                    let scale_x = frame.width() as f64 / settings.model_input_width as f64;
-                    let scale_y = frame.height() as f64 / settings.model_input_height as f64;
-                    let scaled_x = (roi.x as f64 * scale_x) as i32;
-                    let scaled_y = (roi.y as f64 * scale_y) as i32;
-                    let scaled_w = (roi.width as f64 * scale_x) as i32;
-                    let scaled_h = (roi.height as f64 * scale_y) as i32;
+                    // Coordinates are already scaled to frame resolution by the inference element
+                    // No additional scaling needed
                     gst::debug!(
                         CAT,
                         obj = self.obj(),
-                        "Processing grid cell: original=({}, {}) {}x{} -> scaled=({}, {}) {}x{} score={:.1}% (scale_x={:.2}, scale_y={:.2}, model_size={}x{})",
+                        "Processing grid cell: ({}, {}) {}x{} score={:.1}% (already scaled to frame resolution)",
                         roi.x, roi.y, roi.width, roi.height,
-                        scaled_x, scaled_y, scaled_w, scaled_h,
-                        score * 100.0,
-                        scale_x, scale_y,
-                        settings.model_input_width, settings.model_input_height
+                        score * 100.0
                     );
-                    (scaled_x, scaled_y, scaled_w, scaled_h, score)
+                    (roi.x as i32, roi.y as i32, roi.width as i32, roi.height as i32, score)
                 })
                 .collect();
             (anomaly, grid)
@@ -584,7 +576,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
             // Draw visual anomaly grid
             for (x, y, width, height, score) in grid {
-                // Note: coordinates are already scaled from the grid creation
+                // Note: coordinates are already scaled to frame resolution by the inference element
                 // Normalize raw anomaly scores for visualization
                 // Use threshold (6.0) as reference point and scale to 0-1 range
                 let threshold = 6.0;

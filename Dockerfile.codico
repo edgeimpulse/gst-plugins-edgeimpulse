@@ -1,4 +1,7 @@
-FROM rust:1-bookworm
+FROM ubuntu:20.04
+
+# Set environment variables to avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install cross-compilation tools and dependencies
 RUN dpkg --add-architecture arm64 && \
@@ -12,7 +15,7 @@ RUN dpkg --add-architecture arm64 && \
     clang \
     cmake \
     make \
-    libstdc++-11-dev:arm64 \
+    libstdc++-8-dev:arm64 \
     libc6-dev:arm64 \
     curl \
     wget \
@@ -27,7 +30,7 @@ RUN dpkg --add-architecture arm64 && \
     libatk1.0-dev:arm64 \
     libgdk-pixbuf2.0-dev:arm64 \
     libgtk-3-dev:arm64 \
-    # GStreamer and GLib development packages for host (for examples)
+    # GStreamer and GLib development packages for host
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     gstreamer1.0-plugins-base \
@@ -58,15 +61,15 @@ RUN dpkg --add-architecture arm64 && \
     libatlas-base-dev \
     gfortran
 
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 WORKDIR /app
 
 # Install rustfmt for aarch64 target
 RUN rustup target add aarch64-unknown-linux-gnu && \
     rustup component add rustfmt
-
-# Create symlinks to make cargo and rustc available in PATH
-RUN ln -sf /usr/local/rustup/toolchains/*/bin/cargo /usr/local/bin/cargo && \
-    ln -sf /usr/local/rustup/toolchains/*/bin/rustc /usr/local/bin/rustc
 
 # Git SSH configuration
 RUN mkdir -p /root/.ssh && \
@@ -79,6 +82,9 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Set up environment for cross-compilation
 ENV TARGET_LINUX_AARCH64=1
 ENV USE_FULL_TFLITE=1
+ENV USE_QUALCOMM_QNN=1
+ENV EI_ENGINE=tflite
+ENV QNN_SDK_ROOT=/Users/msani/git_src/codico/qairt/2.26.0.240828/
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
 
@@ -91,11 +97,14 @@ echo "Building for aarch64-unknown-linux-gnu..."\n\
 # Set cross-compilation environment variables\n\
 export TARGET_LINUX_AARCH64=1\n\
 export USE_FULL_TFLITE=1\n\
+export USE_QUALCOMM_QNN=1\n\
+export EI_ENGINE=tflite\n\
+export QNN_SDK_ROOT=/Users/msani/git_src/codico/qairt/2.26.0.240828/\n\
 export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc\n\
 export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++\n\
 \n\
 # Build for aarch64 with FFI feature enabled\n\
-cargo build --target aarch64-unknown-linux-gnu --features ffi --release\n\
+cargo build --target aarch64-unknown-linux-gnu --features ffi --release --verbose \n\
 \n\
 # Build examples\n\
 echo "Building examples..."\n\

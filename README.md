@@ -304,35 +304,32 @@ export EI_MODEL="~/Downloads/new-model-directory"
 cargo build --release
 ```
 
-### Docker-based Cross Compilation
+## Docker-based Cross Compilation
 
-For cross-compilation to ARM64 Linux from macOS or other platforms, we provide a Docker-based setup:
+For cross-compilation to ARM64 Linux from macOS or other platforms, two Dockerfiles are provided:
 
-**Prerequisites:**
-- Docker and Docker Compose installed
+- `Dockerfile` (default): For Qualcomm RB3 Gen2 platform
+- `Dockerfile.codico`: For Codico Triple Camera box
 
-**Quick Start:**
+### Using Docker Compose
+
+You can build for either platform using the provided `docker-compose.yml` services:
+
+#### Qualcomm RB3 Gen2
 ```bash
-# Set up environment variables
-export EI_PROJECT_ID="your_project_id"
-export EI_API_KEY="your_api_key"
-export EI_MODEL="/path/to/your/model"  # Optional: for local models
-
-```bash
-# Build the Docker image
-docker-compose build
-
-# Build the plugin for ARM64
+docker-compose build aarch64-build
 docker-compose run --rm aarch64-build
+```
 
-# Test a specific example
-docker-compose run --rm aarch64-build bash -c "
-    ./target/aarch64-unknown-linux-gnu/release/examples/audio_inference --audio examples/assets/test_audio.wav
-"
+#### Codico Triple Camera box
+```bash
+docker-compose build codico-build
+docker-compose run --rm codico-build
 ```
 
 The compiled plugin will be available at `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.
 
+---
 ## Elements
 
 ### edgeimpulseaudioinfer

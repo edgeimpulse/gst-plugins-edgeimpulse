@@ -86,6 +86,7 @@ ENV USE_QUALCOMM_QNN=1
 ENV QNN_SDK_ROOT=/Users/msani/git_src/codico/qairt/2.26.0.240828/
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+ENV EI_ENGINE=tflite
 
 # Create a build script
 RUN echo '#!/bin/bash\n\
@@ -100,7 +101,7 @@ export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc\n\
 export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++\n\
 \n\
 # Build for aarch64 with FFI feature enabled\n\
-cargo build --target aarch64-unknown-linux-gnu --features ffi --release\n\
+cargo build --verbose --target aarch64-unknown-linux-gnu --features ffi --release\n\
 \n\
 # Build examples\n\
 echo "Building examples..."\n\

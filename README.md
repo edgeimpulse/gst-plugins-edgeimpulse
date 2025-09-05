@@ -317,26 +317,14 @@ You can build for either platform using the provided `docker-compose.yml` servic
 
 #### Qualcomm RB3 Gen2
 ```bash
+docker-compose build aarch64-build
 docker-compose run --rm aarch64-build
 ```
 
 #### Codico Triple Camera box
 ```bash
+docker-compose build codico-build
 docker-compose run --rm codico-build
-```
-
-### Manual Docker Build
-
-Alternatively, you can build manually with Docker:
-
-#### Qualcomm RB3 Gen2
-```bash
-docker build -f Dockerfile -t gst-plugins-edgeimpulse-rb3 .
-```
-
-#### Codico Triple Camera box
-```bash
-docker build -f Dockerfile.codico -t gst-plugins-edgeimpulse-codico .
 ```
 
 The compiled plugin will be available at `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.

@@ -47,7 +47,8 @@ The plugin exposes results and ingestion status through standardized mechanisms:
           "x": 24,
           "y": 145,
           "width": 352,
-          "height": 239
+          "height": 239,
+          "object_id": 1
         }
       ]
     }
@@ -55,6 +56,32 @@ The plugin exposes results and ingestion status through standardized mechanisms:
   ```
 - **Video Metadata:**
   - Each detected object is attached as a `VideoRegionOfInterestMeta` with bounding box coordinates, label, and confidence.
+  - When object tracking is enabled, the `object_id` field is also included to track objects across frames.
+
+#### 1.1. Object Tracking
+- **Bus Message Example:**
+  ```json
+  {
+    "timestamp": 1234567890,
+    "type": "object-tracking",
+    "result": {
+      "object_tracking": [
+        {
+          "label": "person",
+          "value": 0.95,
+          "x": 24,
+          "y": 145,
+          "width": 352,
+          "height": 239,
+          "object_id": 1
+        }
+      ]
+    }
+  }
+  ```
+- **Video Metadata:**
+  - Object tracking results are attached as `VideoRegionOfInterestMeta` with bounding box coordinates, label, confidence, and object_id.
+  - The `object_id` field allows tracking the same object across multiple frames.
 
 #### 2. Classification
 - **Bus Message Example:**
@@ -530,7 +557,7 @@ Video overlay element that visualizes inference results by drawing bounding boxe
 Element Details:
 - Long name: Edge Impulse Overlay
 - Class: Filter/Effect/Video
-- Description: Draws bounding boxes on video frames based on ROI metadata
+- Description: Draws bounding boxes on video frames based on ROI metadata, including object tracking IDs
 
 Pad Templates:
 - Sink/Source pads (Always available):
@@ -543,7 +570,7 @@ Pad Templates:
 
 Key features:
 - Draws bounding boxes for object detection and visual anomaly detection results (from VideoRegionOfInterestMeta)
-- Displays class labels with confidence scores
+- Displays class labels with confidence scores and object tracking IDs when available
 - Supports wide range of video formats
 - Automatic text sizing: Calculates optimal font size based on frame dimensions and bounding box sizes
 - Text scale control: Use `text-scale-ratio` property to fine-tune text size (0.1x to 5.0x scaling)

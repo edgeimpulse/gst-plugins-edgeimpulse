@@ -486,7 +486,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                 let width = meta.w as i32;
                 let height = meta.h as i32;
 
-                // Get label and confidence from parameters
+                // Get label, confidence, and object_id from parameters
                 let params_result = roi.params().find_map(|param| {
                     if param.name() != "detection" {
                         return None;
@@ -494,10 +494,13 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
                     let label = param.get::<String>("label").ok()?;
                     let confidence = param.get::<f64>("confidence").ok()?;
-                    Some((label, confidence))
+                    let object_id = param.get::<u64>("object_id").ok();
+                    Some((label, confidence, object_id))
                 });
 
-                params_result.map(|(label, confidence)| (x, y, width, height, label, confidence))
+                params_result.map(|(label, confidence, object_id)| {
+                    (x, y, width, height, label, confidence, object_id)
+                })
             })
             .collect();
 
@@ -640,12 +643,18 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
             );
 
             // Process each ROI
-            for (x, y, width, height, label, confidence) in rois {
+            for (x, y, width, height, label, confidence, object_id) in rois {
+                let display_label = if let Some(id) = object_id {
+                    format!("{} (ID: {})", label, id)
+                } else {
+                    label.clone()
+                };
+
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
                     "Rendering ROI: {} ({:.1}%) at ({}, {}) {}x{}",
-                    label,
+                    display_label,
                     confidence * 100.0,
                     x,
                     y,
@@ -653,13 +662,33 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                     height
                 );
 
-                // Get or assign color for this label
-                let color = if let Some(color) = label_colors.get(&label) {
+                // Get or assign color for this object (prefer object_id over label)
+                let color_key = if let Some(id) = object_id {
+                    format!("object_{}", id)
+                } else {
+                    label.clone()
+                };
+
+                let color = if let Some(color) = label_colors.get(&color_key) {
                     *color
                 } else {
                     let next_color = COLORS.get(label_colors.len() % COLORS.len()).unwrap();
                     let mut label_colors = self.label_colors.lock().unwrap();
-                    label_colors.insert(label.clone(), *next_color);
+                    label_colors.insert(color_key.clone(), *next_color);
+
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Assigned color {:?} to {} (key: {})",
+                        next_color,
+                        if object_id.is_some() {
+                            format!("object ID {}", object_id.unwrap())
+                        } else {
+                            format!("label '{}'", label)
+                        },
+                        color_key
+                    );
+
                     *next_color
                 };
 
@@ -670,7 +699,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
                         y,
                         width,
                         height,
-                        roi_type: label.clone(),
+                        roi_type: display_label.clone(),
                         color,
                     };
 
@@ -682,7 +711,7 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
 
                 // Draw label if enabled
                 if settings.show_labels {
-                    let text = format!("{} {:.1}%", label, confidence * 100.0);
+                    let text = format!("{} {:.1}%", display_label, confidence * 100.0);
                     let text_x = x + 2;
                     // Position the text just slightly below the top of the bounding box
                     let text_y = y + 2;

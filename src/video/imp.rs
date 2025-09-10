@@ -764,13 +764,20 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             gst::debug!(
                 CAT,
                 obj = self.obj(),
-                "Model parameters: width={}, height={}, channels={}, type={}, has_anomaly={:?}",
+                "Model parameters: width={}, height={}, channels={}, type={}, has_anomaly={:?}, has_object_tracking={}",
                 model_width,
                 model_height,
                 channels,
                 params.model_type,
-                params.has_anomaly
+                params.has_anomaly,
+                params.has_object_tracking
             );
+
+            // Model metadata available for debugging if needed
+            // Input size: {model_width}x{model_height}
+            // Model type: {params.model_type}
+            // Has anomaly detection: {params.has_anomaly}
+            // Has object tracking: {params.has_object_tracking}
 
             // Check if we need to resize the frame for the model
             let (frame_data, inference_width, inference_height, resize_time_ms) = if width
@@ -925,6 +932,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let result_json = serde_json::to_string(&result_value).unwrap();
             gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
 
+            // Raw inference result available for debugging if needed
+            // {result_json}
+
             // --- Handle visual anomaly detection metadata ---
             if let Some(grid) = result_value
                 .get("visual_anomaly_grid")
@@ -1018,14 +1028,111 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
             }
 
-            // --- Unified result handling: prefer object detection if bounding_boxes is present and non-empty ---
+            // --- Handle separate object_tracking field if present ---
+            if let Some(tracking_boxes) = result_value
+                .get("object_tracking")
+                .and_then(|b| b.as_array())
+            {
+                if !tracking_boxes.is_empty() {
+                    // Found object tracking field with {} objects
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Using object tracking results for ROI metadata: {} objects (smoothed coordinates)",
+                        tracking_boxes.len()
+                    );
+
+                    for bbox in tracking_boxes {
+                        if let (
+                            Some(label),
+                            Some(value),
+                            Some(x),
+                            Some(y),
+                            Some(bbox_width),
+                            Some(bbox_height),
+                            Some(object_id),
+                        ) = (
+                            bbox["label"].as_str(),
+                            bbox["value"].as_f64(),
+                            bbox["x"].as_u64(),
+                            bbox["y"].as_u64(),
+                            bbox["width"].as_u64(),
+                            bbox["height"].as_u64(),
+                            bbox["object_id"].as_u64(),
+                        ) {
+                            // Scale coordinates back to original resolution if frame was resized
+                            let (scaled_x, scaled_y, scaled_width, scaled_height) =
+                                if inference_width != width || inference_height != height {
+                                    scale_bounding_box(
+                                        x as u32,
+                                        y as u32,
+                                        bbox_width as u32,
+                                        bbox_height as u32,
+                                        inference_width,
+                                        inference_height,
+                                        width,
+                                        height,
+                                    )
+                                } else {
+                                    (x as u32, y as u32, bbox_width as u32, bbox_height as u32)
+                                };
+
+                            let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
+                                outbuf,
+                                label,
+                                (scaled_x, scaled_y, scaled_width, scaled_height),
+                            );
+                            let s = gst::Structure::builder("detection")
+                                .field("label", label)
+                                .field("confidence", value)
+                                .field("object_id", object_id)
+                                .build();
+                            roi_meta.add_param(s);
+
+                            gst::debug!(
+                                CAT,
+                                obj = self.obj(),
+                                "Added object tracking metadata: {} (ID: {}) at ({}, {}, {}, {})",
+                                label,
+                                object_id,
+                                scaled_x,
+                                scaled_y,
+                                scaled_width,
+                                scaled_height
+                            );
+                        }
+                    }
+
+                    let s = crate::common::create_inference_message(
+                        "video",
+                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        "object-tracking",
+                        result_json.clone(),
+                        elapsed.as_millis() as u32,
+                        resize_time_ms,
+                    );
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                }
+            }
+
+            // --- Unified result handling: prefer object_tracking over bounding_boxes if available ---
             // Use the already parsed result_value instead of parsing JSON again
+            let has_object_tracking = result_value
+                .get("object_tracking")
+                .and_then(|b| b.as_array())
+                .map_or(false, |arr| !arr.is_empty());
+
             if let Some(boxes) = result_value
                 .get("bounding_boxes")
                 .and_then(|b| b.as_array())
             {
-                if !boxes.is_empty() {
-                    // Object detection branch
+                if !boxes.is_empty() && !has_object_tracking {
+                    // Object detection branch - using raw bounding boxes (no object tracking available)
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Using raw bounding boxes for ROI metadata (object tracking not available)"
+                    );
                     for bbox in boxes {
                         if let (
                             Some(label),
@@ -1064,10 +1171,16 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 label,
                                 (scaled_x, scaled_y, scaled_width, scaled_height),
                             );
-                            let s = gst::Structure::builder("detection")
+                            let mut detection_struct = gst::Structure::builder("detection")
                                 .field("label", label)
-                                .field("confidence", value)
-                                .build();
+                                .field("confidence", value);
+
+                            // Add object_id if present (object tracking)
+                            if let Some(object_id) = bbox["object_id"].as_u64() {
+                                detection_struct = detection_struct.field("object_id", object_id);
+                            }
+
+                            let s = detection_struct.build();
                             roi_meta.add_param(s);
                         }
                     }

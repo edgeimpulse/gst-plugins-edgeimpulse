@@ -373,6 +373,12 @@ fn create_pipeline(args: &VideoClassifyParams) -> Result<gst::Pipeline, Box<dyn 
         .build()
         .expect("Could not create edgeimpulseoverlay element.");
 
+    println!("🎨 Overlay settings:");
+    println!("   📏 Stroke width: {}", args.stroke_width);
+    println!("   🎨 Text color: {}", args.text_color);
+    println!("   🎨 Background color: {}", args.background_color);
+    println!("   📏 Text scale ratio: {}", args.text_scale_ratio);
+
     let videoconvert2 = gst::ElementFactory::make("videoconvert")
         .property("n-threads", 4u32)
         .build()
@@ -480,12 +486,19 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                     println!("   📋 Project Name: {}", metadata.project_name);
                     println!("   👤 Project Owner: {}", metadata.project_owner);
                     println!("   🏷️  Deploy Version: {}", metadata.deploy_version);
+                    println!(
+                        "   🎯 Has Object Tracking: {}",
+                        metadata.has_object_tracking
+                    );
 
                     if let Ok(result) = structure.get::<String>("result") {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
                             if let Some(boxes) = json["bounding_boxes"].as_array() {
                                 println!("   🎯 Object detection model");
                                 println!("   📦 Bounding boxes: {} objects", boxes.len());
+                                if !metadata.has_object_tracking {
+                                    println!("   ⚠️  Object tracking not enabled in this model");
+                                }
                             } else if json.get("anomaly").is_some() {
                                 println!("   🔍 Anomaly detection model");
                             } else if let Some(classification) = json["classification"].as_object()
@@ -548,9 +561,40 @@ fn example_main() -> Result<(), Box<dyn Error>> {
                                     if let (Some(label), Some(value)) =
                                         (bbox["label"].as_str(), bbox["value"].as_f64())
                                     {
+                                        let object_id_info =
+                                            if let Some(object_id) = bbox["object_id"].as_u64() {
+                                                format!(" (ID: {})", object_id)
+                                            } else {
+                                                String::new()
+                                            };
+
                                         println!(
-                                            "  {}: {:.1}% (x: {}, y: {}, w: {}, h: {})",
+                                            "  {}{}: {:.1}% (x: {}, y: {}, w: {}, h: {})",
                                             label,
+                                            object_id_info,
+                                            value * 100.0,
+                                            bbox["x"].as_f64().unwrap_or(0.0),
+                                            bbox["y"].as_f64().unwrap_or(0.0),
+                                            bbox["width"].as_f64().unwrap_or(0.0),
+                                            bbox["height"].as_f64().unwrap_or(0.0)
+                                        );
+                                    }
+                                }
+                            }
+                            // Handle object tracking (separate field)
+                            else if let Some(tracking_boxes) = json["object_tracking"].as_array()
+                            {
+                                println!("Object tracking results:");
+                                for bbox in tracking_boxes {
+                                    if let (Some(label), Some(value), Some(object_id)) = (
+                                        bbox["label"].as_str(),
+                                        bbox["value"].as_f64(),
+                                        bbox["object_id"].as_u64(),
+                                    ) {
+                                        println!(
+                                            "  {} (ID: {}): {:.1}% (x: {}, y: {}, w: {}, h: {})",
+                                            label,
+                                            object_id,
                                             value * 100.0,
                                             bbox["x"].as_f64().unwrap_or(0.0),
                                             bbox["y"].as_f64().unwrap_or(0.0),

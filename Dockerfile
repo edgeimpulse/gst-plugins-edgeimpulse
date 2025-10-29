@@ -1,4 +1,4 @@
-FROM rust:latest
+FROM rust:1.90-slim-bullseye
 
 # Install cross-compilation tools and dependencies
 RUN dpkg --add-architecture arm64 && \
@@ -12,7 +12,7 @@ RUN dpkg --add-architecture arm64 && \
     clang \
     cmake \
     make \
-    libstdc++-11-dev:arm64 \
+    libstdc++-10-dev:arm64 \
     libc6-dev:arm64 \
     curl \
     wget \

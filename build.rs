@@ -116,14 +116,9 @@ pub const OVERLAY_TYPE_NAME: &str = "EdgeImpulseOverlay{}";
 #[allow(dead_code)]
 pub const SINK_TYPE_NAME: &str = "GstEdgeImpulseSink{}";
 "#,
-        plugin_variant,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix
+        plugin_variant, type_suffix, type_suffix, type_suffix, type_suffix
     );
-    std::fs::write(&type_names_path, type_names_code)
-        .expect("Failed to write type names file");
+    std::fs::write(&type_names_path, type_names_code).expect("Failed to write type names file");
 
     if !plugin_variant.is_empty() {
         println!("cargo:warning=PLUGIN_VARIANT is set to: {}", plugin_variant);

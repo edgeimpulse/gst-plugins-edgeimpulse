@@ -259,6 +259,111 @@ cargo build --release --no-default-features --features eim
   cargo cache -a
   ```
 
+#### Building Multiple Plugin Variants
+
+The plugin supports building multiple variants that can coexist in the same GStreamer installation. This is useful when you need to run different models or configurations in the same pipeline.
+
+**Why PLUGIN_VARIANT?**
+
+GStreamer identifies plugins by three key attributes:
+1. **Library filename**: The shared library file that contains the plugin
+2. **Plugin name**: The internal plugin identifier registered with GStreamer
+3. **Element names**: The names of individual elements (e.g., `edgeimpulsevideoinfer`)
+
+To allow multiple plugin builds to coexist, each variant must have unique values for all three. The `PLUGIN_VARIANT` environment variable automatically handles this by:
+
+- **Library naming**: After building, use the `rename-library.sh` script to rename the output library from `libgstedgeimpulse.{dylib,so,dll}` to `libgstedgeimpulse_{variant}.{dylib,so,dll}`
+- **Plugin naming**: The plugin name becomes `gst-plugins-edgeimpulse_{variant}` instead of just `gst-plugins-edgeimpulse`
+- **Element naming**: All elements are automatically suffixed with `_{variant}` (e.g., `edgeimpulsevideoinfer_variantX`, `edgeimpulseaudioinfer_variantX`, etc.)
+
+**Usage:**
+
+1. **Build with a variant:**
+   ```bash
+   # Build variant "variantX"
+   PLUGIN_VARIANT=variantX cargo build --release
+
+   # After build completes, rename the library
+   PLUGIN_VARIANT=variantX ./rename-library.sh
+   ```
+
+2. **Build multiple variants:**
+   ```bash
+   # Build first variant
+   PLUGIN_VARIANT=variantX \
+     EI_MODEL=~/Downloads/model-a \
+     EI_ENGINE=tflite \
+     USE_FULL_TFLITE=1 \
+     cargo build --release
+   PLUGIN_VARIANT=variantX ./rename-library.sh
+
+   # Build second variant (with different model or configuration)
+   PLUGIN_VARIANT=variantY \
+     EI_MODEL=~/Downloads/model-b \
+     EI_ENGINE=tflite \
+     USE_FULL_TFLITE=1 \
+     cargo build --release
+   PLUGIN_VARIANT=variantY ./rename-library.sh
+   ```
+
+3. **Use both variants in the same pipeline:**
+   ```bash
+   # Make sure both libraries are in GST_PLUGIN_PATH
+   export GST_PLUGIN_PATH="$(pwd)/target/release"
+
+   # Use elements from both variants
+   gst-launch-1.0 \
+     videotestsrc ! \
+     edgeimpulsevideoinfer_variantX ! \
+     edgeimpulseoverlay_variantX ! \
+     queue ! \
+     edgeimpulsevideoinfer_variantY ! \
+     edgeimpulseoverlay_variantY ! \
+     autovideosink
+   ```
+
+**Technical Details:**
+
+- The `PLUGIN_VARIANT` environment variable must be set during both the build and rename steps
+- The `rename-library.sh` script renames the output library from `libgstedgeimpulse.{dylib,so,dll}` to `libgstedgeimpulse_{variant}.{dylib,so,dll}`
+- Each variant produces a uniquely named library file, allowing GStreamer to load multiple variants simultaneously
+- Element names include the variant suffix, preventing naming conflicts when multiple variants are loaded
+
+**Example Workflow:**
+
+```bash
+# Build variant for model A
+PLUGIN_VARIANT=person-detection \
+  EI_MODEL=~/Downloads/person-detection-v140 \
+  EI_ENGINE=tflite \
+  USE_FULL_TFLITE=1 \
+  cargo build --release
+PLUGIN_VARIANT=person-detection ./rename-library.sh
+
+# Build variant for model B
+PLUGIN_VARIANT=anomaly-detection \
+  EI_MODEL=~/Downloads/anomaly-detection-v50 \
+  EI_ENGINE=tflite \
+  USE_FULL_TFLITE=1 \
+  cargo build --release
+PLUGIN_VARIANT=anomaly-detection ./rename-library.sh
+
+# Both libraries will be in target/release:
+# - libgstedgeimpulse_person-detection.dylib
+# - libgstedgeimpulse_anomaly-detection.dylib
+
+# Use both in a pipeline
+export GST_PLUGIN_PATH="$(pwd)/target/release"
+gst-launch-1.0 \
+  videotestsrc ! \
+  edgeimpulsevideoinfer_person-detection ! \
+  edgeimpulseoverlay_person-detection ! \
+  queue ! \
+  edgeimpulsevideoinfer_anomaly-detection ! \
+  edgeimpulseoverlay_anomaly-detection ! \
+  autovideosink
+```
+
 #### Environment Variables
 
 **Required for FFI Mode:**
@@ -272,11 +377,11 @@ cargo build --release --no-default-features --features eim
 
 **Platform-Specific Variables:**
 - `TARGET`: Standard Rust target triple (e.g., `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`)
-- `TARGET_MAC_ARM64=1`: Build for Apple Silicon (M1/M2/M3) - legacy
-- `TARGET_MAC_X86_64=1`: Build for Intel Mac - legacy
-- `TARGET_LINUX_X86=1`: Build for Linux x86_64 - legacy
-- `TARGET_LINUX_AARCH64=1`: Build for Linux ARM64 - legacy
-- `TARGET_LINUX_ARMV7=1`: Build for Linux ARMv7 - legacy
+- `TARGET_MAC_ARM64=1`: Build for Apple Silicon (M1/M2/M3)
+- `TARGET_MAC_X86_64=1`: Build for Intel Mac
+- `TARGET_LINUX_X86=1`: Build for Linux x86_64
+- `TARGET_LINUX_AARCH64=1`: Build for Linux ARM64
+- `TARGET_LINUX_ARMV7=1`: Build for Linux ARMv7
 
 **Example:**
 ```bash

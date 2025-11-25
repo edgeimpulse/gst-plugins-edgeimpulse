@@ -196,6 +196,9 @@
 //! ```
 //!
 
+// Include generated type names for variant-specific builds
+include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
+
 use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -215,8 +218,14 @@ use super::VideoAnomalyMeta;
 use super::VideoClassificationMeta;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulsevideoinfer".to_string()
+    } else {
+        format!("edgeimpulsevideoinfer_{}", variant)
+    };
     gst::DebugCategory::new(
-        "edgeimpulsevideoinfer",
+        &name,
         gst::DebugColorFlags::empty(),
         Some("Edge Impulse Video Inference"),
     )
@@ -477,7 +486,7 @@ pub struct EdgeImpulseVideoInfer {
 // This macro implements ObjectSubclassType and other required traits
 #[glib::object_subclass]
 impl ObjectSubclass for EdgeImpulseVideoInfer {
-    const NAME: &'static str = "EdgeImpulseVideoInfer";
+    const NAME: &'static str = VIDEO_INFER_TYPE_NAME;
     type Type = super::EdgeImpulseVideoInfer;
     type ParentType = gstreamer_base::BaseTransform;
 }

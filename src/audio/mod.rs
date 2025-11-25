@@ -17,9 +17,15 @@ unsafe impl Sync for EdgeImpulseAudioInfer {}
 
 // Register the type for our element
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulseaudioinfer".to_string()
+    } else {
+        format!("edgeimpulseaudioinfer_{}", variant)
+    };
     gst::Element::register(
         Some(plugin),
-        "edgeimpulseaudioinfer",
+        &name,
         gst::Rank::NONE,
         EdgeImpulseAudioInfer::static_type(),
     )

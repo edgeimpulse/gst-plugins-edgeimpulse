@@ -15,14 +15,6 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     Ok(())
 }
 
-gst::plugin_define!(
-    edgeimpulse,
-    env!("CARGO_PKG_DESCRIPTION"),
-    plugin_init,
-    concat!(env!("CARGO_PKG_VERSION")),
-    "MIT/X11",
-    env!("CARGO_PKG_NAME"),
-    env!("CARGO_PKG_NAME"),
-    "https://github.com/edgeimpulse/gst-plugins-edgeimpulse",
-    env!("BUILD_REL_DATE")
-);
+// Include the dynamically generated plugin definition from build.rs
+// This ensures the registration function name matches what GStreamer expects
+include!(concat!(env!("OUT_DIR"), "/plugin_define.rs"));

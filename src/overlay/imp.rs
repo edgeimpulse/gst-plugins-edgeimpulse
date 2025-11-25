@@ -62,8 +62,14 @@ use std::sync::Mutex;
 use crate::video::{VideoAnomalyMeta, VideoClassificationMeta};
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulseoverlay".to_string()
+    } else {
+        format!("edgeimpulseoverlay_{}", variant)
+    };
     gst::DebugCategory::new(
-        "edgeimpulseoverlay",
+        &name,
         gst::DebugColorFlags::empty(),
         Some("Edge Impulse Overlay Element"),
     )
@@ -144,9 +150,12 @@ pub struct EdgeImpulseOverlay {
     label_colors: Mutex<std::collections::HashMap<String, (u8, u8, u8)>>,
 }
 
+// Include generated type names for variant-specific builds
+include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
+
 #[glib::object_subclass]
 impl ObjectSubclass for EdgeImpulseOverlay {
-    const NAME: &'static str = "EdgeImpulseOverlay";
+    const NAME: &'static str = OVERLAY_TYPE_NAME;
     type Type = super::EdgeImpulseOverlay;
     type ParentType = gst_video::VideoFilter;
 }

@@ -46,9 +46,15 @@ unsafe impl Send for EdgeImpulseSink {}
 unsafe impl Sync for EdgeImpulseSink {}
 
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulsesink".to_string()
+    } else {
+        format!("edgeimpulsesink_{}", variant)
+    };
     gst::Element::register(
         Some(plugin),
-        "edgeimpulsesink",
+        &name,
         gst::Rank::NONE,
         EdgeImpulseSink::static_type(),
     )

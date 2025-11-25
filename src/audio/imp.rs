@@ -100,9 +100,18 @@ use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+// Include generated type names for variant-specific builds
+include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
+
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulseaudioinfer".to_string()
+    } else {
+        format!("edgeimpulseaudioinfer_{}", variant)
+    };
     gst::DebugCategory::new(
-        "edgeimpulseaudioinfer",
+        &name,
         gst::DebugColorFlags::empty(),
         Some("Edge Impulse Audio Inference"),
     )
@@ -170,7 +179,7 @@ pub struct EdgeImpulseAudioInfer {
 
 #[glib::object_subclass]
 impl ObjectSubclass for EdgeImpulseAudioInfer {
-    const NAME: &'static str = "EdgeImpulseAudioInfer";
+    const NAME: &'static str = AUDIO_INFER_TYPE_NAME;
     type Type = super::EdgeImpulseAudioInfer;
     type ParentType = gstreamer_base::BaseTransform;
 }

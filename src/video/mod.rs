@@ -18,9 +18,15 @@ unsafe impl Send for EdgeImpulseVideoInfer {}
 unsafe impl Sync for EdgeImpulseVideoInfer {}
 
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulsevideoinfer".to_string()
+    } else {
+        format!("edgeimpulsevideoinfer_{}", variant)
+    };
     gst::Element::register(
         Some(plugin),
-        "edgeimpulsevideoinfer",
+        &name,
         gst::Rank::NONE,
         EdgeImpulseVideoInfer::static_type(),
     )

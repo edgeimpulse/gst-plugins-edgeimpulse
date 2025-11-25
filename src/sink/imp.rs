@@ -15,8 +15,14 @@ use std::time::Instant;
 use tempfile::NamedTempFile;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    let variant = env!("PLUGIN_VARIANT");
+    let name = if variant.is_empty() {
+        "edgeimpulsesink".to_string()
+    } else {
+        format!("edgeimpulsesink_{}", variant)
+    };
     gst::DebugCategory::new(
-        "edgeimpulsesink",
+        &name,
         gst::DebugColorFlags::empty(),
         Some("Edge Impulse Sink"),
     )
@@ -103,9 +109,12 @@ fn post_ingestion_error(
     let _ = obj.post_message(gst::message::Element::new(s));
 }
 
+// Include generated type names for variant-specific builds
+include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
+
 #[glib::object_subclass]
 impl ObjectSubclass for EdgeImpulseSink {
-    const NAME: &'static str = "GstEdgeImpulseSink";
+    const NAME: &'static str = SINK_TYPE_NAME;
     type Type = super::EdgeImpulseSink;
     type ParentType = gst_base::BaseSink;
 }

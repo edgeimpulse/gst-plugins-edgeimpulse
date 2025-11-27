@@ -32,7 +32,7 @@ regex = "1.10.3"
 serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
-edge-impulse-runner = { git = "https://github.com/edgeimpulse/edge-impulse-runner-rs.git", rev = "ec5f6ea", default-features = false }
+edge-impulse-runner = { git = "https://github.com/edgeimpulse/edge-impulse-runner-rs.git", rev = "124523c", default-features = false }
 tempfile = "3.10"
 
 [dev-dependencies]

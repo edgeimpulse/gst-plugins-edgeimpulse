@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "edge-impulse-ffi-rs"
 version = "0.1.0"
-source = "git+https://github.com/edgeimpulse/edge-impulse-ffi-rs.git?rev=eb078d5#eb078d5c7e7dc3775869f2b9df25bbd4ec179622"
+source = "git+https://github.com/edgeimpulse/edge-impulse-ffi-rs.git?rev=5c87783#5c87783d8b355cf957c48e12ed69a709eec2d3fe"
 dependencies = [
  "bindgen",
  "cc",
@@ -536,7 +536,7 @@ dependencies = [
 [[package]]
 name = "edge-impulse-runner"
 version = "2.0.0"
-source = "git+https://github.com/edgeimpulse/edge-impulse-runner-rs.git?rev=c3197a1#c3197a1dde84c37384a4151ba85917cf2a3a727c"
+source = "git+https://github.com/edgeimpulse/edge-impulse-runner-rs.git?rev=c8cd1d8#c8cd1d812eb34a323d80218f8001ac4f25de8a45"
 dependencies = [
  "edge-impulse-ffi-rs",
  "hex",

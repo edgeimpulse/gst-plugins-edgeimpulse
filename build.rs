@@ -115,8 +115,28 @@ pub const AUDIO_INFER_TYPE_NAME: &str = "EdgeImpulseAudioInfer{}";
 pub const OVERLAY_TYPE_NAME: &str = "EdgeImpulseOverlay{}";
 #[allow(dead_code)]
 pub const SINK_TYPE_NAME: &str = "GstEdgeImpulseSink{}";
+
+// Metadata GType names (API types)
+#[allow(dead_code)]
+pub const VIDEO_CLASSIFICATION_META_API_NAME: &str = "VideoClassificationMetaAPI{}";
+#[allow(dead_code)]
+pub const VIDEO_ANOMALY_META_API_NAME: &str = "VideoAnomalyMetaAPI{}";
+
+// Metadata GType names (implementation types)
+#[allow(dead_code)]
+pub const VIDEO_CLASSIFICATION_META_NAME: &str = "VideoClassificationMeta{}";
+#[allow(dead_code)]
+pub const VIDEO_ANOMALY_META_NAME: &str = "VideoAnomalyMeta{}";
 "#,
-        plugin_variant, type_suffix, type_suffix, type_suffix, type_suffix
+        plugin_variant,
+        type_suffix,
+        type_suffix,
+        type_suffix,
+        type_suffix,
+        type_suffix,
+        type_suffix,
+        type_suffix,
+        type_suffix
     );
     std::fs::write(&type_names_path, type_names_code).expect("Failed to write type names file");
 

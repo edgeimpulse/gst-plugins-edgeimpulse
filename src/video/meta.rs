@@ -154,8 +154,12 @@ mod imp {
     use glib::translate::*;
     use gstreamer as gst;
     use once_cell::sync::Lazy;
+    use std::ffi::CString;
     use std::mem;
     use std::ptr;
+
+    // Include generated type names for variant-specific builds
+    include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
     // This is the C type that is actually stored as meta inside the buffers
     #[repr(C)]
@@ -177,8 +181,10 @@ mod imp {
     // Function to register the meta API and get a type back
     pub(super) fn video_classification_meta_api_get_type() -> glib::Type {
         static TYPE: Lazy<glib::Type> = Lazy::new(|| unsafe {
+            let name = CString::new(VIDEO_CLASSIFICATION_META_API_NAME)
+                .expect("Failed to create CString for VideoClassificationMetaAPI");
             let t = from_glib(gst::ffi::gst_meta_api_type_register(
-                c"VideoClassificationMetaAPI".as_ptr() as *const _,
+                name.as_ptr() as *const _,
                 [ptr::null::<std::os::raw::c_char>()].as_ptr() as *mut *const _,
             ));
 
@@ -192,8 +198,10 @@ mod imp {
 
     pub(super) fn video_anomaly_meta_api_get_type() -> glib::Type {
         static TYPE: Lazy<glib::Type> = Lazy::new(|| unsafe {
+            let name = CString::new(VIDEO_ANOMALY_META_API_NAME)
+                .expect("Failed to create CString for VideoAnomalyMetaAPI");
             let t = from_glib(gst::ffi::gst_meta_api_type_register(
-                c"VideoAnomalyMetaAPI".as_ptr() as *const _,
+                name.as_ptr() as *const _,
                 [ptr::null::<std::os::raw::c_char>()].as_ptr() as *mut *const _,
             ));
 
@@ -299,10 +307,12 @@ mod imp {
         unsafe impl Sync for MetaInfo {}
 
         static META_INFO: Lazy<MetaInfo> = Lazy::new(|| unsafe {
+            let name = CString::new(VIDEO_CLASSIFICATION_META_NAME)
+                .expect("Failed to create CString for VideoClassificationMeta");
             MetaInfo(
                 ptr::NonNull::new(gst::ffi::gst_meta_register(
                     video_classification_meta_api_get_type().into_glib(),
-                    c"VideoClassificationMeta".as_ptr() as *const _,
+                    name.as_ptr() as *const _,
                     mem::size_of::<VideoClassificationMeta>(),
                     Some(video_classification_meta_init),
                     Some(video_classification_meta_free),
@@ -321,10 +331,12 @@ mod imp {
         unsafe impl Sync for MetaInfo {}
 
         static META_INFO: Lazy<MetaInfo> = Lazy::new(|| unsafe {
+            let name = CString::new(VIDEO_ANOMALY_META_NAME)
+                .expect("Failed to create CString for VideoAnomalyMeta");
             MetaInfo(
                 ptr::NonNull::new(gst::ffi::gst_meta_register(
                     video_anomaly_meta_api_get_type().into_glib(),
-                    c"VideoAnomalyMeta".as_ptr() as *const _,
+                    name.as_ptr() as *const _,
                     mem::size_of::<VideoAnomalyMeta>(),
                     Some(video_anomaly_meta_init),
                     Some(video_anomaly_meta_free),

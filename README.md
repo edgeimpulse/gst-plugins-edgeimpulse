@@ -463,6 +463,32 @@ docker-compose run --rm aarch64-build bash -c "
 "
 ```
 
+**Building with Qualcomm QNN Support:**
+
+To cross-compile with Qualcomm QNN (HTP/DSP) acceleration, provide the QNN SDK URL at Docker build time:
+
+```bash
+# Build Docker image with QNN SDK
+QNN_SDK_URL=https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/2.39.0.250926/v2.39.0.250926.zip \
+  docker compose build
+
+# Cross-compile with QNN enabled
+EI_MODEL=~/Downloads/your-model \
+  EI_ENGINE=tflite \
+  USE_FULL_TFLITE=1 \
+  USE_QUALCOMM_QNN=1 \
+  docker compose up aarch64-build
+```
+
+**Docker QNN Environment Variables:**
+
+| Variable | Where | Description |
+|---|---|---|
+| `QNN_SDK_URL` | Build arg | URL to download the QNN SDK zip at Docker build time |
+| `QNN_SDK_VERSION` | Build arg | QNN SDK version (default: `2.39.0.250926`) |
+| `QNN_SDK_ROOT` | Runtime env | Path to QNN SDK inside the container (default: `/opt/qairt/<version>`) |
+| `USE_QUALCOMM_QNN` | Runtime env | Set to `1` to enable QNN acceleration |
+
 The compiled plugin will be available at `target/aarch64-unknown-linux-gnu/release/libgstedgeimpulse.so`.
 
 ## Elements

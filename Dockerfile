@@ -58,6 +58,21 @@ RUN dpkg --add-architecture arm64 && \
     libatlas-base-dev \
     gfortran
 
+# Add QNN SDK for building with Qualcomm QNN support
+# Either provide QNN_SDK_URL to download at build time, or mount the SDK via docker-compose
+ARG QNN_SDK_VERSION=2.39.0.250926
+ARG QNN_SDK_URL=""
+RUN if [ -n "$QNN_SDK_URL" ]; then \
+        echo "Downloading QNN SDK from $QNN_SDK_URL..." && \
+        wget -q "$QNN_SDK_URL" -O /tmp/qnn-sdk.zip && \
+        unzip -q /tmp/qnn-sdk.zip -d /opt && \
+        rm /tmp/qnn-sdk.zip; \
+    else \
+        echo "No QNN_SDK_URL provided. Mount QNN SDK via docker-compose or set USE_QUALCOMM_QNN=0"; \
+    fi
+
+ENV QNN_SDK_ROOT=/opt/qairt/${QNN_SDK_VERSION}
+
 WORKDIR /app
 
 # Install rustfmt for aarch64 target

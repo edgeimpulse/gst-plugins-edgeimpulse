@@ -536,7 +536,7 @@ dependencies = [
 [[package]]
 name = "edge-impulse-runner"
 version = "2.0.0"
-source = "git+https://github.com/edgeimpulse/edge-impulse-runner-rs.git?rev=73b2add#73b2adde3aa886ec2a4daa8cab939340164acce3"
+source = "git+https://github.com/edgeimpulse/edge-impulse-runner-rs.git?rev=21449c2#21449c26f13f848235d9eaea42a3ced846732853"
 dependencies = [
  "edge-impulse-ffi-rs",
  "hex",

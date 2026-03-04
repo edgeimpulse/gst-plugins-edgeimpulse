@@ -5,6 +5,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        - QNN_SDK_URL=${QNN_SDK_URL:-}
+        - QNN_SDK_VERSION=${QNN_SDK_VERSION:-2.39.0.250926}
     volumes:
       # Mount the current directory to /app
       - .:/app
@@ -24,6 +27,7 @@ services:
       - EI_ENGINE=${EI_ENGINE:-tflite}
       - USE_FULL_TFLITE=${USE_FULL_TFLITE:-}
       - USE_QUALCOMM_QNN=${USE_QUALCOMM_QNN:-}
+      - QNN_SDK_ROOT=${QNN_SDK_ROOT:-/opt/qairt/2.39.0.250926}
       - TARGET_LINUX_AARCH64=1
       - CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
       - CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++

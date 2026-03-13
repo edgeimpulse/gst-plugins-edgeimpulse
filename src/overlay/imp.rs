@@ -291,7 +291,8 @@ impl ElementImpl for EdgeImpulseOverlay {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-            let caps = gst::Caps::builder("video/x-raw")
+            // System memory caps
+            let sys_caps = gst::Caps::builder("video/x-raw")
                 .field(
                     "format",
                     gst::List::new([
@@ -302,6 +303,20 @@ impl ElementImpl for EdgeImpulseOverlay {
                 .field("width", gst::IntRange::new(1, i32::MAX))
                 .field("height", gst::IntRange::new(1, i32::MAX))
                 .build();
+
+            // GBM memory caps (NV12 from Qualcomm camera)
+            let mut gbm_caps = gst::Caps::builder("video/x-raw")
+                .field("format", gst::List::new(["NV12"]))
+                .field("width", gst::IntRange::new(1, i32::MAX))
+                .field("height", gst::IntRange::new(1, i32::MAX))
+                .build();
+            {
+                let gbm_caps_ref = gbm_caps.make_mut();
+                gbm_caps_ref.set_features(0, Some(gst::CapsFeatures::new(["memory:GBM"])));
+            }
+
+            let mut caps = sys_caps;
+            caps.merge(gbm_caps);
 
             vec![
                 gst::PadTemplate::new(

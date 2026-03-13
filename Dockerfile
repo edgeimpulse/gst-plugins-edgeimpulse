@@ -27,6 +27,8 @@ RUN dpkg --add-architecture arm64 && \
     libatk1.0-dev:arm64 \
     libgdk-pixbuf2.0-dev:arm64 \
     libgtk-3-dev:arm64 \
+    libgbm-dev:arm64 \
+    libdrm-dev:arm64 \
     # GStreamer and GLib development packages for host (for examples)
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \

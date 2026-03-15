@@ -7,7 +7,7 @@
 //!
 //! # Video Processing Flow
 //! 1. The element receives RGB video frames
-//! 2. Input frames are copied directly to output (always)
+//! 2. Frames are passed through in-place (no copy)
 //! 3. If a model is loaded, frames are also:
 //!    - Mapped to raw RGB data
 //!    - Resized to match model input requirements if needed (internal resize)
@@ -214,6 +214,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use super::meta::VideoRegionOfInterestMeta;
+use super::nv12;
 use super::VideoAnomalyMeta;
 use super::VideoClassificationMeta;
 
@@ -245,6 +246,9 @@ pub struct VideoState {
     /// Format of the input frames
     pub format: Option<VideoFormat>,
 
+    /// Stride of the Y plane (for NV12 with padding)
+    pub stride: Option<u32>,
+
     /// Debug mode flag for FFI mode (lazy initialization)
     #[cfg(feature = "ffi")]
     pub debug_enabled: bool,
@@ -257,6 +261,7 @@ impl Default for VideoState {
             width: None,
             height: None,
             format: None,
+            stride: None,
             #[cfg(feature = "ffi")]
             debug_enabled: false,
         }
@@ -545,11 +550,26 @@ impl ElementImpl for EdgeImpulseVideoInfer {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-            let caps = gst::Caps::builder("video/x-raw")
-                .field("format", gst::List::new(["RGB", "GRAY8"]))
+            // System memory caps: RGB, GRAY8, NV12
+            let sys_caps = gst::Caps::builder("video/x-raw")
+                .field("format", gst::List::new(["RGB", "GRAY8", "NV12"]))
                 .field("width", gst::IntRange::new(1, i32::MAX))
                 .field("height", gst::IntRange::new(1, i32::MAX))
                 .build();
+
+            // GBM memory caps: NV12 only (Qualcomm camera output)
+            let mut gbm_caps = gst::Caps::builder("video/x-raw")
+                .field("format", gst::List::new(["NV12"]))
+                .field("width", gst::IntRange::new(1, i32::MAX))
+                .field("height", gst::IntRange::new(1, i32::MAX))
+                .build();
+            {
+                let gbm_caps_ref = gbm_caps.make_mut();
+                gbm_caps_ref.set_features(0, Some(gst::CapsFeatures::new(["memory:GBM"])));
+            }
+
+            let mut caps = sys_caps;
+            caps.merge(gbm_caps);
 
             vec![
                 gst::PadTemplate::new(
@@ -573,11 +593,11 @@ impl ElementImpl for EdgeImpulseVideoInfer {
 }
 
 impl BaseTransformImpl for EdgeImpulseVideoInfer {
-    /// Configure transform to never operate in-place
-    const MODE: BaseTransformMode = BaseTransformMode::NeverInPlace;
+    /// Configure transform to always operate in-place
+    const MODE: BaseTransformMode = BaseTransformMode::AlwaysInPlace;
     /// Allow pass-through when caps are unchanged
     const PASSTHROUGH_ON_SAME_CAPS: bool = false;
-    /// Don't transform in-place even in passthrough mode
+    /// Transform in-place even in passthrough mode
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
     /// Get the size of one unit for the given caps
@@ -592,18 +612,17 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         Some(info.size())
     }
 
-    /// Process a single video frame
+    /// Process a single video frame in-place
     ///
     /// This function is called for each frame in the video stream. It either:
     /// 1. Passes the frame through unchanged if no model is loaded
     /// 2. Performs inference on the frame if a model is loaded
     ///
-    /// The original frame is always copied to the output to maintain the video
-    /// stream, while inference results can be emitted as messages or signals.
-    fn transform(
+    /// The buffer is operated on in-place — pixel data is only read for
+    /// inference, and results are attached as metadata.
+    fn transform_ip(
         &self,
-        inbuf: &gst::Buffer,
-        outbuf: &mut gst::BufferRef,
+        buf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         // Get all state values upfront to minimize mutex lock time
         let (width, height, format, model) = {
@@ -702,23 +721,46 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             (width, height, format, model)
         };
 
-        // Map the input buffer for reading (keep it mapped for inference)
-        let in_map = inbuf.map_readable().map_err(|_| {
-            gst::error!(CAT, imp = self, "Failed to map input buffer readable");
+        // Map the buffer for reading (keep it mapped for inference)
+        let in_map = buf.map_readable().map_err(|_| {
+            gst::error!(CAT, imp = self, "Failed to map buffer readable");
             gst::FlowError::Error
         })?;
 
-        // Map the output buffer for writing
-        let mut out_map = outbuf.map_writable().map_err(|_| {
-            gst::error!(CAT, imp = self, "Failed to map output buffer writable");
-            gst::FlowError::Error
-        })?;
+        // Get stride from VideoMeta if available (GBM buffers often have padding).
+        // Fall back to the caps-level stride from set_caps, or 0 (meaning width) as last resort.
+        let state_stride = {
+            let state = self.state.lock().unwrap();
+            state.stride.unwrap_or(0) as usize
+        };
+        let stride = buf
+            .meta::<gst_video::VideoMeta>()
+            .map(|vm| vm.stride()[0] as usize)
+            .unwrap_or(state_stride);
 
-        // Copy the input buffer to the output buffer
-        out_map.copy_from_slice(&in_map);
+        // Convert to RGB working data for inference
+        let rgb_data = match format {
+            Some(VideoFormat::Nv12) => {
+                let convert_start = Instant::now();
+                let rgb = nv12::nv12_to_rgb(&in_map, width as usize, height as usize, stride);
+                let convert_time = convert_start.elapsed();
+                gst::debug!(
+                    CAT,
+                    obj = self.obj(),
+                    "NV12→RGB conversion: {}x{} in {:.1}ms",
+                    width, height,
+                    convert_time.as_secs_f64() * 1000.0
+                );
+                rgb
+            }
+            _ => {
+                // RGB or GRAY8: copy the mapped data since we need to drop the map before metadata attachment
+                in_map.to_vec()
+            }
+        };
 
-        // Drop output mapping but keep input mapping for inference
-        drop(out_map);
+        // Drop the buffer map — we have our own copy of the data for inference
+        drop(in_map);
 
         if let Some(mut model) = model {
             gst::debug!(CAT, obj = self.obj(), "Model loaded, running inference");
@@ -806,7 +848,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 // Time the resizing operation
                 let resize_start = Instant::now();
                 let resized_data = if format == Some(VideoFormat::Gray8) {
-                    resize_gray_image(&in_map, width, height, model_width, model_height).map_err(
+                    resize_gray_image(&rgb_data, width, height, model_width, model_height).map_err(
                         |e| {
                             gst::error!(
                                 CAT,
@@ -818,7 +860,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         },
                     )?
                 } else {
-                    resize_rgb_image(&in_map, width, height, model_width, model_height).map_err(
+                    resize_rgb_image(&rgb_data, width, height, model_width, model_height).map_err(
                         |e| {
                             gst::error!(CAT, obj = self.obj(), "Failed to resize RGB frame: {}", e);
                             gst::FlowError::Error
@@ -848,7 +890,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     width,
                     height
                 );
-                (in_map.to_vec(), width, height, 0u32)
+                (rgb_data, width, height, 0u32)
             };
 
             // Pre-allocate features vector with exact capacity
@@ -856,7 +898,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let mut features = Vec::with_capacity(pixel_count);
 
             // Optimized feature conversion - avoid redundant VideoFrameRef creation
-            if format == Some(VideoFormat::Gray8) {
+            // NV12 data has already been converted to RGB above, so it follows the RGB path
+            let is_grayscale = format == Some(VideoFormat::Gray8);
+            if is_grayscale {
                 // For grayscale images, create RGB values by repeating the grayscale value
                 features.extend(frame_data.iter().map(|&pixel| {
                     // Create 24-bit RGB value: 0xRRGGBB where R=G=B=pixel
@@ -882,7 +926,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     gst::error!(CAT, obj = self.obj(), "Inference failed: {}", e);
                     let s = crate::common::create_error_message(
                         "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        buf.pts().unwrap_or(gst::ClockTime::ZERO),
                         e.to_string(),
                     );
                     let _ = self.obj().post_message(gst::message::Element::new(s));
@@ -951,7 +995,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             {
                 if !grid.is_empty() {
                     // Create VideoAnomalyMeta for visual anomaly detection
-                    let mut anomaly_meta = VideoAnomalyMeta::add(outbuf);
+                    let mut anomaly_meta = VideoAnomalyMeta::add(buf);
 
                     // Set anomaly values from the result
                     if let Some(anomaly) = result_value.get("anomaly").and_then(|a| a.as_f64()) {
@@ -1027,7 +1071,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     // Post inference message for visual anomaly detection
                     let s = crate::common::create_inference_message(
                         "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        buf.pts().unwrap_or(gst::ClockTime::ZERO),
                         "visual-anomaly",
                         result_json.clone(),
                         elapsed.as_millis() as u32,
@@ -1087,7 +1131,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 };
 
                             let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
-                                outbuf,
+                                buf,
                                 label,
                                 (scaled_x, scaled_y, scaled_width, scaled_height),
                             );
@@ -1114,7 +1158,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
 
                     let s = crate::common::create_inference_message(
                         "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        buf.pts().unwrap_or(gst::ClockTime::ZERO),
                         "object-tracking",
                         result_json.clone(),
                         elapsed.as_millis() as u32,
@@ -1176,7 +1220,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 };
 
                             let mut roi_meta = gst_video::VideoRegionOfInterestMeta::add(
-                                outbuf,
+                                buf,
                                 label,
                                 (scaled_x, scaled_y, scaled_width, scaled_height),
                             );
@@ -1195,7 +1239,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     }
                     let s = crate::common::create_inference_message(
                         "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        buf.pts().unwrap_or(gst::ClockTime::ZERO),
                         "object-detection",
                         result_json,
                         elapsed.as_millis() as u32,
@@ -1219,7 +1263,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                             }
                         }
                         if let Some(label) = best_label {
-                            let mut meta = VideoClassificationMeta::add(outbuf);
+                            let mut meta = VideoClassificationMeta::add(buf);
                             let s = gst::Structure::builder("classification")
                                 .field("label", label)
                                 .field("confidence", best_confidence)
@@ -1236,7 +1280,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     }
                     let s = crate::common::create_inference_message(
                         "video",
-                        inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                        buf.pts().unwrap_or(gst::ClockTime::ZERO),
                         "classification",
                         result_json,
                         elapsed.as_millis() as u32,
@@ -1261,7 +1305,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         }
                     }
                     if let Some(label) = best_label {
-                        let mut meta = VideoClassificationMeta::add(outbuf);
+                        let mut meta = VideoClassificationMeta::add(buf);
                         let s = gst::Structure::builder("classification")
                             .field("label", label)
                             .field("confidence", best_confidence)
@@ -1278,7 +1322,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
                 let s = crate::common::create_inference_message(
                     "video",
-                    inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
+                    buf.pts().unwrap_or(gst::ClockTime::ZERO),
                     "classification",
                     result_json,
                     elapsed.as_millis() as u32,
@@ -1313,9 +1357,6 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 );
             }
         }
-
-        // Drop the input mapping at the end
-        drop(in_map);
 
         Ok(gst::FlowSuccess::Ok)
     }
@@ -1352,6 +1393,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         state.width = Some(in_info.width());
         state.height = Some(in_info.height());
         state.format = Some(in_info.format());
+        state.stride = Some(in_info.stride()[0] as u32);
 
         Ok(())
     }
@@ -1364,7 +1406,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         &self,
         direction: gst::PadDirection,
         caps: &gst::Caps,
-        _filter: Option<&gst::Caps>,
+        filter: Option<&gst::Caps>,
     ) -> Option<gst::Caps> {
         gst::debug!(
             CAT,
@@ -1372,7 +1414,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             "Transform caps called with direction {:?}",
             direction
         );
-        Some(caps.clone())
+        let result = caps.clone();
+        if let Some(filter) = filter {
+            Some(result.intersect_with_mode(filter, gst::CapsIntersectMode::First))
+        } else {
+            Some(result)
+        }
     }
 }
 

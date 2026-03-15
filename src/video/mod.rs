@@ -1,5 +1,6 @@
 mod imp;
 mod meta;
+mod nv12;
 
 use gstreamer as gst;
 use gstreamer::glib;

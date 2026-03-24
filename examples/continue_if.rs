@@ -96,19 +96,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let src = create_video_source(&args.source, args.num_frames)?;
 
+    let queue_src = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 8u32)
+        .property_from_str("leaky", "downstream")
+        .build()?;
+
+    let convert = gst::ElementFactory::make("videoconvert")
+        .property("n-threads", 4u32)
+        .build()?;
+
+    // Only constrain format — let camera choose native resolution
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             &gst::Caps::builder("video/x-raw")
                 .field("format", "RGB")
-                .field("width", 640i32)
-                .field("height", 480i32)
-                .field("framerate", gst::Fraction::new(15, 1))
                 .build(),
         )
         .build()?;
-
-    let convert = gst::ElementFactory::make("videoconvert").build()?;
 
     let infer = gst::ElementFactory::make("edgeimpulsevideoinfer").build()?;
     if let Some(ref model_path) = args.model {
@@ -129,8 +134,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sink = gst::ElementFactory::make("fakesink").build()?;
 
-    pipeline.add_many([&src, &capsfilter, &convert, &infer, &gate, &sink])?;
-    gst::Element::link_many([&src, &capsfilter, &convert, &infer, &gate, &sink])?;
+    pipeline.add_many([
+        &src,
+        &queue_src,
+        &convert,
+        &capsfilter,
+        &infer,
+        &gate,
+        &sink,
+    ])?;
+    gst::Element::link_many([
+        &src,
+        &queue_src,
+        &convert,
+        &capsfilter,
+        &infer,
+        &gate,
+        &sink,
+    ])?;
 
     pipeline.set_state(gst::State::Playing)?;
 

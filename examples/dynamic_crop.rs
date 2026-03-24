@@ -116,19 +116,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Source
     let src = create_video_source(&args.source, args.num_frames)?;
 
+    let queue_src = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 8u32)
+        .property_from_str("leaky", "downstream")
+        .build()?;
+
+    let convert = gst::ElementFactory::make("videoconvert")
+        .property("n-threads", 4u32)
+        .build()?;
+
+    // Only constrain format to RGB — let the camera choose its native resolution.
+    // avfvideosrc on macOS can't produce arbitrary resolutions without videoscale.
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             &gst::Caps::builder("video/x-raw")
                 .field("format", "RGB")
-                .field("width", 640i32)
-                .field("height", 480i32)
-                .field("framerate", gst::Fraction::new(15, 1))
                 .build(),
         )
         .build()?;
-
-    let convert = gst::ElementFactory::make("videoconvert").build()?;
 
     // Inference
     let infer = gst::ElementFactory::make("edgeimpulsevideoinfer").build()?;
@@ -171,8 +177,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Add all elements
     pipeline.add_many([
         &src,
-        &capsfilter,
+        &queue_src,
         &convert,
+        &capsfilter,
         &infer,
         &tee,
         &queue1,
@@ -185,8 +192,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         &crop_sink,
     ])?;
 
-    // Link main chain
-    gst::Element::link_many([&src, &capsfilter, &convert, &infer, &tee])?;
+    // Link main chain: src → queue → videoconvert → capsfilter(RGB) → infer → tee
+    gst::Element::link_many([&src, &queue_src, &convert, &capsfilter, &infer, &tee])?;
 
     // Link tee → path 1 (overlay → display)
     gst::Element::link_many([&queue1, &overlay, &convert_display, &display_sink])?;

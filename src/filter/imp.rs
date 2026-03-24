@@ -49,14 +49,23 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     } else {
         format!("edgeimpulsecontinueif_{}", variant)
     };
-    gst::DebugCategory::new(&name, gst::DebugColorFlags::empty(), Some("Edge Impulse Continue If"))
+    gst::DebugCategory::new(
+        &name,
+        gst::DebugColorFlags::empty(),
+        Some("Edge Impulse Continue If"),
+    )
 });
 
 // ─── Condition parsing ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 enum ComparisonOp {
-    Gte, Lte, Gt, Lt, Eq, Ne,
+    Gte,
+    Lte,
+    Gt,
+    Lt,
+    Eq,
+    Ne,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +76,14 @@ enum LiteralValue {
 
 #[derive(Debug, Clone)]
 enum ParsedCondition {
-    FieldCompare { field: String, op: ComparisonOp, value: LiteralValue },
-    HasClass { class_name: String },
+    FieldCompare {
+        field: String,
+        op: ComparisonOp,
+        value: LiteralValue,
+    },
+    HasClass {
+        class_name: String,
+    },
 }
 
 /// A rule: condition → metadata key-value pairs
@@ -88,15 +103,20 @@ fn parse_condition(condition: &str) -> Option<ParsedCondition> {
     }
 
     let operators = [
-        (">=", ComparisonOp::Gte), ("<=", ComparisonOp::Lte),
-        ("==", ComparisonOp::Eq), ("!=", ComparisonOp::Ne),
-        (">", ComparisonOp::Gt), ("<", ComparisonOp::Lt),
+        (">=", ComparisonOp::Gte),
+        ("<=", ComparisonOp::Lte),
+        ("==", ComparisonOp::Eq),
+        ("!=", ComparisonOp::Ne),
+        (">", ComparisonOp::Gt),
+        ("<", ComparisonOp::Lt),
     ];
 
     for (op_str, op) in operators {
         if let Some((lhs, rhs)) = condition.split_once(op_str) {
             let field = lhs.trim().to_string();
-            if field.is_empty() { return None; }
+            if field.is_empty() {
+                return None;
+            }
             let value = parse_literal(rhs.trim())?;
             return Some(ParsedCondition::FieldCompare { field, op, value });
         }
@@ -105,15 +125,23 @@ fn parse_condition(condition: &str) -> Option<ParsedCondition> {
 }
 
 fn parse_literal(raw: &str) -> Option<LiteralValue> {
-    if let Ok(n) = raw.parse::<f64>() { return Some(LiteralValue::Number(n)); }
-    if raw.eq_ignore_ascii_case("true") { return Some(LiteralValue::String("true".to_string())); }
-    if raw.eq_ignore_ascii_case("false") { return Some(LiteralValue::String("false".to_string())); }
+    if let Ok(n) = raw.parse::<f64>() {
+        return Some(LiteralValue::Number(n));
+    }
+    if raw.eq_ignore_ascii_case("true") {
+        return Some(LiteralValue::String("true".to_string()));
+    }
+    if raw.eq_ignore_ascii_case("false") {
+        return Some(LiteralValue::String("false".to_string()));
+    }
     let quoted = (raw.starts_with('"') && raw.ends_with('"'))
         || (raw.starts_with('\'') && raw.ends_with('\''));
     if quoted && raw.len() >= 2 {
         return Some(LiteralValue::String(raw[1..raw.len() - 1].to_string()));
     }
-    if !raw.is_empty() { return Some(LiteralValue::String(raw.to_string())); }
+    if !raw.is_empty() {
+        return Some(LiteralValue::String(raw.to_string()));
+    }
     None
 }
 
@@ -131,7 +159,10 @@ fn parse_rules(json: &str) -> Vec<MetadataRule> {
                 .iter()
                 .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                 .collect();
-            Some(MetadataRule { condition, metadata })
+            Some(MetadataRule {
+                condition,
+                metadata,
+            })
         })
         .collect()
 }
@@ -258,7 +289,9 @@ fn evaluate(state: &InferenceState, cond: &ParsedCondition) -> bool {
 
             match (field_val, value) {
                 (Some(lhs), LiteralValue::Number(rhs)) => compare_numbers(lhs, *rhs, op),
-                (None, _) if field.as_str() == "classification" || field.as_str() == "top_class" => {
+                (None, _)
+                    if field.as_str() == "classification" || field.as_str() == "top_class" =>
+                {
                     let lhs = &state.top_class;
                     match (value, op) {
                         (LiteralValue::String(rhs), ComparisonOp::Eq) => lhs == rhs,
@@ -293,7 +326,9 @@ pub struct EdgeImpulseContinueIf {
 
 impl Default for EdgeImpulseContinueIf {
     fn default() -> Self {
-        Self { state: Mutex::new(State::default()) }
+        Self {
+            state: Mutex::new(State::default()),
+        }
     }
 }
 
@@ -345,8 +380,12 @@ impl ObjectImpl for EdgeImpulseContinueIf {
                 let condition = value.get::<String>().unwrap_or_default();
                 state.parsed = parse_condition(&condition);
                 if !condition.is_empty() && state.parsed.is_none() {
-                    gst::warning!(CAT, obj = self.obj(),
-                        "Failed to parse condition: '{}' — all buffers will pass", condition);
+                    gst::warning!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to parse condition: '{}' — all buffers will pass",
+                        condition
+                    );
                 }
                 state.condition = condition;
             }
@@ -356,8 +395,12 @@ impl ObjectImpl for EdgeImpulseContinueIf {
             "rules" => {
                 let json = value.get::<String>().unwrap_or_default();
                 state.rules = parse_rules(&json);
-                gst::info!(CAT, obj = self.obj(),
-                    "Parsed {} metadata rules", state.rules.len());
+                gst::info!(
+                    CAT,
+                    obj = self.obj(),
+                    "Parsed {} metadata rules",
+                    state.rules.len()
+                );
                 state.rules_json = json;
             }
             _ => unimplemented!(),
@@ -395,8 +438,20 @@ impl ElementImpl for EdgeImpulseContinueIf {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
             let caps = gst::Caps::new_any();
             vec![
-                gst::PadTemplate::new("sink", gst::PadDirection::Sink, gst::PadPresence::Always, &caps).unwrap(),
-                gst::PadTemplate::new("src", gst::PadDirection::Src, gst::PadPresence::Always, &caps).unwrap(),
+                gst::PadTemplate::new(
+                    "sink",
+                    gst::PadDirection::Sink,
+                    gst::PadPresence::Always,
+                    &caps,
+                )
+                .unwrap(),
+                gst::PadTemplate::new(
+                    "src",
+                    gst::PadDirection::Src,
+                    gst::PadPresence::Always,
+                    &caps,
+                )
+                .unwrap(),
             ]
         });
         PAD_TEMPLATES.as_ref()
@@ -437,9 +492,13 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
                     let s = builder.build();
                     let _ = self.obj().post_message(gst::message::Element::new(s));
 
-                    gst::debug!(CAT, obj = self.obj(),
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
                         "Rule matched: {:?} → posting metadata with {} fields",
-                        rule.condition, rule.metadata.len());
+                        rule.condition,
+                        rule.metadata.len()
+                    );
                     break;
                 }
             }
@@ -454,17 +513,29 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
         let mut state = self.state.lock().unwrap();
         if pass {
             state.passed += 1;
-            gst::log!(CAT, obj = self.obj(),
+            gst::log!(
+                CAT,
+                obj = self.obj(),
                 "PASS (det={}, conf={:.2}, class='{}', passed={}, dropped={})",
-                inference_state.detection_count, inference_state.max_confidence,
-                inference_state.top_class, state.passed, state.dropped);
+                inference_state.detection_count,
+                inference_state.max_confidence,
+                inference_state.top_class,
+                state.passed,
+                state.dropped
+            );
             Ok(gst::FlowSuccess::Ok)
         } else {
             state.dropped += 1;
-            gst::log!(CAT, obj = self.obj(),
+            gst::log!(
+                CAT,
+                obj = self.obj(),
                 "DROP (det={}, conf={:.2}, class='{}', passed={}, dropped={})",
-                inference_state.detection_count, inference_state.max_confidence,
-                inference_state.top_class, state.passed, state.dropped);
+                inference_state.detection_count,
+                inference_state.max_confidence,
+                inference_state.top_class,
+                state.passed,
+                state.dropped
+            );
             buf.set_flags(gst::BufferFlags::GAP | gst::BufferFlags::DROPPABLE);
             Ok(gst::FlowSuccess::Ok)
         }
@@ -480,8 +551,13 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let state = self.state.lock().unwrap();
-        gst::info!(CAT, obj = self.obj(),
-            "Continue-If stopped — {} passed, {} dropped", state.passed, state.dropped);
+        gst::info!(
+            CAT,
+            obj = self.obj(),
+            "Continue-If stopped — {} passed, {} dropped",
+            state.passed,
+            state.dropped
+        );
         Ok(())
     }
 }

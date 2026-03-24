@@ -118,8 +118,20 @@ unsafe impl gst::prelude::MetaAPI for CropOriginMeta {
 impl fmt::Debug for CropOriginMeta {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("CropOriginMeta")
-            .field("source", &format!("{}x{}+{}+{}", self.source_width(), self.source_height(), self.source_x(), self.source_y()))
-            .field("original", &format!("{}x{}", self.original_width(), self.original_height()))
+            .field(
+                "source",
+                &format!(
+                    "{}x{}+{}+{}",
+                    self.source_width(),
+                    self.source_height(),
+                    self.source_x(),
+                    self.source_y()
+                ),
+            )
+            .field(
+                "original",
+                &format!("{}x{}", self.original_width(), self.original_height()),
+            )
             .field("object_id", &self.object_id())
             .field("label", &self.detection_label())
             .field("confidence", &self.detection_confidence())

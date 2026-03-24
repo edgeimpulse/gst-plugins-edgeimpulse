@@ -222,8 +222,8 @@ mod imp {
 
     pub(super) fn inference_result_meta_api_get_type() -> glib::Type {
         static TYPE: Lazy<glib::Type> = Lazy::new(|| unsafe {
-            let name = CString::new(INFERENCE_RESULT_META_API_NAME)
-                .expect("Failed to create CString");
+            let name =
+                CString::new(INFERENCE_RESULT_META_API_NAME).expect("Failed to create CString");
             let t = from_glib(gst::ffi::gst_meta_api_type_register(
                 name.as_ptr() as *const _,
                 [ptr::null::<std::os::raw::c_char>()].as_ptr() as *mut *const _,
@@ -287,8 +287,7 @@ mod imp {
         unsafe impl Sync for MetaInfo {}
 
         static META_INFO: Lazy<MetaInfo> = Lazy::new(|| unsafe {
-            let name = CString::new(INFERENCE_RESULT_META_NAME)
-                .expect("Failed to create CString");
+            let name = CString::new(INFERENCE_RESULT_META_NAME).expect("Failed to create CString");
             MetaInfo(
                 ptr::NonNull::new(gst::ffi::gst_meta_register(
                     inference_result_meta_api_get_type().into_glib(),

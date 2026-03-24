@@ -944,7 +944,11 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Attach generic InferenceResultMeta (readable by edgeimpulsecontinueif
             // and other downstream elements regardless of inference type)
             {
-                let inference_type = if result_value.get("bounding_boxes").and_then(|b| b.as_array()).map_or(false, |b| !b.is_empty()) {
+                let inference_type = if result_value
+                    .get("bounding_boxes")
+                    .and_then(|b| b.as_array())
+                    .map_or(false, |b| !b.is_empty())
+                {
                     "object-detection"
                 } else if result_value.get("visual_anomaly_grid").is_some() {
                     "anomaly-detection"

@@ -31,7 +31,11 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     } else {
         format!("edgeimpulsecrop_{}", variant)
     };
-    gst::DebugCategory::new(&name, gst::DebugColorFlags::empty(), Some("Edge Impulse Crop"))
+    gst::DebugCategory::new(
+        &name,
+        gst::DebugColorFlags::empty(),
+        Some("Edge Impulse Crop"),
+    )
 });
 
 // ─── Detection extracted from ROI metadata ───────────────────────────────────
@@ -100,14 +104,15 @@ impl ObjectSubclass for EdgeImpulseCrop {
                 )
             })
             .event_function(|pad, parent, event| {
-                EdgeImpulseCrop::catch_panic_pad_function(parent, || false, |crop| {
-                    crop.sink_event(pad, event)
-                })
+                EdgeImpulseCrop::catch_panic_pad_function(
+                    parent,
+                    || false,
+                    |crop| crop.sink_event(pad, event),
+                )
             })
             .build();
 
-        let src_pad =
-            gst::Pad::builder_from_template(&klass.pad_template("src").unwrap()).build();
+        let src_pad = gst::Pad::builder_from_template(&klass.pad_template("src").unwrap()).build();
 
         Self {
             sink_pad,
@@ -280,7 +285,11 @@ impl EdgeImpulseCrop {
         let video_info = match &state.video_info {
             Some(info) => info.clone(),
             None => {
-                gst::error!(CAT, obj = self.obj(), "No video info available — caps not negotiated");
+                gst::error!(
+                    CAT,
+                    obj = self.obj(),
+                    "No video info available — caps not negotiated"
+                );
                 return Err(gst::FlowError::NotNegotiated);
             }
         };
@@ -460,24 +469,34 @@ impl EdgeImpulseCrop {
         drop(frame);
 
         // Determine output dimensions
-        let (out_w, out_h, out_data) =
-            if target_width > 0 && target_height > 0 && (crop_w != target_width as u32 || crop_h != target_height as u32) {
-                // Resize to target dimensions
-                let img: RgbImage =
-                    ImageBuffer::from_raw(crop_w, crop_h, crop_data).ok_or_else(|| {
-                        gst::error!(CAT, obj = self.obj(), "Failed to create image from crop data");
-                        gst::FlowError::Error
-                    })?;
-                let resized = image::imageops::resize(
-                    &img,
-                    target_width as u32,
-                    target_height as u32,
-                    FilterType::Triangle,
-                );
-                (target_width as u32, target_height as u32, resized.into_raw())
-            } else {
-                (crop_w, crop_h, crop_data)
-            };
+        let (out_w, out_h, out_data) = if target_width > 0
+            && target_height > 0
+            && (crop_w != target_width as u32 || crop_h != target_height as u32)
+        {
+            // Resize to target dimensions
+            let img: RgbImage =
+                ImageBuffer::from_raw(crop_w, crop_h, crop_data).ok_or_else(|| {
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "Failed to create image from crop data"
+                    );
+                    gst::FlowError::Error
+                })?;
+            let resized = image::imageops::resize(
+                &img,
+                target_width as u32,
+                target_height as u32,
+                FilterType::Triangle,
+            );
+            (
+                target_width as u32,
+                target_height as u32,
+                resized.into_raw(),
+            )
+        } else {
+            (crop_w, crop_h, crop_data)
+        };
 
         // Set output caps if dimensions changed
         self.ensure_src_caps(
@@ -549,12 +568,13 @@ impl EdgeImpulseCrop {
             let src_start = row * stride;
             let dst_start = row * frame_w as usize * bpp;
             let len = frame_w as usize * bpp;
-            contiguous[dst_start..dst_start + len].copy_from_slice(&src_data[src_start..src_start + len]);
+            contiguous[dst_start..dst_start + len]
+                .copy_from_slice(&src_data[src_start..src_start + len]);
         }
         drop(frame);
 
-        let img: RgbImage = ImageBuffer::from_raw(frame_w, frame_h, contiguous)
-            .ok_or(gst::FlowError::Error)?;
+        let img: RgbImage =
+            ImageBuffer::from_raw(frame_w, frame_h, contiguous).ok_or(gst::FlowError::Error)?;
         let resized = image::imageops::resize(&img, target_w, target_h, FilterType::Triangle);
 
         let mut out_buf = gst::Buffer::from_mut_slice(resized.into_raw());
@@ -575,8 +595,16 @@ impl EdgeImpulseCrop {
         target_width: i32,
         target_height: i32,
     ) -> Result<(), gst::FlowError> {
-        let out_w = if target_width > 0 { target_width as u32 } else { frame_w };
-        let out_h = if target_height > 0 { target_height as u32 } else { frame_h };
+        let out_w = if target_width > 0 {
+            target_width as u32
+        } else {
+            frame_w
+        };
+        let out_h = if target_height > 0 {
+            target_height as u32
+        } else {
+            frame_h
+        };
 
         let mut state = self.state.lock().unwrap();
         if state.src_caps_set {

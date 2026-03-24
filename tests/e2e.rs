@@ -72,12 +72,8 @@ fn run_pipeline_for(pipeline_str: &str, duration: Duration) -> TestResults {
                         let name = structure.name().to_string();
 
                         if name.contains("inference-result") {
-                            let result_type = structure
-                                .get::<String>("type")
-                                .unwrap_or_default();
-                            let result_json = structure
-                                .get::<String>("result")
-                                .unwrap_or_default();
+                            let result_type = structure.get::<String>("type").unwrap_or_default();
+                            let result_json = structure.get::<String>("result").unwrap_or_default();
                             let timing_ms = structure.get::<u32>("timing_ms").unwrap_or(0);
 
                             let entry = serde_json::json!({
@@ -165,14 +161,16 @@ fn test_video_inference_produces_bus_messages() {
     for msg in &results.inference_messages {
         let result_type = msg["type"].as_str().unwrap();
         assert!(
-            ["object-detection", "classification", "anomaly-detection", "object-tracking"]
-                .contains(&result_type),
+            [
+                "object-detection",
+                "classification",
+                "anomaly-detection",
+                "object-tracking"
+            ]
+            .contains(&result_type),
             "Unexpected result type: {result_type}"
         );
-        assert!(
-            !msg["result"].is_null(),
-            "Result should not be null"
-        );
+        assert!(!msg["result"].is_null(), "Result should not be null");
         assert!(
             msg["timing_ms"].as_u64().is_some(),
             "timing_ms should be present"
@@ -205,9 +203,7 @@ fn test_video_inference_message_structure() {
 #[test]
 fn test_overlay_does_not_crash() {
     let src = video_test_source(5);
-    let pipeline = format!(
-        "{src} ! edgeimpulsevideoinfer ! edgeimpulseoverlay ! fakesink"
-    );
+    let pipeline = format!("{src} ! edgeimpulsevideoinfer ! edgeimpulseoverlay ! fakesink");
 
     let results = run_pipeline_for(&pipeline, Duration::from_secs(10));
 
@@ -234,11 +230,7 @@ fn test_continue_if_passes_all_when_condition_always_true() {
 
     let results = run_pipeline_for(&pipeline, Duration::from_secs(10));
 
-    assert!(
-        results.errors.is_empty(),
-        "Errors: {:?}",
-        results.errors
-    );
+    assert!(results.errors.is_empty(), "Errors: {:?}", results.errors);
     assert!(
         !results.inference_messages.is_empty(),
         "All buffers should pass through"
@@ -282,7 +274,8 @@ fn test_continue_if_rules_emit_metadata() {
 
     // Set rules property programmatically — avoids gst_parse quoting issues
     let gate = pipeline.by_name("gate").expect("gate element not found");
-    let rules_json = r#"[{"condition":"detection_count >= 0","metadata":{"color":"green","status":"ok"}}]"#;
+    let rules_json =
+        r#"[{"condition":"detection_count >= 0","metadata":{"color":"green","status":"ok"}}]"#;
     gate.set_property("rules", rules_json);
 
     pipeline.set_state(gst::State::Playing).unwrap();
@@ -294,7 +287,9 @@ fn test_continue_if_rules_emit_metadata() {
 
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() { break; }
+        if remaining.is_zero() {
+            break;
+        }
 
         let timeout = gst::ClockTime::from_mseconds(remaining.as_millis() as u64);
         match bus.timed_pop(timeout) {
@@ -307,14 +302,21 @@ fn test_continue_if_rules_emit_metadata() {
                             let mut fields = serde_json::Map::new();
                             for field in structure.iter() {
                                 if let Ok(val) = structure.get::<String>(field.0) {
-                                    fields.insert(field.0.to_string(), serde_json::Value::String(val));
+                                    fields.insert(
+                                        field.0.to_string(),
+                                        serde_json::Value::String(val),
+                                    );
                                 }
                             }
                             metadata_messages.push(serde_json::Value::Object(fields));
                         }
                     }
                     MessageView::Error(err) => {
-                        errors.push(format!("{} ({})", err.error(), err.debug().unwrap_or_default()));
+                        errors.push(format!(
+                            "{} ({})",
+                            err.error(),
+                            err.debug().unwrap_or_default()
+                        ));
                         break;
                     }
                     MessageView::Eos(_) => break,
@@ -395,17 +397,11 @@ fn test_full_two_stage_pipeline() {
 fn test_continue_if_no_condition_passes_all() {
     let src = video_test_source(3);
     // No condition set — everything should pass
-    let pipeline = format!(
-        "{src} ! edgeimpulsevideoinfer ! edgeimpulsecontinueif ! fakesink"
-    );
+    let pipeline = format!("{src} ! edgeimpulsevideoinfer ! edgeimpulsecontinueif ! fakesink");
 
     let results = run_pipeline_for(&pipeline, Duration::from_secs(10));
 
-    assert!(
-        results.errors.is_empty(),
-        "Errors: {:?}",
-        results.errors
-    );
+    assert!(results.errors.is_empty(), "Errors: {:?}", results.errors);
     assert!(
         !results.inference_messages.is_empty(),
         "With no condition, all buffers should pass"

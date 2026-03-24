@@ -3,6 +3,7 @@ use gstreamer::glib;
 
 mod audio;
 mod common;
+mod crop;
 mod filter;
 mod overlay;
 pub mod sink;
@@ -14,6 +15,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     overlay::register(plugin)?;
     sink::register(plugin)?;
     filter::register(plugin)?;
+    crop::register(plugin)?;
     Ok(())
 }
 

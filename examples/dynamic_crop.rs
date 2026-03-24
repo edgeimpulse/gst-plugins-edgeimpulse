@@ -2,7 +2,7 @@
 //!
 //! Demonstrates `edgeimpulsecrop` in a realistic pipeline:
 //!
-//!   videotestsrc → object detection → tee
+//!   camera → object detection → tee
 //!     ├─ overlay → display (live view with bounding boxes)
 //!     └─ continue-if → crop → fakesink (per-crop output)
 //!
@@ -13,17 +13,20 @@
 //! `edgeimpulsevideoinfer` element running a classification model.
 //!
 //! Usage:
-//!   # FFI mode (model compiled in):
-//!   cargo run --example dynamic_crop
+//!   # FFI mode with camera (default):
+//!   cargo run --release --example dynamic_crop
 //!
 //!   # EIM mode:
-//!   cargo run --example dynamic_crop -- --model <path_to_model>
+//!   cargo run --release --example dynamic_crop -- --model <path_to_model>
+//!
+//!   # Use test video source instead of camera:
+//!   cargo run --release --example dynamic_crop -- --source test
 //!
 //!   # Custom crop size and padding:
-//!   cargo run --example dynamic_crop -- --target-width 128 --target-height 128 --padding 20
+//!   cargo run --release --example dynamic_crop -- --target-width 128 --target-height 128 --padding 20
 //!
 //! Environment setup:
-//!   export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
+//!   export GST_PLUGIN_PATH="target/release:$GST_PLUGIN_PATH"
 
 use clap::Parser;
 use gstreamer as gst;
@@ -37,6 +40,10 @@ struct Args {
     #[arg(short, long)]
     model: Option<String>,
 
+    /// Video source: "camera" (default), "test" (SMPTE pattern)
+    #[arg(short, long, default_value = "camera")]
+    source: String,
+
     /// Target width for cropped regions
     #[arg(long, default_value = "96")]
     target_width: i32,
@@ -49,9 +56,41 @@ struct Args {
     #[arg(long, default_value = "10")]
     padding: i32,
 
-    /// Number of frames to process (0 = unlimited)
-    #[arg(short, long, default_value = "30")]
+    /// Number of frames to process (0 = unlimited, default for camera)
+    #[arg(short, long, default_value = "0")]
     num_frames: u32,
+}
+
+/// Create the video source element based on the --source flag.
+/// Tries avfvideosrc (macOS) first, falls back to v4l2src (Linux).
+fn create_video_source(source: &str, num_frames: u32) -> Result<gst::Element, Box<dyn Error>> {
+    match source {
+        "test" => {
+            let n = if num_frames == 0 { 30 } else { num_frames };
+            Ok(gst::ElementFactory::make("videotestsrc")
+                .property("num-buffers", n as i32)
+                .property_from_str("pattern", "smpte")
+                .build()?)
+        }
+        _ => {
+            // Try macOS camera first, then Linux
+            if let Ok(src) = gst::ElementFactory::make("avfvideosrc")
+                .property("device-index", 0i32)
+                .build()
+            {
+                println!("  Using avfvideosrc (macOS camera)");
+                Ok(src)
+            } else if let Ok(src) = gst::ElementFactory::make("v4l2src")
+                .property_from_str("device", "/dev/video0")
+                .build()
+            {
+                println!("  Using v4l2src (Linux camera)");
+                Ok(src)
+            } else {
+                Err("No camera source available. Install GStreamer camera plugins or use --source test".into())
+            }
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -59,30 +98,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     gst::init()?;
 
     println!("Dynamic Crop Example");
+    println!("  Source: {}", args.source);
     println!(
         "  Target size: {}x{}",
         args.target_width, args.target_height
     );
     println!("  Padding: {}px", args.padding);
+    if args.num_frames > 0 {
+        println!("  Frames: {}", args.num_frames);
+    } else {
+        println!("  Frames: unlimited (Ctrl+C to stop)");
+    }
     println!();
 
-    // Build the pipeline programmatically for clarity
     let pipeline = gst::Pipeline::new();
 
-    // Source: test video
-    let src = gst::ElementFactory::make("videotestsrc")
-        .property("num-buffers", args.num_frames as i32)
-        .property_from_str("pattern", "smpte")
-        .build()?;
+    // Source
+    let src = create_video_source(&args.source, args.num_frames)?;
 
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             &gst::Caps::builder("video/x-raw")
                 .field("format", "RGB")
-                .field("width", 320i32)
-                .field("height", 320i32)
-                .field("framerate", gst::Fraction::new(5, 1))
+                .field("width", 640i32)
+                .field("height", 480i32)
+                .field("framerate", gst::Fraction::new(15, 1))
                 .build(),
         )
         .build()?;
@@ -98,12 +139,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Tee: split into overlay path + crop path
     let tee = gst::ElementFactory::make("tee").build()?;
 
-    // Path 1: overlay → fakesink (simulates display)
+    // Path 1: overlay → autovideosink (live display)
     let queue1 = gst::ElementFactory::make("queue").build()?;
     let overlay = gst::ElementFactory::make("edgeimpulseoverlay").build()?;
-    let display_sink = gst::ElementFactory::make("fakesink")
+    let convert_display = gst::ElementFactory::make("videoconvert").build()?;
+    let display_sink = gst::ElementFactory::make("autovideosink")
         .property("sync", false)
-        .build()?;
+        .build()
+        .unwrap_or_else(|_| {
+            // Fall back to fakesink if no display available (headless/CI)
+            gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+                .unwrap()
+        });
 
     // Path 2: continue-if → crop → fakesink (crop output)
     let queue2 = gst::ElementFactory::make("queue").build()?;
@@ -128,6 +177,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &tee,
         &queue1,
         &overlay,
+        &convert_display,
         &display_sink,
         &queue2,
         &gate,
@@ -138,8 +188,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Link main chain
     gst::Element::link_many([&src, &capsfilter, &convert, &infer, &tee])?;
 
-    // Link tee → path 1 (overlay)
-    gst::Element::link_many([&queue1, &overlay, &display_sink])?;
+    // Link tee → path 1 (overlay → display)
+    gst::Element::link_many([&queue1, &overlay, &convert_display, &display_sink])?;
     let tee_src1 = tee.request_pad_simple("src_%u").unwrap();
     let queue1_sink = queue1.static_pad("sink").unwrap();
     tee_src1.link(&queue1_sink)?;
@@ -190,10 +240,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         let h = bbox["height"].as_u64().unwrap_or(0);
                                         println!("    - {label} ({conf:.0}%) at ({x},{y}) {w}x{h}");
                                     }
-                                } else {
-                                    println!(
-                                        "  Frame {frame_count}: no detections (full frame passed through)"
-                                    );
+                                } else if frame_count <= 5 || frame_count % 30 == 0 {
+                                    // Only print "no detections" for first few frames and periodically
+                                    println!("  Frame {frame_count}: no detections");
                                 }
                             } else {
                                 println!("  Frame {frame_count}: classification result (no crops)");

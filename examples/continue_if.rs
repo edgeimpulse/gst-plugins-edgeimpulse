@@ -8,17 +8,20 @@
 //! different bus messages are emitted depending on detection count.
 //!
 //! Usage:
-//!   # FFI mode (model compiled in):
-//!   cargo run --example continue_if
+//!   # FFI mode with camera (default):
+//!   cargo run --release --example continue_if
 //!
 //!   # EIM mode:
-//!   cargo run --example continue_if -- --model <path_to_model>
+//!   cargo run --release --example continue_if -- --model <path_to_model>
+//!
+//!   # Use test video source instead of camera:
+//!   cargo run --release --example continue_if -- --source test
 //!
 //!   # Custom condition:
-//!   cargo run --example continue_if -- --condition "max_confidence > 0.9"
+//!   cargo run --release --example continue_if -- --condition "max_confidence > 0.9"
 //!
 //! Environment setup:
-//!   export GST_PLUGIN_PATH="target/debug:$GST_PLUGIN_PATH"
+//!   export GST_PLUGIN_PATH="target/release:$GST_PLUGIN_PATH"
 
 use clap::Parser;
 use gstreamer as gst;
@@ -32,13 +35,47 @@ struct Args {
     #[arg(short, long)]
     model: Option<String>,
 
+    /// Video source: "camera" (default), "test" (SMPTE pattern)
+    #[arg(short, long, default_value = "camera")]
+    source: String,
+
     /// Gate condition expression
     #[arg(short, long, default_value = "detection_count >= 1")]
     condition: String,
 
-    /// Number of frames to process (0 = unlimited)
-    #[arg(short, long, default_value = "50")]
+    /// Number of frames to process (0 = unlimited, default for camera)
+    #[arg(short, long, default_value = "0")]
     num_frames: u32,
+}
+
+/// Create the video source element based on the --source flag.
+fn create_video_source(source: &str, num_frames: u32) -> Result<gst::Element, Box<dyn Error>> {
+    match source {
+        "test" => {
+            let n = if num_frames == 0 { 50 } else { num_frames };
+            Ok(gst::ElementFactory::make("videotestsrc")
+                .property("num-buffers", n as i32)
+                .property_from_str("pattern", "smpte")
+                .build()?)
+        }
+        _ => {
+            if let Ok(src) = gst::ElementFactory::make("avfvideosrc")
+                .property("device-index", 0i32)
+                .build()
+            {
+                println!("  Using avfvideosrc (macOS camera)");
+                Ok(src)
+            } else if let Ok(src) = gst::ElementFactory::make("v4l2src")
+                .property_from_str("device", "/dev/video0")
+                .build()
+            {
+                println!("  Using v4l2src (Linux camera)");
+                Ok(src)
+            } else {
+                Err("No camera source available. Use --source test".into())
+            }
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -46,25 +83,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     gst::init()?;
 
     println!("Continue-If Example");
+    println!("  Source: {}", args.source);
     println!("  Condition: {}", args.condition);
+    if args.num_frames > 0 {
+        println!("  Frames: {}", args.num_frames);
+    } else {
+        println!("  Frames: unlimited (Ctrl+C to stop)");
+    }
     println!();
 
-    // Build pipeline: videotestsrc → infer → continue-if → fakesink
     let pipeline = gst::Pipeline::new();
 
-    let src = gst::ElementFactory::make("videotestsrc")
-        .property("num-buffers", args.num_frames as i32)
-        .property_from_str("pattern", "smpte")
-        .build()?;
+    let src = create_video_source(&args.source, args.num_frames)?;
 
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             &gst::Caps::builder("video/x-raw")
                 .field("format", "RGB")
-                .field("width", 320i32)
-                .field("height", 320i32)
-                .field("framerate", gst::Fraction::new(5, 1))
+                .field("width", 640i32)
+                .field("height", 480i32)
+                .field("framerate", gst::Fraction::new(15, 1))
                 .build(),
         )
         .build()?;
@@ -125,7 +164,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     passed += 1;
                     let severity = structure.get::<String>("severity").unwrap_or_default();
                     let color = structure.get::<String>("color").unwrap_or_default();
-                    println!(" → severity={severity}, color={color}");
+                    println!(" -> severity={severity}, color={color}");
                 }
             }
             MessageView::Eos(_) => {

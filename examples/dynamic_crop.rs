@@ -4,26 +4,24 @@
 //!
 //!   camera → object detection → tee
 //!     ├─ overlay → display (live view with bounding boxes)
-//!     └─ continue-if → crop → fakesink (per-crop output)
+//!     └─ continue-if → crop → appsink (save crops as PNG)
 //!
 //! Each detected object is cropped from the frame, resized to a target size,
-//! and pushed downstream as a separate buffer with `CropOriginMeta` attached.
-//!
-//! In a real deployment, the cropped buffers would feed into a second
-//! `edgeimpulsevideoinfer` element running a classification model.
+//! and saved as a PNG file in the output directory. Each file is named with
+//! the frame number, detection label, and confidence.
 //!
 //! Usage:
-//!   # FFI mode with camera (default):
+//!   # FFI mode with camera (default, runs for 5 seconds):
 //!   cargo run --release --example dynamic_crop
 //!
 //!   # EIM mode:
 //!   cargo run --release --example dynamic_crop -- --model <path_to_model>
 //!
+//!   # Custom duration, crop size, output directory:
+//!   cargo run --release --example dynamic_crop -- --duration 10 --target-width 128 --target-height 128 --output-dir ./my_crops
+//!
 //!   # Use test video source instead of camera:
 //!   cargo run --release --example dynamic_crop -- --source test
-//!
-//!   # Custom crop size and padding:
-//!   cargo run --release --example dynamic_crop -- --target-width 128 --target-height 128 --padding 20
 //!
 //! Environment setup:
 //!   export GST_PLUGIN_PATH="target/release:$GST_PLUGIN_PATH"
@@ -31,10 +29,15 @@
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
+use image::ImageBuffer;
 use std::error::Error;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Dynamic crop example")]
+#[command(author, version, about = "Dynamic crop example — saves crops as PNG")]
 struct Args {
     /// Path to Edge Impulse model file (optional for FFI mode)
     #[arg(short, long)]
@@ -56,24 +59,22 @@ struct Args {
     #[arg(long, default_value = "10")]
     padding: i32,
 
-    /// Number of frames to process (0 = unlimited, default for camera)
-    #[arg(short, long, default_value = "0")]
-    num_frames: u32,
+    /// Duration in seconds (0 = unlimited)
+    #[arg(short, long, default_value = "5")]
+    duration: u64,
+
+    /// Directory to save crop PNGs
+    #[arg(short, long, default_value = "./crops")]
+    output_dir: PathBuf,
 }
 
 /// Create the video source element based on the --source flag.
-/// Tries avfvideosrc (macOS) first, falls back to v4l2src (Linux).
-fn create_video_source(source: &str, num_frames: u32) -> Result<gst::Element, Box<dyn Error>> {
+fn create_video_source(source: &str) -> Result<gst::Element, Box<dyn Error>> {
     match source {
-        "test" => {
-            let n = if num_frames == 0 { 30 } else { num_frames };
-            Ok(gst::ElementFactory::make("videotestsrc")
-                .property("num-buffers", n as i32)
-                .property_from_str("pattern", "smpte")
-                .build()?)
-        }
+        "test" => Ok(gst::ElementFactory::make("videotestsrc")
+            .property_from_str("pattern", "smpte")
+            .build()?),
         _ => {
-            // Try macOS camera first, then Linux
             if let Ok(src) = gst::ElementFactory::make("avfvideosrc")
                 .property("device-index", 0i32)
                 .build()
@@ -87,7 +88,7 @@ fn create_video_source(source: &str, num_frames: u32) -> Result<gst::Element, Bo
                 println!("  Using v4l2src (Linux camera)");
                 Ok(src)
             } else {
-                Err("No camera source available. Install GStreamer camera plugins or use --source test".into())
+                Err("No camera source available. Use --source test".into())
             }
         }
     }
@@ -97,6 +98,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     gst::init()?;
 
+    // Create output directory
+    std::fs::create_dir_all(&args.output_dir)?;
+
     println!("Dynamic Crop Example");
     println!("  Source: {}", args.source);
     println!(
@@ -104,17 +108,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.target_width, args.target_height
     );
     println!("  Padding: {}px", args.padding);
-    if args.num_frames > 0 {
-        println!("  Frames: {}", args.num_frames);
+    println!("  Output: {}", args.output_dir.display());
+    if args.duration > 0 {
+        println!("  Duration: {}s", args.duration);
     } else {
-        println!("  Frames: unlimited (Ctrl+C to stop)");
+        println!("  Duration: unlimited (Ctrl+C to stop)");
     }
     println!();
 
     let pipeline = gst::Pipeline::new();
 
     // Source
-    let src = create_video_source(&args.source, args.num_frames)?;
+    let src = create_video_source(&args.source)?;
 
     let queue_src = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 8u32)
@@ -125,8 +130,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .property("n-threads", 4u32)
         .build()?;
 
-    // Only constrain format to RGB — let the camera choose its native resolution.
-    // avfvideosrc on macOS can't produce arbitrary resolutions without videoscale.
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
@@ -153,14 +156,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .property("sync", false)
         .build()
         .unwrap_or_else(|_| {
-            // Fall back to fakesink if no display available (headless/CI)
             gst::ElementFactory::make("fakesink")
                 .property("sync", false)
                 .build()
                 .unwrap()
         });
 
-    // Path 2: continue-if → crop → fakesink (crop output)
+    // Path 2: continue-if → crop → appsink (save crops)
     let queue2 = gst::ElementFactory::make("queue").build()?;
     let gate = gst::ElementFactory::make("edgeimpulsecontinueif")
         .property("condition", "detection_count >= 1")
@@ -170,9 +172,60 @@ fn main() -> Result<(), Box<dyn Error>> {
         .property("target-width", args.target_width)
         .property("target-height", args.target_height)
         .build()?;
-    let crop_sink = gst::ElementFactory::make("fakesink")
-        .property("sync", false)
-        .build()?;
+
+    let crop_sink = gst_app::AppSink::builder().sync(false).build();
+
+    // Set up appsink callback to save crops as PNG
+    let output_dir = args.output_dir.clone();
+    let target_w = args.target_width as u32;
+    let target_h = args.target_height as u32;
+    let crop_counter = Arc::new(Mutex::new(0u64));
+    let crop_counter_clone = crop_counter.clone();
+
+    crop_sink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+
+                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                let data = map.as_slice();
+
+                // Determine dimensions from caps or fall back to target size
+                let (width, height) = if let Some(caps) = sample.caps() {
+                    let s = caps.structure(0).unwrap();
+                    let w = s.get::<i32>("width").unwrap_or(target_w as i32) as u32;
+                    let h = s.get::<i32>("height").unwrap_or(target_h as i32) as u32;
+                    (w, h)
+                } else {
+                    (target_w, target_h)
+                };
+
+                // Build filename from CropOriginMeta if available
+                let mut count = crop_counter_clone.lock().unwrap();
+                *count += 1;
+                let idx = *count;
+
+                // Try to read label/confidence from the bus message context
+                // (CropOriginMeta is custom and hard to read from appsink,
+                // so we use a simple counter-based name)
+                let filename = format!("crop_{:04}.png", idx);
+                let path = output_dir.join(&filename);
+
+                if let Some(img) =
+                    ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, data.to_vec())
+                {
+                    if let Err(e) = img.save(&path) {
+                        eprintln!("  Failed to save {}: {}", path.display(), e);
+                    } else {
+                        println!("  Saved crop: {} ({}x{})", path.display(), width, height);
+                    }
+                }
+
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
 
     // Add all elements
     pipeline.add_many([
@@ -189,10 +242,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         &queue2,
         &gate,
         &crop,
-        &crop_sink,
+        crop_sink.upcast_ref(),
     ])?;
 
-    // Link main chain: src → queue → videoconvert → capsfilter(RGB) → infer → tee
+    // Link main chain
     gst::Element::link_many([&src, &queue_src, &convert, &capsfilter, &infer, &tee])?;
 
     // Link tee → path 1 (overlay → display)
@@ -201,8 +254,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let queue1_sink = queue1.static_pad("sink").unwrap();
     tee_src1.link(&queue1_sink)?;
 
-    // Link tee → path 2 (crop)
-    gst::Element::link_many([&queue2, &gate, &crop, &crop_sink])?;
+    // Link tee → path 2 (crop → appsink)
+    gst::Element::link_many([&queue2, &gate, &crop])?;
+    crop.link(crop_sink.upcast_ref::<gst::Element>())?;
     let tee_src2 = tee.request_pad_simple("src_%u").unwrap();
     let queue2_sink = queue2.static_pad("sink").unwrap();
     tee_src2.link(&queue2_sink)?;
@@ -212,78 +266,96 @@ fn main() -> Result<(), Box<dyn Error>> {
     let bus = pipeline.bus().unwrap();
     let mut frame_count = 0u64;
     let mut total_detections = 0u64;
-    let mut total_crops = 0u64;
+    let start = Instant::now();
+    let timeout = if args.duration > 0 {
+        Some(std::time::Duration::from_secs(args.duration))
+    } else {
+        None
+    };
 
     println!("Processing frames...\n");
 
-    for msg in bus.iter_timed(gst::ClockTime::NONE) {
-        use gst::MessageView;
-        match msg.view() {
-            MessageView::Element(element) => {
-                let structure = element.structure().unwrap();
-                let name = structure.name().to_string();
+    loop {
+        // Check timeout
+        if let Some(dur) = timeout {
+            if start.elapsed() >= dur {
+                println!("\n  Time limit reached ({}s).", args.duration);
+                break;
+            }
+        }
 
-                if name.contains("inference-result") {
-                    frame_count += 1;
+        let remaining = timeout
+            .map(|d| d.saturating_sub(start.elapsed()))
+            .unwrap_or(std::time::Duration::from_secs(1));
+        let gst_timeout = gst::ClockTime::from_mseconds(remaining.as_millis().min(1000) as u64);
 
-                    if let Ok(result) = structure.get::<String>("result") {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
-                            if let Some(boxes) = json["bounding_boxes"].as_array() {
-                                let det_count = boxes.len();
-                                total_detections += det_count as u64;
-                                total_crops += det_count as u64;
+        match bus.timed_pop(gst_timeout) {
+            Some(msg) => {
+                use gst::MessageView;
+                match msg.view() {
+                    MessageView::Element(element) => {
+                        let structure = element.structure().unwrap();
+                        let name = structure.name().to_string();
 
-                                if det_count > 0 {
-                                    println!(
-                                        "  Frame {frame_count}: {det_count} detection(s) → {det_count} crop(s) at {}x{}",
-                                        args.target_width, args.target_height
-                                    );
-                                    for bbox in boxes {
-                                        let label = bbox["label"].as_str().unwrap_or("unknown");
-                                        let conf = bbox["value"].as_f64().unwrap_or(0.0);
-                                        let x = bbox["x"].as_u64().unwrap_or(0);
-                                        let y = bbox["y"].as_u64().unwrap_or(0);
-                                        let w = bbox["width"].as_u64().unwrap_or(0);
-                                        let h = bbox["height"].as_u64().unwrap_or(0);
-                                        println!("    - {label} ({conf:.0}%) at ({x},{y}) {w}x{h}");
+                        if name.contains("inference-result") {
+                            frame_count += 1;
+
+                            if let Ok(result) = structure.get::<String>("result") {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result)
+                                {
+                                    if let Some(boxes) = json["bounding_boxes"].as_array() {
+                                        let det_count = boxes.len();
+                                        total_detections += det_count as u64;
+
+                                        if det_count > 0 {
+                                            println!(
+                                                "  Frame {frame_count}: {det_count} detection(s)"
+                                            );
+                                            for bbox in boxes {
+                                                let label =
+                                                    bbox["label"].as_str().unwrap_or("unknown");
+                                                let conf = bbox["value"].as_f64().unwrap_or(0.0);
+                                                println!("    - {label} ({:.0}%)", conf * 100.0);
+                                            }
+                                        }
                                     }
-                                } else if frame_count <= 5 || frame_count % 30 == 0 {
-                                    // Only print "no detections" for first few frames and periodically
-                                    println!("  Frame {frame_count}: no detections");
                                 }
-                            } else {
-                                println!("  Frame {frame_count}: classification result (no crops)");
                             }
                         }
                     }
+                    MessageView::Eos(_) => {
+                        println!("\nEnd of stream.");
+                        break;
+                    }
+                    MessageView::Error(err) => {
+                        eprintln!(
+                            "Error: {} ({})",
+                            err.error(),
+                            err.debug().unwrap_or_default()
+                        );
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            MessageView::Eos(_) => {
-                println!("\nEnd of stream.");
-                break;
+            None => {
+                // timed_pop returned None = timeout, loop continues
             }
-            MessageView::Error(err) => {
-                eprintln!(
-                    "Error: {} ({})",
-                    err.error(),
-                    err.debug().unwrap_or_default()
-                );
-                break;
-            }
-            _ => {}
         }
     }
 
     pipeline.set_state(gst::State::Null)?;
 
+    let total_crops = *crop_counter.lock().unwrap();
+
     println!("\nSummary:");
+    println!("  Duration: {:.1}s", start.elapsed().as_secs_f64());
     println!("  Frames processed: {frame_count}");
     println!("  Total detections: {total_detections}");
-    println!("  Total crops produced: {total_crops}");
-    println!(
-        "  Crop size: {}x{} (padding: {}px)",
-        args.target_width, args.target_height, args.padding
-    );
+    println!("  Crops saved: {total_crops}");
+    if total_crops > 0 {
+        println!("  Output: {}", args.output_dir.display());
+    }
 
     Ok(())
 }

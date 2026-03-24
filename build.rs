@@ -128,6 +128,12 @@ pub const CROP_ORIGIN_META_API_NAME: &str = "CropOriginMetaAPI{}";
 #[allow(dead_code)]
 pub const CROP_ORIGIN_META_NAME: &str = "CropOriginMeta{}";
 
+// Generic inference result meta (shared across audio and video)
+#[allow(dead_code)]
+pub const INFERENCE_RESULT_META_API_NAME: &str = "InferenceResultMetaAPI{}";
+#[allow(dead_code)]
+pub const INFERENCE_RESULT_META_NAME: &str = "InferenceResultMeta{}";
+
 // Metadata GType names (API types)
 #[allow(dead_code)]
 pub const VIDEO_CLASSIFICATION_META_API_NAME: &str = "VideoClassificationMetaAPI{}";
@@ -141,18 +147,20 @@ pub const VIDEO_CLASSIFICATION_META_NAME: &str = "VideoClassificationMeta{}";
 pub const VIDEO_ANOMALY_META_NAME: &str = "VideoAnomalyMeta{}";
 "#,
         plugin_variant,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix,
+        type_suffix, // VIDEO_INFER_TYPE_NAME
+        type_suffix, // AUDIO_INFER_TYPE_NAME
+        type_suffix, // OVERLAY_TYPE_NAME
+        type_suffix, // SINK_TYPE_NAME
         type_suffix, // FILTER_TYPE_NAME
         type_suffix, // CROP_TYPE_NAME
         type_suffix, // CROP_ORIGIN_META_API_NAME
         type_suffix, // CROP_ORIGIN_META_NAME
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix
+        type_suffix, // INFERENCE_RESULT_META_API_NAME
+        type_suffix, // INFERENCE_RESULT_META_NAME
+        type_suffix, // VIDEO_CLASSIFICATION_META_API_NAME
+        type_suffix, // VIDEO_ANOMALY_META_API_NAME
+        type_suffix, // VIDEO_CLASSIFICATION_META_NAME
+        type_suffix, // VIDEO_ANOMALY_META_NAME
     );
     std::fs::write(&type_names_path, type_names_code).expect("Failed to write type names file");
 

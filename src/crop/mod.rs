@@ -29,4 +29,6 @@ pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     )
 }
 
+// Re-export for downstream consumers
+#[allow(unused_imports)]
 pub use meta::CropOriginMeta;

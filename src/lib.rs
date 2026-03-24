@@ -5,6 +5,7 @@ mod audio;
 mod common;
 mod crop;
 mod filter;
+pub mod meta;
 mod overlay;
 pub mod sink;
 pub mod video;

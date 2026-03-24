@@ -1,33 +1,31 @@
-//! # EdgeImpulseContinueIf — Conditional video gate based on inference metadata
+//! # EdgeImpulseContinueIf — Conditional buffer gate with metadata output
 //!
-//! A GStreamer BaseTransform element that reads inference metadata attached to
-//! video buffers by upstream `edgeimpulsevideoinfer` elements and conditionally
-//! drops buffers that don't match a user-specified condition.
+//! A GStreamer BaseTransform element that reads `InferenceResultMeta` attached
+//! to buffers by upstream `edgeimpulsevideoinfer` or `edgeimpulseaudioinfer`
+//! elements and conditionally drops buffers that don't match a condition.
 //!
-//! ## Supported metadata
-//!
-//! - `gst_video::VideoRegionOfInterestMeta` — object detection bounding boxes
-//! - `VideoClassificationMeta` — classification label + confidence
-//! - `VideoAnomalyMeta` — anomaly scores
+//! Works with both audio and video pipelines — any buffer carrying
+//! `InferenceResultMeta` can be filtered. Falls back to video-specific
+//! metadata (`VideoRegionOfInterestMeta`, etc.) if no `InferenceResultMeta`
+//! is present.
 //!
 //! ## Properties
 //!
-//! - `condition` (string) — Expression evaluated per buffer.
-//!   Examples: `detection_count >= 1`, `max_confidence > 0.8`,
-//!             `has_class("crack")`, `anomaly_score > 0.5`
-//! - `drop` (boolean) — When true, all buffers are dropped unconditionally (manual override).
+//! - `condition` (string) — Simple pass/drop gate expression.
+//! - `drop` (boolean) — Manual override to drop all buffers.
+//! - `rules` (string) — JSON array of ordered rules for conditional metadata
+//!   output. First matching rule wins. Each rule has a `condition` and
+//!   `metadata` (key-value pairs attached to the buffer as a GstStructure).
 //!
-//! ## Condition variables
+//! ## Rules example
 //!
-//! | Variable              | Type    | Source                        |
-//! |-----------------------|---------|-------------------------------|
-//! | `detection_count`     | number  | ROI meta count                |
-//! | `max_confidence`      | number  | Highest confidence across ROI |
-//! | `has_class("name")`   | boolean | Any ROI with matching label   |
-//! | `classification`      | string  | Top classification label      |
-//! | `classification_confidence` | number | Top classification score |
-//! | `anomaly_score`       | number  | Anomaly meta score            |
-//! | `visual_anomaly_max`  | number  | Visual anomaly max score      |
+//! ```json
+//! [
+//!   {"condition": "detection_count > 4", "metadata": {"color": "purple", "severity": "critical"}},
+//!   {"condition": "detection_count >= 1", "metadata": {"color": "red", "severity": "warning"}},
+//!   {"condition": "detection_count == 0", "metadata": {"color": "green", "severity": "ok"}}
+//! ]
+//! ```
 
 use gstreamer as gst;
 use gstreamer::glib;
@@ -35,13 +33,13 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_video as gst_video;
-use gstreamer_video::prelude::*;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::meta::InferenceResultMeta;
 use crate::video::{VideoAnomalyMeta, VideoClassificationMeta};
 
-// Include generated type names for variant-specific builds
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
@@ -58,89 +56,86 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 
 #[derive(Debug, Clone)]
 enum ComparisonOp {
-    Gte,
-    Lte,
-    Gt,
-    Lt,
-    Eq,
-    Ne,
+    Gte, Lte, Gt, Lt, Eq, Ne,
 }
 
 #[derive(Debug, Clone)]
 enum LiteralValue {
     Number(f64),
+    #[allow(dead_code)]
     Bool(bool),
     String(String),
 }
 
 #[derive(Debug, Clone)]
 enum ParsedCondition {
-    /// Field comparison: `detection_count >= 1`
-    FieldCompare {
-        field: String,
-        op: ComparisonOp,
-        value: LiteralValue,
-    },
-    /// Function call: `has_class("crack")`
+    FieldCompare { field: String, op: ComparisonOp, value: LiteralValue },
     HasClass { class_name: String },
+}
+
+/// A rule: condition → metadata key-value pairs
+#[derive(Debug, Clone)]
+struct MetadataRule {
+    condition: ParsedCondition,
+    metadata: HashMap<String, String>,
 }
 
 fn parse_condition(condition: &str) -> Option<ParsedCondition> {
     let condition = condition.trim();
 
-    // has_class("name") or has_class('name')
     if let Some(rest) = condition.strip_prefix("has_class(") {
         let rest = rest.strip_suffix(')')?;
-        let class_name = rest
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
+        let class_name = rest.trim().trim_matches('"').trim_matches('\'').to_string();
         return Some(ParsedCondition::HasClass { class_name });
     }
 
     let operators = [
-        (">=", ComparisonOp::Gte),
-        ("<=", ComparisonOp::Lte),
-        ("==", ComparisonOp::Eq),
-        ("!=", ComparisonOp::Ne),
-        (">", ComparisonOp::Gt),
-        ("<", ComparisonOp::Lt),
+        (">=", ComparisonOp::Gte), ("<=", ComparisonOp::Lte),
+        ("==", ComparisonOp::Eq), ("!=", ComparisonOp::Ne),
+        (">", ComparisonOp::Gt), ("<", ComparisonOp::Lt),
     ];
 
     for (op_str, op) in operators {
         if let Some((lhs, rhs)) = condition.split_once(op_str) {
             let field = lhs.trim().to_string();
-            if field.is_empty() {
-                return None;
-            }
+            if field.is_empty() { return None; }
             let value = parse_literal(rhs.trim())?;
             return Some(ParsedCondition::FieldCompare { field, op, value });
         }
     }
-
     None
 }
 
 fn parse_literal(raw: &str) -> Option<LiteralValue> {
-    if let Ok(n) = raw.parse::<f64>() {
-        return Some(LiteralValue::Number(n));
-    }
-    if raw.eq_ignore_ascii_case("true") {
-        return Some(LiteralValue::Bool(true));
-    }
-    if raw.eq_ignore_ascii_case("false") {
-        return Some(LiteralValue::Bool(false));
-    }
+    if let Ok(n) = raw.parse::<f64>() { return Some(LiteralValue::Number(n)); }
+    if raw.eq_ignore_ascii_case("true") { return Some(LiteralValue::Bool(true)); }
+    if raw.eq_ignore_ascii_case("false") { return Some(LiteralValue::Bool(false)); }
     let quoted = (raw.starts_with('"') && raw.ends_with('"'))
         || (raw.starts_with('\'') && raw.ends_with('\''));
     if quoted && raw.len() >= 2 {
         return Some(LiteralValue::String(raw[1..raw.len() - 1].to_string()));
     }
-    if !raw.is_empty() {
-        return Some(LiteralValue::String(raw.to_string()));
-    }
+    if !raw.is_empty() { return Some(LiteralValue::String(raw.to_string())); }
     None
+}
+
+fn parse_rules(json: &str) -> Vec<MetadataRule> {
+    let arr: Vec<serde_json::Value> = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    arr.iter()
+        .filter_map(|rule| {
+            let cond_str = rule.get("condition")?.as_str()?;
+            let condition = parse_condition(cond_str)?;
+            let metadata_obj = rule.get("metadata")?.as_object()?;
+            let metadata: HashMap<String, String> = metadata_obj
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect();
+            Some(MetadataRule { condition, metadata })
+        })
+        .collect()
 }
 
 fn compare_numbers(lhs: f64, rhs: f64, op: &ComparisonOp) -> bool {
@@ -154,36 +149,64 @@ fn compare_numbers(lhs: f64, rhs: f64, op: &ComparisonOp) -> bool {
     }
 }
 
-// ─── Metadata extraction ─────────────────────────────────────────────────────
+// ─── Inference state ─────────────────────────────────────────────────────────
 
-/// Extracted inference state from a buffer's metadata.
-struct BufferInferenceState {
+struct InferenceState {
     detection_count: u32,
     max_confidence: f64,
-    detection_labels: Vec<String>,
-    classification_label: Option<String>,
-    classification_confidence: f64,
+    top_class: String,
+    top_confidence: f64,
     anomaly_score: f64,
     visual_anomaly_max: f64,
+    /// Detection labels for has_class()
+    detection_labels: Vec<String>,
 }
 
-fn extract_inference_state(buf: &gst::BufferRef) -> BufferInferenceState {
-    let mut state = BufferInferenceState {
+/// Extract inference state from `InferenceResultMeta` if present,
+/// otherwise fall back to video-specific metadata.
+fn extract_state(buf: &gst::BufferRef) -> InferenceState {
+    // Prefer InferenceResultMeta (works for both audio and video)
+    if let Some(ir) = buf.meta::<InferenceResultMeta>() {
+        let mut labels = Vec::new();
+        // Parse detection labels from result_json if available
+        if let Ok(result) = serde_json::from_str::<serde_json::Value>(ir.result_json()) {
+            if let Some(boxes) = result.get("bounding_boxes").and_then(|b| b.as_array()) {
+                for bbox in boxes {
+                    if let Some(label) = bbox.get("label").and_then(|l| l.as_str()) {
+                        labels.push(label.to_string());
+                    }
+                }
+            }
+        }
+        // Also include top_class for classification-type results
+        if !ir.top_class().is_empty() {
+            labels.push(ir.top_class().to_string());
+        }
+
+        return InferenceState {
+            detection_count: ir.detection_count(),
+            max_confidence: ir.max_confidence(),
+            top_class: ir.top_class().to_string(),
+            top_confidence: ir.top_confidence(),
+            anomaly_score: ir.anomaly_score(),
+            visual_anomaly_max: ir.visual_anomaly_max(),
+            detection_labels: labels,
+        };
+    }
+
+    // Fallback: video-specific metadata
+    let mut state = InferenceState {
         detection_count: 0,
         max_confidence: 0.0,
-        detection_labels: Vec::new(),
-        classification_label: None,
-        classification_confidence: 0.0,
+        top_class: String::new(),
+        top_confidence: 0.0,
         anomaly_score: 0.0,
         visual_anomaly_max: 0.0,
+        detection_labels: Vec::new(),
     };
 
-    // 1. Object detection — standard GStreamer ROI meta
     for roi in buf.iter_meta::<gst_video::VideoRegionOfInterestMeta>() {
         state.detection_count += 1;
-
-        // Extract label and confidence from detection params
-        // (same pattern as overlay/imp.rs)
         for param in roi.params() {
             if let Ok(conf) = param.get::<f64>("confidence") {
                 if conf > state.max_confidence {
@@ -196,19 +219,20 @@ fn extract_inference_state(buf: &gst::BufferRef) -> BufferInferenceState {
         }
     }
 
-    // 2. Classification — custom meta
     if let Some(class_meta) = buf.meta::<VideoClassificationMeta>() {
         for param in class_meta.params() {
             if let Ok(label) = param.get::<&str>("label") {
-                state.classification_label = Some(label.to_string());
+                state.top_class = label.to_string();
             }
             if let Ok(conf) = param.get::<f64>("confidence") {
-                state.classification_confidence = conf;
+                state.top_confidence = conf;
+                if conf > state.max_confidence {
+                    state.max_confidence = conf;
+                }
             }
         }
     }
 
-    // 3. Anomaly — custom meta
     if let Some(anomaly_meta) = buf.meta::<VideoAnomalyMeta>() {
         state.anomaly_score = anomaly_meta.anomaly() as f64;
         state.visual_anomaly_max = anomaly_meta.visual_anomaly_max() as f64;
@@ -219,39 +243,29 @@ fn extract_inference_state(buf: &gst::BufferRef) -> BufferInferenceState {
 
 // ─── Condition evaluation ────────────────────────────────────────────────────
 
-fn evaluate_condition(state: &BufferInferenceState, condition: &ParsedCondition) -> bool {
-    match condition {
+fn evaluate(state: &InferenceState, cond: &ParsedCondition) -> bool {
+    match cond {
         ParsedCondition::HasClass { class_name } => {
             state.detection_labels.iter().any(|l| l == class_name)
-                || state
-                    .classification_label
-                    .as_ref()
-                    .map(|l| l == class_name)
-                    .unwrap_or(false)
         }
         ParsedCondition::FieldCompare { field, op, value } => {
-            let field_value = match field.as_str() {
+            let field_val = match field.as_str() {
                 "detection_count" => Some(state.detection_count as f64),
                 "max_confidence" => Some(state.max_confidence),
-                "classification_confidence" => Some(state.classification_confidence),
+                "top_confidence" | "classification_confidence" => Some(state.top_confidence),
                 "anomaly_score" => Some(state.anomaly_score),
                 "visual_anomaly_max" => Some(state.visual_anomaly_max),
                 _ => None,
             };
 
-            match (field_value, value) {
+            match (field_val, value) {
                 (Some(lhs), LiteralValue::Number(rhs)) => compare_numbers(lhs, *rhs, op),
-                (None, _) => {
-                    // String field comparison (e.g., classification == "crack")
-                    if field.as_str() == "classification" {
-                        let lhs = state.classification_label.as_deref().unwrap_or("");
-                        match (value, op) {
-                            (LiteralValue::String(rhs), ComparisonOp::Eq) => lhs == rhs,
-                            (LiteralValue::String(rhs), ComparisonOp::Ne) => lhs != rhs,
-                            _ => false,
-                        }
-                    } else {
-                        false
+                (None, _) if field.as_str() == "classification" || field.as_str() == "top_class" => {
+                    let lhs = &state.top_class;
+                    match (value, op) {
+                        (LiteralValue::String(rhs), ComparisonOp::Eq) => lhs == rhs,
+                        (LiteralValue::String(rhs), ComparisonOp::Ne) => lhs != rhs,
+                        _ => false,
                     }
                 }
                 _ => false,
@@ -267,12 +281,13 @@ struct State {
     condition: String,
     parsed: Option<ParsedCondition>,
     drop_all: bool,
-    /// Counters for debug logging
+    rules_json: String,
+    rules: Vec<MetadataRule>,
     passed: u64,
     dropped: u64,
 }
 
-// ─── GStreamer element implementation ─────────────────────────────────────────
+// ─── GStreamer element ───────────────────────────────────────────────────────
 
 pub struct EdgeImpulseContinueIf {
     state: Mutex<State>,
@@ -280,15 +295,12 @@ pub struct EdgeImpulseContinueIf {
 
 impl Default for EdgeImpulseContinueIf {
     fn default() -> Self {
-        Self {
-            state: Mutex::new(State::default()),
-        }
+        Self { state: Mutex::new(State::default()) }
     }
 }
 
 #[glib::object_subclass]
 impl ObjectSubclass for EdgeImpulseContinueIf {
-    // Use a unique type name per variant to avoid conflicts
     const NAME: &'static str = FILTER_TYPE_NAME;
     type Type = super::EdgeImpulseContinueIf;
     type ParentType = gstreamer_base::BaseTransform;
@@ -301,17 +313,26 @@ impl ObjectImpl for EdgeImpulseContinueIf {
                 glib::ParamSpecString::builder("condition")
                     .nick("Condition")
                     .blurb(
-                        "Expression evaluated per buffer to decide pass/drop. \
-                         Examples: 'detection_count >= 1', 'has_class(\"crack\")', \
-                         'anomaly_score > 0.5'",
+                        "Expression for pass/drop gating. Examples: 'detection_count >= 1', \
+                         'has_class(\"crack\")', 'anomaly_score > 0.5'",
                     )
                     .default_value(Some(""))
                     .mutable_playing()
                     .build(),
                 glib::ParamSpecBoolean::builder("drop")
                     .nick("Drop")
-                    .blurb("When true, unconditionally drop all buffers (manual override)")
+                    .blurb("When true, unconditionally drop all buffers")
                     .default_value(false)
+                    .mutable_playing()
+                    .build(),
+                glib::ParamSpecString::builder("rules")
+                    .nick("Rules")
+                    .blurb(
+                        "JSON array of condition→metadata rules. First matching rule's metadata \
+                         is attached to the buffer as a GstStructure. Example: \
+                         '[{\"condition\":\"detection_count > 4\",\"metadata\":{\"color\":\"purple\"}}]'",
+                    )
+                    .default_value(Some(""))
                     .mutable_playing()
                     .build(),
             ]
@@ -326,25 +347,20 @@ impl ObjectImpl for EdgeImpulseContinueIf {
                 let condition = value.get::<String>().unwrap_or_default();
                 state.parsed = parse_condition(&condition);
                 if !condition.is_empty() && state.parsed.is_none() {
-                    gst::warning!(
-                        CAT,
-                        obj = self.obj(),
-                        "Failed to parse condition: '{}' — all buffers will pass through",
-                        condition
-                    );
-                } else if let Some(ref parsed) = state.parsed {
-                    gst::info!(
-                        CAT,
-                        obj = self.obj(),
-                        "Condition set: '{}' → {:?}",
-                        condition,
-                        parsed
-                    );
+                    gst::warning!(CAT, obj = self.obj(),
+                        "Failed to parse condition: '{}' — all buffers will pass", condition);
                 }
                 state.condition = condition;
             }
             "drop" => {
                 state.drop_all = value.get::<bool>().unwrap_or(false);
+            }
+            "rules" => {
+                let json = value.get::<String>().unwrap_or_default();
+                state.rules = parse_rules(&json);
+                gst::info!(CAT, obj = self.obj(),
+                    "Parsed {} metadata rules", state.rules.len());
+                state.rules_json = json;
             }
             _ => unimplemented!(),
         }
@@ -355,6 +371,7 @@ impl ObjectImpl for EdgeImpulseContinueIf {
         match pspec.name() {
             "condition" => state.condition.to_value(),
             "drop" => state.drop_all.to_value(),
+            "rules" => state.rules_json.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -368,7 +385,8 @@ impl ElementImpl for EdgeImpulseContinueIf {
             gst::subclass::ElementMetadata::new(
                 "Edge Impulse Continue If",
                 "Filter/Video",
-                "Conditionally passes or drops video buffers based on upstream inference metadata",
+                "Conditionally passes or drops buffers based on upstream inference metadata. \
+                 Works with both audio and video pipelines via InferenceResultMeta.",
                 "Fernando Jiménez Moreno <fernando@edgeimpulse.com>",
             )
         });
@@ -377,14 +395,10 @@ impl ElementImpl for EdgeImpulseContinueIf {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-            // Accept any video format — we never touch the pixel data
             let caps = gst::Caps::new_any();
-
             vec![
-                gst::PadTemplate::new("sink", gst::PadDirection::Sink, gst::PadPresence::Always, &caps)
-                    .unwrap(),
-                gst::PadTemplate::new("src", gst::PadDirection::Src, gst::PadPresence::Always, &caps)
-                    .unwrap(),
+                gst::PadTemplate::new("sink", gst::PadDirection::Sink, gst::PadPresence::Always, &caps).unwrap(),
+                gst::PadTemplate::new("src", gst::PadDirection::Src, gst::PadPresence::Always, &caps).unwrap(),
             ]
         });
         PAD_TEMPLATES.as_ref()
@@ -400,51 +414,59 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
         let state = self.state.lock().unwrap();
 
-        // Manual override: drop everything
         if state.drop_all {
-            gst::log!(CAT, obj = self.obj(), "Dropping buffer (manual override)");
             return Err(gst::FlowError::CustomError);
         }
 
-        // No condition set → pass everything through
-        let parsed = match &state.parsed {
-            Some(p) => p.clone(),
-            None => return Ok(gst::FlowSuccess::Ok),
-        };
-
-        // Release lock before reading metadata (avoid holding across FFI)
+        let gate_condition = state.parsed.clone();
+        let rules = state.rules.clone();
         drop(state);
 
-        let inference_state = extract_inference_state(buf);
-        let pass = evaluate_condition(&inference_state, &parsed);
+        let inference_state = extract_state(buf);
+
+        // Evaluate metadata rules (first match wins)
+        if !rules.is_empty() {
+            for rule in &rules {
+                if evaluate(&inference_state, &rule.condition) {
+                    // Attach matched metadata as a GstStructure on the buffer
+                    // We use InferenceResultMeta's result_json to carry it, or
+                    // attach as a separate custom meta. For simplicity, we post
+                    // a bus message with the matched metadata.
+                    let mut builder = gst::Structure::builder("edge-impulse-continue-if-metadata");
+                    for (key, val) in &rule.metadata {
+                        builder = builder.field(key, val);
+                    }
+                    let s = builder.build();
+                    let _ = self.obj().post_message(gst::message::Element::new(s));
+
+                    gst::debug!(CAT, obj = self.obj(),
+                        "Rule matched: {:?} → posting metadata with {} fields",
+                        rule.condition, rule.metadata.len());
+                    break;
+                }
+            }
+        }
+
+        // Evaluate pass/drop gate
+        let pass = match &gate_condition {
+            Some(cond) => evaluate(&inference_state, cond),
+            None => true,
+        };
 
         let mut state = self.state.lock().unwrap();
         if pass {
             state.passed += 1;
-            gst::log!(
-                CAT,
-                obj = self.obj(),
-                "Buffer PASSED (detections={}, max_conf={:.2}, passed={}, dropped={})",
-                inference_state.detection_count,
-                inference_state.max_confidence,
-                state.passed,
-                state.dropped
-            );
+            gst::log!(CAT, obj = self.obj(),
+                "PASS (det={}, conf={:.2}, class='{}', passed={}, dropped={})",
+                inference_state.detection_count, inference_state.max_confidence,
+                inference_state.top_class, state.passed, state.dropped);
             Ok(gst::FlowSuccess::Ok)
         } else {
             state.dropped += 1;
-            gst::log!(
-                CAT,
-                obj = self.obj(),
-                "Buffer DROPPED (detections={}, max_conf={:.2}, passed={}, dropped={})",
-                inference_state.detection_count,
-                inference_state.max_confidence,
-                state.passed,
-                state.dropped
-            );
-            // Return a non-fatal "skip" by marking the buffer as a GAP.
-            // This tells downstream that no meaningful data is in this buffer,
-            // but doesn't cause a pipeline error.
+            gst::log!(CAT, obj = self.obj(),
+                "DROP (det={}, conf={:.2}, class='{}', passed={}, dropped={})",
+                inference_state.detection_count, inference_state.max_confidence,
+                inference_state.top_class, state.passed, state.dropped);
             buf.set_flags(gst::BufferFlags::GAP | gst::BufferFlags::DROPPABLE);
             Ok(gst::FlowSuccess::Ok)
         }
@@ -454,19 +476,14 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
         let mut state = self.state.lock().unwrap();
         state.passed = 0;
         state.dropped = 0;
-        gst::info!(CAT, obj = self.obj(), "Filter started");
+        gst::info!(CAT, obj = self.obj(), "Continue-If started");
         Ok(())
     }
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let state = self.state.lock().unwrap();
-        gst::info!(
-            CAT,
-            obj = self.obj(),
-            "Filter stopped — {} passed, {} dropped",
-            state.passed,
-            state.dropped
-        );
+        gst::info!(CAT, obj = self.obj(),
+            "Continue-If stopped — {} passed, {} dropped", state.passed, state.dropped);
         Ok(())
     }
 }

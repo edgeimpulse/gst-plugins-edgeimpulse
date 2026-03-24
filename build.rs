@@ -116,6 +116,10 @@ pub const OVERLAY_TYPE_NAME: &str = "EdgeImpulseOverlay{}";
 #[allow(dead_code)]
 pub const SINK_TYPE_NAME: &str = "GstEdgeImpulseSink{}";
 
+// Filter element type name
+#[allow(dead_code)]
+pub const FILTER_TYPE_NAME: &str = "EdgeImpulseContinueIf{}";
+
 // Metadata GType names (API types)
 #[allow(dead_code)]
 pub const VIDEO_CLASSIFICATION_META_API_NAME: &str = "VideoClassificationMetaAPI{}";
@@ -133,6 +137,7 @@ pub const VIDEO_ANOMALY_META_NAME: &str = "VideoAnomalyMeta{}";
         type_suffix,
         type_suffix,
         type_suffix,
+        type_suffix, // FILTER_TYPE_NAME
         type_suffix,
         type_suffix,
         type_suffix,

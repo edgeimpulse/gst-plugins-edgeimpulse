@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Dynamic Crop Example — two-stage detection → classification pipeline
 //!
 //! Demonstrates `edgeimpulsecrop` in a realistic pipeline:
@@ -7,18 +9,14 @@
 //!     └─ continue-if → crop → appsink (save crops as PNG)
 //!
 //! Each detected object is cropped from the frame, resized to a target size,
-//! and saved as a PNG file in the output directory. Each file is named with
-//! the frame number, detection label, and confidence.
+//! and saved as a PNG file in the output directory.
 //!
 //! Usage:
 //!   # FFI mode with camera (default, runs for 5 seconds):
 //!   cargo run --release --example dynamic_crop
 //!
-//!   # EIM mode:
-//!   cargo run --release --example dynamic_crop -- --model <path_to_model>
-//!
 //!   # Custom duration, crop size, output directory:
-//!   cargo run --release --example dynamic_crop -- --duration 10 --target-width 128 --target-height 128 --output-dir ./my_crops
+//!   cargo run --release --example dynamic_crop -- --duration 10 --target-width 128 --output-dir ./my_crops
 //!
 //!   # Use test video source instead of camera:
 //!   cargo run --release --example dynamic_crop -- --source test
@@ -26,12 +24,12 @@
 //! Environment setup:
 //!   export GST_PLUGIN_PATH="target/release:$GST_PLUGIN_PATH"
 
+use anyhow::Result;
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use image::ImageBuffer;
-use std::error::Error;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -68,8 +66,86 @@ struct Args {
     output_dir: PathBuf,
 }
 
-/// Create the video source element based on the --source flag.
-fn create_video_source(source: &str) -> Result<gst::Element, Box<dyn Error>> {
+// ─── macOS run loop ──────────────────────────────────────────────────────────
+// GStreamer video sinks on macOS require an NSApplication run loop on the main
+// thread. This wrapper starts the Cocoa app, runs the pipeline on a background
+// thread, and stops the app when the pipeline finishes.
+
+#[cfg(not(target_os = "macos"))]
+fn run<T, F: FnOnce() -> T + Send + 'static>(main: F) -> T
+where
+    T: Send + 'static,
+{
+    main()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn run<T, F: FnOnce() -> T + Send + 'static>(main: F) -> T
+where
+    T: Send + 'static,
+{
+    use cocoa::{
+        appkit::{NSApplication, NSWindow},
+        base::id,
+        delegate,
+    };
+    use objc::{
+        msg_send,
+        runtime::{Object, Sel},
+        sel, sel_impl,
+    };
+    use std::{ffi::c_void, sync::mpsc::Sender, thread};
+
+    unsafe {
+        let app = cocoa::appkit::NSApp();
+        let (send, recv) = std::sync::mpsc::channel::<()>();
+
+        extern "C" fn on_finish_launching(this: &Object, _cmd: Sel, _notification: id) {
+            let send = unsafe {
+                let ptr = *this.get_ivar::<*const c_void>("send");
+                let boxed = Box::from_raw(ptr as *mut Sender<()>);
+                *boxed
+            };
+            send.send(()).unwrap();
+        }
+
+        let delegate = delegate!("AppDelegate", {
+            app: id = app,
+            send: *const c_void = Box::into_raw(Box::new(send)) as *const c_void,
+            (applicationDidFinishLaunching:) => on_finish_launching as extern "C" fn(&Object, Sel, id)
+        });
+        app.setDelegate_(delegate);
+
+        let t = thread::spawn(move || {
+            recv.recv().unwrap();
+            let res = main();
+            let app = cocoa::appkit::NSApp();
+            app.stop_(cocoa::base::nil);
+            let event = cocoa::appkit::NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                cocoa::base::nil,
+                cocoa::appkit::NSEventType::NSApplicationDefined,
+                cocoa::foundation::NSPoint { x: 0.0, y: 0.0 },
+                cocoa::appkit::NSEventModifierFlags::empty(),
+                0.0,
+                0,
+                cocoa::base::nil,
+                cocoa::appkit::NSEventSubtype::NSApplicationActivatedEventType,
+                0,
+                0,
+            );
+            app.postEvent_atStart_(event, cocoa::base::YES);
+            res
+        });
+
+        app.run();
+        t.join().unwrap()
+    }
+}
+
+// ─── Video source ────────────────────────────────────────────────────────────
+
+fn create_video_source(source: &str) -> Result<gst::Element> {
     match source {
         "test" => Ok(gst::ElementFactory::make("videotestsrc")
             .property_from_str("pattern", "smpte")
@@ -88,17 +164,19 @@ fn create_video_source(source: &str) -> Result<gst::Element, Box<dyn Error>> {
                 println!("  Using v4l2src (Linux camera)");
                 Ok(src)
             } else {
-                Err("No camera source available. Use --source test".into())
+                Err(anyhow::anyhow!(
+                    "No camera source available. Use --source test"
+                ))
             }
         }
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+// ─── Pipeline ────────────────────────────────────────────────────────────────
+
+fn run_pipeline(args: Args) -> Result<()> {
     gst::init()?;
 
-    // Create output directory
     std::fs::create_dir_all(&args.output_dir)?;
 
     println!("Dynamic Crop Example");
@@ -148,7 +226,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Tee: split into overlay path + crop path
     let tee = gst::ElementFactory::make("tee").build()?;
 
-    // Path 1: overlay → autovideosink (live display)
+    // Path 1: overlay → autovideosink (live display with bounding boxes)
     let queue1 = gst::ElementFactory::make("queue").build()?;
     let overlay = gst::ElementFactory::make("edgeimpulseoverlay").build()?;
     let convert_display = gst::ElementFactory::make("videoconvert").build()?;
@@ -156,13 +234,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .property("sync", false)
         .build()
         .unwrap_or_else(|_| {
+            println!("  No display available, using fakesink for overlay path");
             gst::ElementFactory::make("fakesink")
                 .property("sync", false)
                 .build()
                 .unwrap()
         });
 
-    // Path 2: continue-if → crop → appsink (save crops)
+    // Path 2: continue-if → crop → appsink (save crops as PNG)
     let queue2 = gst::ElementFactory::make("queue").build()?;
     let gate = gst::ElementFactory::make("edgeimpulsecontinueif")
         .property("condition", "detection_count >= 1")
@@ -191,7 +270,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                 let data = map.as_slice();
 
-                // Determine dimensions from caps or fall back to target size
                 let (width, height) = if let Some(caps) = sample.caps() {
                     let s = caps.structure(0).unwrap();
                     let w = s.get::<i32>("width").unwrap_or(target_w as i32) as u32;
@@ -201,14 +279,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     (target_w, target_h)
                 };
 
-                // Build filename from CropOriginMeta if available
                 let mut count = crop_counter_clone.lock().unwrap();
                 *count += 1;
                 let idx = *count;
 
-                // Try to read label/confidence from the bus message context
-                // (CropOriginMeta is custom and hard to read from appsink,
-                // so we use a simple counter-based name)
                 let filename = format!("crop_{:04}.png", idx);
                 let path = output_dir.join(&filename);
 
@@ -276,7 +350,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Processing frames...\n");
 
     loop {
-        // Check timeout
         if let Some(dur) = timeout {
             if start.elapsed() >= dur {
                 println!("\n  Time limit reached ({}s).", args.duration);
@@ -338,9 +411,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     _ => {}
                 }
             }
-            None => {
-                // timed_pop returned None = timeout, loop continues
-            }
+            None => {}
         }
     }
 
@@ -358,4 +429,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn main() {
+    let args = Args::parse();
+    run(move || run_pipeline(args).expect("Pipeline failed"));
 }

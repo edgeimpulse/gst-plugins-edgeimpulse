@@ -1,0 +1,16 @@
+services:
+  e2e-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        - EI_PROJECT_ID=${EI_PROJECT_ID}
+        - EI_API_KEY=${EI_API_KEY}
+        - EI_MODEL=${EI_MODEL:-}
+        - EI_ENGINE=${EI_ENGINE:-tflite}
+        - USE_FULL_TFLITE=${USE_FULL_TFLITE:-1}
+    environment:
+      - GST_PLUGIN_PATH=/app/target/release
+      - GST_DEBUG=${GST_DEBUG:-2}
+      - RUST_LOG=${RUST_LOG:-info}
+    restart: "no"

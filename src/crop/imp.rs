@@ -48,7 +48,6 @@ struct Detection {
 
 // ─── Element state ───────────────────────────────────────────────────────────
 
-#[derive(Debug)]
 struct State {
     /// Extra pixels around each bounding box
     padding: i32,
@@ -60,6 +59,8 @@ struct State {
     video_info: Option<gst_video::VideoInfo>,
     /// Whether we've set output caps yet
     src_caps_set: bool,
+    /// Segment event deferred until after caps are set on src pad
+    pending_segment: Option<gst::Event>,
 }
 
 impl Default for State {
@@ -70,6 +71,7 @@ impl Default for State {
             target_height: 0,
             video_info: None,
             src_caps_set: false,
+            pending_segment: None,
         }
     }
 }
@@ -232,6 +234,7 @@ impl ElementImpl for EdgeImpulseCrop {
             let mut state = self.state.lock().unwrap();
             state.video_info = None;
             state.src_caps_set = false;
+            state.pending_segment = None;
         }
         self.parent_change_state(transition)
     }
@@ -254,6 +257,13 @@ impl EdgeImpulseCrop {
 
                 // Don't forward caps downstream — we'll set our own when we
                 // know the crop dimensions.
+                true
+            }
+            gst::EventView::Segment(_) => {
+                // Hold the segment event — we'll forward it after setting
+                // src caps to avoid "segment before caps" misordering.
+                let mut state = self.state.lock().unwrap();
+                state.pending_segment = Some(event);
                 true
             }
             _ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
@@ -581,9 +591,14 @@ impl EdgeImpulseCrop {
 
         gst::info!(CAT, obj = self.obj(), "Setting src caps: {:?}", caps);
         state.src_caps_set = true;
+        let pending_segment = state.pending_segment.take();
         drop(state);
 
+        // Push caps first, then the deferred segment event — correct ordering
         self.src_pad.push_event(gst::event::Caps::new(&caps));
+        if let Some(segment) = pending_segment {
+            self.src_pad.push_event(segment);
+        }
         Ok(())
     }
 }

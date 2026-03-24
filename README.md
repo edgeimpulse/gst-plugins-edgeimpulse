@@ -2,7 +2,7 @@
 [![CI](https://github.com/edgeimpulse/gst-plugins-edgeimpulse/actions/workflows/ci.yml/badge.svg)](https://github.com/edgeimpulse/gst-plugins-edgeimpulse/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://edgeimpulse.github.io/gst-plugins-edgeimpulse/)
 
-A GStreamer plugin that enables real-time machine learning inference and data ingestion using Edge Impulse models and APIs. The plugin provides four elements for audio and video inference, visualization, and ingestion.
+A GStreamer plugin that enables real-time machine learning inference and data ingestion using Edge Impulse models and APIs. The plugin provides six elements for audio and video inference, visualization, ingestion, and pipeline flow control.
 
 ## Public API: Inference and Ingestion Output
 
@@ -804,6 +804,174 @@ gst-launch-1.0 autoaudiosrc ! audioconvert ! audioresample ! audio/x-raw,format=
 ```
 
 See `examples/audio_ingestion.rs` for a full example with bus message handling.
+
+### edgeimpulsecontinueif
+Conditional gate element that passes or drops video buffers based on upstream inference metadata. Place it after `edgeimpulsevideoinfer` (or after a `tee`) to skip downstream processing when a condition is not met — for example, to avoid running a classification model when no objects were detected.
+
+Element Details:
+- Long name: Edge Impulse Continue If
+- Class: Filter/Video
+- Description: Conditionally passes or drops video buffers based on upstream inference metadata
+
+Pad Templates:
+- Sink pad (Always available):
+  ```
+  ANY
+  ```
+- Source pad (Always available):
+  ```
+  ANY
+  ```
+
+Properties:
+1. `condition` (string):
+   - Expression evaluated per buffer to decide pass/drop
+   - Default: "" (empty = pass all)
+   - Flags: readable, writable, changeable in PLAYING state
+
+2. `drop` (boolean):
+   - When true, unconditionally drop all buffers (manual override)
+   - Default: false
+   - Flags: readable, writable, changeable in PLAYING state
+
+Available condition variables (extracted from buffer metadata):
+
+| Variable | Type | Source |
+|---|---|---|
+| `detection_count` | number | Count of `VideoRegionOfInterestMeta` on buffer |
+| `max_confidence` | number | Highest confidence score across all ROI detections |
+| `has_class("name")` | function | True if any ROI or classification matches the class name |
+| `classification` | string | Top classification label (from `VideoClassificationMeta`) |
+| `classification_confidence` | number | Top classification confidence score |
+| `anomaly_score` | number | Anomaly score (from `VideoAnomalyMeta`) |
+| `visual_anomaly_max` | number | Visual anomaly max score |
+
+Condition syntax:
+```
+detection_count >= 1
+max_confidence > 0.8
+has_class("crack")
+classification == "defect"
+anomaly_score > 0.5
+```
+
+Supported operators: `>=`, `<=`, `>`, `<`, `==`, `!=`
+
+How it works:
+- Reads inference metadata already attached to each buffer by upstream `edgeimpulsevideoinfer`
+- Evaluates the condition expression against the extracted values
+- If the condition is true, the buffer passes through unchanged (zero-copy)
+- If the condition is false, the buffer is marked with `GAP | DROPPABLE` flags
+
+Example pipelines:
+```bash
+# Skip classification when no objects are detected
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! tee name=t \
+    t. ! queue ! edgeimpulseoverlay ! autovideosink \
+    t. ! queue ! edgeimpulsecontinueif condition="detection_count >= 1" ! \
+        edgeimpulsecrop ! edgeimpulsevideoinfer_classification ! fakesink
+
+# Only process high-confidence detections
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! \
+    edgeimpulsecontinueif condition="max_confidence > 0.9" ! \
+    edgeimpulseoverlay ! autovideosink
+
+# Gate on specific class
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! \
+    edgeimpulsecontinueif condition='has_class("crack")' ! \
+    edgeimpulseoverlay ! autovideosink
+```
+
+### edgeimpulsecrop
+Dynamic crop element that extracts detected object regions from video frames based on upstream inference metadata. For each bounding box detected by an upstream `edgeimpulsevideoinfer`, the element produces a separate cropped buffer — enabling multi-stage pipelines where a detection model finds objects and a classification model analyzes each one individually.
+
+Element Details:
+- Long name: Edge Impulse Dynamic Crop
+- Class: Filter/Video
+- Description: Crops detected object regions from video frames based on upstream inference metadata
+
+Pad Templates:
+- Sink pad (Always available):
+  ```
+  video/x-raw
+    format: RGB
+    width: [ 1, 2147483647 ]
+    height: [ 1, 2147483647 ]
+  ```
+- Source pad (Always available):
+  ```
+  video/x-raw
+    format: RGB
+    width: [ 1, 2147483647 ]
+    height: [ 1, 2147483647 ]
+  ```
+
+Properties:
+1. `padding` (integer):
+   - Extra pixels around each bounding box crop
+   - Range: 0 – 1000
+   - Default: 0
+   - Flags: readable, writable, changeable in PLAYING state
+
+2. `target-width` (integer):
+   - Resize all crops to this width. Setting a fixed target avoids GStreamer caps renegotiation per-crop.
+   - Range: 0 – 4096 (0 = keep natural crop size)
+   - Default: 0
+   - Flags: readable, writable
+
+3. `target-height` (integer):
+   - Resize all crops to this height. Setting a fixed target avoids GStreamer caps renegotiation per-crop.
+   - Range: 0 – 4096 (0 = keep natural crop size)
+   - Default: 0
+   - Flags: readable, writable
+
+How it works:
+1. Reads `VideoRegionOfInterestMeta` attached by upstream `edgeimpulsevideoinfer`
+2. For each detection bounding box:
+   - Extracts the crop region (with optional padding, clamped to frame bounds)
+   - Optionally resizes to `target-width` x `target-height`
+   - Attaches a `CropOriginMeta` with source coordinates, original frame dimensions, object_id, label, and confidence
+   - Pushes the crop buffer downstream
+3. If no detections are present, the full frame is passed through unchanged
+
+This is a **1-to-N element**: one input buffer may produce N output buffers (one per detected object). The downstream element (e.g., a classification `edgeimpulsevideoinfer`) processes each crop independently.
+
+**CropOriginMeta** attached to each crop buffer:
+
+| Field | Type | Description |
+|---|---|---|
+| `source_x` | u32 | X offset of the crop in the original frame |
+| `source_y` | u32 | Y offset of the crop in the original frame |
+| `source_width` | u32 | Width of the crop region (before resize) |
+| `source_height` | u32 | Height of the crop region (before resize) |
+| `original_width` | u32 | Width of the original frame |
+| `original_height` | u32 | Height of the original frame |
+| `object_id` | u64 | Object tracking ID from upstream detection |
+| `detection_label` | string | Detection class label |
+| `detection_confidence` | f64 | Detection confidence score |
+
+Example pipelines:
+```bash
+# Two-stage pipeline: detect objects, then classify each crop
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer_detection ! tee name=t \
+    t. ! queue ! edgeimpulseoverlay_detection ! autovideosink \
+    t. ! queue ! \
+        edgeimpulsecontinueif condition="detection_count >= 1" ! \
+        edgeimpulsecrop padding=10 target-width=96 target-height=96 ! \
+        edgeimpulsevideoinfer_classification ! \
+        fakesink
+
+# Crop with padding and fixed output size
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! \
+    edgeimpulsecrop padding=20 target-width=320 target-height=320 ! \
+    edgeimpulsevideoinfer_classification ! \
+    fakesink
+```
 
 ## Examples
 

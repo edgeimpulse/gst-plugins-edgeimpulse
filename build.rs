@@ -107,6 +107,11 @@ fn main() {
     let type_names_path = std::path::Path::new(&out_dir).join("type_names.rs");
     let type_names_code = format!(
         r#"// Auto-generated type names for variant: {}
+//
+// Each constant is marked #[allow(dead_code)] because this file is include!()-ed
+// into every element module, but each module only uses its own constant. Rustc
+// cannot track usage across include!() boundaries, so it reports the others as dead.
+
 #[allow(dead_code)]
 pub const VIDEO_INFER_TYPE_NAME: &str = "EdgeImpulseVideoInfer{}";
 #[allow(dead_code)]

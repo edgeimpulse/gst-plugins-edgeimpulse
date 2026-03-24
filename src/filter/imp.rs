@@ -62,8 +62,6 @@ enum ComparisonOp {
 #[derive(Debug, Clone)]
 enum LiteralValue {
     Number(f64),
-    #[allow(dead_code)]
-    Bool(bool),
     String(String),
 }
 
@@ -108,8 +106,8 @@ fn parse_condition(condition: &str) -> Option<ParsedCondition> {
 
 fn parse_literal(raw: &str) -> Option<LiteralValue> {
     if let Ok(n) = raw.parse::<f64>() { return Some(LiteralValue::Number(n)); }
-    if raw.eq_ignore_ascii_case("true") { return Some(LiteralValue::Bool(true)); }
-    if raw.eq_ignore_ascii_case("false") { return Some(LiteralValue::Bool(false)); }
+    if raw.eq_ignore_ascii_case("true") { return Some(LiteralValue::String("true".to_string())); }
+    if raw.eq_ignore_ascii_case("false") { return Some(LiteralValue::String("false".to_string())); }
     let quoted = (raw.starts_with('"') && raw.ends_with('"'))
         || (raw.starts_with('\'') && raw.ends_with('\''));
     if quoted && raw.len() >= 2 {

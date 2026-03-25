@@ -1,8 +1,50 @@
-//! Custom GStreamer buffer metadata for tracking crop origin.
+//! # CropOriginMeta — Crop origin tracking metadata
 //!
-//! Each cropped buffer carries a `CropOriginMeta` that records where the crop
-//! came from in the original frame, so downstream classification results can
-//! be mapped back to the full-frame coordinate space.
+//! Custom GStreamer buffer metadata attached by [`EdgeImpulseCrop`](super::EdgeImpulseCrop)
+//! to each cropped buffer. Records where the crop came from in the original
+//! frame so downstream classification results can be mapped back to full-frame
+//! coordinates.
+//!
+//! ## Fields
+//!
+//! | Field | Type | Description |
+//! |-------|------|-------------|
+//! | `source_x` | `u32` | X offset of the crop region in the original frame |
+//! | `source_y` | `u32` | Y offset of the crop region in the original frame |
+//! | `source_width` | `u32` | Width of the crop region (before any resize) |
+//! | `source_height` | `u32` | Height of the crop region (before any resize) |
+//! | `original_width` | `u32` | Width of the original frame |
+//! | `original_height` | `u32` | Height of the original frame |
+//! | `object_id` | `u64` | Object tracking ID from upstream detection |
+//! | `detection_label` | `String` | Class label from the upstream detection |
+//! | `detection_confidence` | `f64` | Confidence score from the upstream detection |
+//!
+//! ## Coordinate mapping
+//!
+//! To map a point `(cx, cy)` in the cropped buffer back to the original frame:
+//!
+//! ```rust,ignore
+//! let scale_x = meta.source_width() as f64 / crop_width as f64;
+//! let scale_y = meta.source_height() as f64 / crop_height as f64;
+//! let orig_x = meta.source_x() as f64 + cx as f64 * scale_x;
+//! let orig_y = meta.source_y() as f64 + cy as f64 * scale_y;
+//! ```
+//!
+//! ## Reading metadata downstream
+//!
+//! ```rust,ignore
+//! use gstreamer::prelude::*;
+//! use crate::crop::meta::CropOriginMeta;
+//!
+//! if let Some(meta) = buffer.meta::<CropOriginMeta>() {
+//!     println!("crop from {}x{}+{}+{} in {}x{} frame, label={}",
+//!         meta.source_width(), meta.source_height(),
+//!         meta.source_x(), meta.source_y(),
+//!         meta.original_width(), meta.original_height(),
+//!         meta.detection_label(),
+//!     );
+//! }
+//! ```
 
 use gstreamer as gst;
 use gstreamer::glib;

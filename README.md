@@ -33,12 +33,12 @@ graph LR
 
 | Element | Description | Media |
 |---------|-------------|-------|
-| `edgeimpulseaudioinfer` | Runs audio inference (classification, keyword spotting) | Audio |
-| `edgeimpulsevideoinfer` | Runs video inference (classification, detection, anomaly) | Video |
-| `edgeimpulseoverlay` | Draws bounding boxes and labels on video frames | Video |
-| `edgeimpulsesink` | Uploads audio/video to Edge Impulse ingestion API | Audio / Video |
-| `edgeimpulsecontinueif` | Conditional gate — passes or drops buffers based on inference metadata | Any |
-| `edgeimpulsecrop` | Extracts per-detection crop regions from video frames (1-to-N) | Video |
+| [`edgeimpulseaudioinfer`](docs/edgeimpulseaudioinfer.md) | Runs audio inference (classification, keyword spotting) | Audio |
+| [`edgeimpulsevideoinfer`](docs/edgeimpulsevideoinfer.md) | Runs video inference (classification, detection, anomaly) | Video |
+| [`edgeimpulseoverlay`](docs/edgeimpulseoverlay.md) | Draws bounding boxes and labels on video frames | Video |
+| [`edgeimpulsesink`](docs/edgeimpulsesink.md) | Uploads audio/video to Edge Impulse ingestion API | Audio / Video |
+| [`edgeimpulsecontinueif`](docs/edgeimpulsecontinueif.md) | Conditional gate — passes or drops buffers based on inference metadata | Any |
+| [`edgeimpulsecrop`](docs/edgeimpulsecrop.md) | Extracts per-detection crop regions from video frames (1-to-N) | Video |
 
 ### Metadata flow
 
@@ -669,16 +669,14 @@ The compiled plugin will be available at `target/aarch64-unknown-linux-gnu/relea
 
 ## Elements
 
-For detailed documentation on each element (pad templates, properties, examples), see the dedicated pages:
+For detailed documentation on each element (pad templates, properties, example pipelines), see the dedicated pages under [`docs/`](docs/):
 
-| Element | Description | Docs |
-|---------|-------------|------|
-| `edgeimpulseaudioinfer` | Audio inference (classification, keyword spotting) | [docs/edgeimpulseaudioinfer.md](docs/edgeimpulseaudioinfer.md) |
-| `edgeimpulsevideoinfer` | Video inference (classification, detection, anomaly) | [docs/edgeimpulsevideoinfer.md](docs/edgeimpulsevideoinfer.md) |
-| `edgeimpulseoverlay` | Draws bounding boxes and labels on video frames | [docs/edgeimpulseoverlay.md](docs/edgeimpulseoverlay.md) |
-| `edgeimpulsesink` | Uploads audio/video to Edge Impulse ingestion API | [docs/edgeimpulsesink.md](docs/edgeimpulsesink.md) |
-| `edgeimpulsecontinueif` | Conditional gate — passes or drops buffers based on inference metadata | [docs/edgeimpulsecontinueif.md](docs/edgeimpulsecontinueif.md) |
-| `edgeimpulsecrop` | Dynamic crop — extracts per-detection regions from video frames (1-to-N) | [docs/edgeimpulsecrop.md](docs/edgeimpulsecrop.md) |
+- [`edgeimpulseaudioinfer`](docs/edgeimpulseaudioinfer.md) — Audio inference
+- [`edgeimpulsevideoinfer`](docs/edgeimpulsevideoinfer.md) — Video inference
+- [`edgeimpulseoverlay`](docs/edgeimpulseoverlay.md) — Bounding box / label overlay
+- [`edgeimpulsesink`](docs/edgeimpulsesink.md) — Ingestion upload sink
+- [`edgeimpulsecontinueif`](docs/edgeimpulsecontinueif.md) — Conditional buffer gate
+- [`edgeimpulsecrop`](docs/edgeimpulsecrop.md) — Dynamic per-detection crop
 
 ## Examples
 

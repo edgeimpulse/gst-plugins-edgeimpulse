@@ -117,25 +117,29 @@ gst-launch-1.0 autoaudiosrc ! audioconvert ! audioresample ! \
 
 #### Conditional gating with rules-based metadata
 
-Use the `rules` property to emit structured metadata based on inference results, enabling downstream logic without writing custom code:
+Use `edgeimpulsecontinueif` with the `rules` property to tag frames with severity levels and route them — for example, only recording anomalous frames while always displaying:
 
 ```mermaid
 graph LR
-    cam[camera] --> infer[edgeimpulsevideoinfer] --> gate["edgeimpulsecontinueif\n(rules)"]
-    gate -->|"bus message:\nseverity=critical"| bus["GStreamer Bus"]
-    gate -->|"buffer"| sink[downstream]
+    cam[camera] --> infer["edgeimpulsevideoinfer\n(anomaly detection)"] --> tee{tee}
+    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> display["autovideosink\n(always show)"]
+    tee --> q2[queue] --> gate["edgeimpulsecontinueif\ncondition: anomaly_score > 0.5\nrules: severity tags"]
+    gate -->|"anomalous"| record["filesink\n(save evidence)"]
+    gate -.->|"normal\n(dropped)"| X[ ]
+
+    style X fill:none,stroke:none
 ```
 
 ```bash
 gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
-    edgeimpulsevideoinfer ! \
-    edgeimpulsecontinueif condition="detection_count >= 1" \
+    edgeimpulsevideoinfer ! tee name=t \
+    t. ! queue ! edgeimpulseoverlay ! autovideosink \
+    t. ! queue ! edgeimpulsecontinueif condition="anomaly_score > 0.5" \
         rules='[
-            {"condition":"detection_count > 4","metadata":{"severity":"critical","color":"purple"}},
-            {"condition":"detection_count >= 1","metadata":{"severity":"warning","color":"red"}},
-            {"condition":"detection_count == 0","metadata":{"severity":"ok","color":"green"}}
+            {"condition":"anomaly_score > 0.8","metadata":{"severity":"critical"}},
+            {"condition":"anomaly_score > 0.5","metadata":{"severity":"warning"}}
         ]' ! \
-    fakesink
+    filesink location=anomaly_%05d.raw
 ```
 
 ## Public API: Inference and Ingestion Output
@@ -901,18 +905,39 @@ cargo run --release --example continue_if -- --condition "max_confidence > 0.9"
 cargo run --release --example continue_if -- --source test
 ```
 
-The example demonstrates:
-- Gating buffers based on `detection_count >= 1` (configurable via `--condition`)
-- Rules-based metadata output: different severity/color bus messages depending on detection count
-- Monitoring both inference results and continue-if metadata on the bus
+The example demonstrates gating buffers with `detection_count >= 1` and emitting severity/color bus messages via rules. See `examples/continue_if.rs` for the full source.
 
-Pipeline structure:
+**Use case: skip expensive classification when nothing is detected**
+
+A common pattern is to run a fast, lightweight detection model on every frame, but only run a heavier classification model when something is actually found. The gate avoids wasting compute on empty frames:
+
 ```mermaid
 graph LR
-    src["camera / test"] --> vc[videoconvert] --> caps["capsfilter\n(RGB)"] --> infer[edgeimpulsevideoinfer] --> gate["edgeimpulsecontinueif\n(condition + rules)"] --> sink[fakesink]
+    cam[camera] --> det["edgeimpulsevideoinfer\n(fast detection)"]
+    det --> tee{tee}
+    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> display[autovideosink]
+    tee --> q2[queue] --> gate["edgeimpulsecontinueif\n(detection_count >= 1)"]
+    gate -->|"objects found"| cls["edgeimpulsevideoinfer\n(classification)"] --> sink[appsink]
+    gate -.->|"no objects\n(dropped)"| X[ ]
+
+    style X fill:none,stroke:none
 ```
 
-See `examples/continue_if.rs` for the full source.
+**Use case: route frames to different paths based on anomaly score**
+
+Use rules to tag frames with a severity level and route them accordingly — for example, only recording frames that exceed an anomaly threshold:
+
+```mermaid
+graph LR
+    cam[camera] --> infer["edgeimpulsevideoinfer\n(anomaly detection)"]
+    infer --> tee{tee}
+    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> display["autovideosink\n(always show)"]
+    tee --> q2[queue] --> gate["edgeimpulsecontinueif\ncondition: anomaly_score > 0.5\nrules: severity=critical"]
+    gate -->|"anomalous frames only"| record["filesink\n(save evidence)"]
+    gate -.->|"normal frames\n(dropped)"| X[ ]
+
+    style X fill:none,stroke:none
+```
 
 ### Dynamic Crop
 Run the two-stage detection-to-crop example:
@@ -927,21 +952,46 @@ cargo run --release --example dynamic_crop -- --duration 10 --target-width 128 -
 cargo run --release --example dynamic_crop -- --source test
 ```
 
-The example demonstrates:
-- A two-stage pipeline: detection → gate → crop → save PNG
-- Live display with bounding box overlay on a parallel `tee` branch
-- Saving individual crop regions as PNG files via `appsink`
+The example demonstrates detection → gate → crop → save as PNG, with a parallel overlay branch. See `examples/dynamic_crop.rs` for the full source.
 
-Pipeline structure:
+**Use case: detect objects, then classify each crop individually**
+
+This is the core two-stage pattern. A detection model finds objects in the full frame, the crop element extracts each one as a separate buffer, and a second classification model analyzes them individually. Each crop carries `CropOriginMeta` so results can be mapped back to the original frame:
+
 ```mermaid
 graph LR
-    src["camera / test"] --> vc[videoconvert] --> caps["capsfilter\n(RGB)"] --> det[edgeimpulsevideoinfer]
+    cam[camera] --> det["edgeimpulsevideoinfer\n(object detection)"]
     det --> tee{tee}
-    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> cvt[videoconvert] --> display[autovideosink]
-    tee --> q2[queue] --> gate["edgeimpulsecontinueif\n(detection_count >= 1)"] --> crop["edgeimpulsecrop\n(padding, target size)"] --> app["appsink\n(save PNG)"]
+    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> display["autovideosink\n(live view with boxes)"]
+    tee --> q2[queue] --> gate["edgeimpulsecontinueif\n(detection_count >= 1)"]
+    gate --> crop["edgeimpulsecrop\n(padding=10, 96x96)"]
+    crop -->|"1 buffer\nper detection"| cls["edgeimpulsevideoinfer\n(classification)"]
+    cls --> app["appsink\n(per-crop results)"]
 ```
 
-See `examples/dynamic_crop.rs` for the full source.
+```text
+Full frame (1920x1080)              Per-detection crops (96x96 each)
+┌───────────────────────┐           ┌────────┐  ┌────────┐
+│  ┌───┐       ┌────┐   │    ──►    │ crop 1 │  │ crop 2 │
+│  │ A │       │ B  │   │           │ → cls  │  │ → cls  │
+│  └───┘       └────┘   │           └────────┘  └────────┘
+└───────────────────────┘
+```
+
+**Use case: visual quality inspection — detect defects, then zoom in for grading**
+
+In a manufacturing pipeline, a detection model spots potential defects in a wide-angle camera feed, and the crop element feeds each defect region into a fine-grained classification model that grades severity:
+
+```mermaid
+graph LR
+    cam["line camera\n(wide angle)"] --> det["edgeimpulsevideoinfer\n(defect detection)"]
+    det --> tee{tee}
+    tee --> q1[queue] --> gate["edgeimpulsecontinueif\n(detection_count >= 1)"]
+    gate --> crop["edgeimpulsecrop\n(padding=20, 224x224)"]
+    crop --> grade["edgeimpulsevideoinfer\n(defect grading)"]
+    grade --> app["appsink\n(grade + CropOriginMeta\n→ log defect location)"]
+    tee --> q2[queue] --> overlay[edgeimpulseoverlay] --> display["autovideosink\n(operator dashboard)"]
+```
 
 ## Image Slideshow Example
 

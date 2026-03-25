@@ -4,6 +4,175 @@
 
 A GStreamer plugin that enables real-time machine learning inference and data ingestion using Edge Impulse models and APIs. The plugin provides six elements for audio and video inference, visualization, ingestion, and pipeline flow control.
 
+## Architecture Overview
+
+```mermaid
+graph LR
+    subgraph "Inference"
+        A[edgeimpulseaudioinfer]
+        V[edgeimpulsevideoinfer]
+    end
+    subgraph "Flow Control"
+        F[edgeimpulsecontinueif]
+        C[edgeimpulsecrop]
+    end
+    subgraph "Output"
+        O[edgeimpulseoverlay]
+        S[edgeimpulsesink]
+    end
+
+    V -- "VideoRegionOfInterestMeta\nInferenceResultMeta" --> O
+    V -- "VideoRegionOfInterestMeta\nInferenceResultMeta" --> F
+    V -- "VideoRegionOfInterestMeta" --> C
+    F -- "pass / drop" --> C
+    C -- "CropOriginMeta" --> V
+    A -- "InferenceResultMeta" --> F
+```
+
+### Elements at a glance
+
+| Element | Description | Media |
+|---------|-------------|-------|
+| `edgeimpulseaudioinfer` | Runs audio inference (classification, keyword spotting) | Audio |
+| `edgeimpulsevideoinfer` | Runs video inference (classification, detection, anomaly) | Video |
+| `edgeimpulseoverlay` | Draws bounding boxes and labels on video frames | Video |
+| `edgeimpulsesink` | Uploads audio/video to Edge Impulse ingestion API | Audio / Video |
+| `edgeimpulsecontinueif` | Conditional gate — passes or drops buffers based on inference metadata | Any |
+| `edgeimpulsecrop` | Extracts per-detection crop regions from video frames (1-to-N) | Video |
+
+### Metadata flow
+
+Inference elements attach metadata to every buffer they process. Downstream elements read this metadata to make decisions or visualize results.
+
+There are two layers of metadata:
+
+1. **Video-specific metadata** (`VideoRegionOfInterestMeta`, `VideoClassificationMeta`, `VideoAnomalyMeta`) — the **primary API for downstream consumers**. These are standard GStreamer metadata types compatible with external elements such as Qualcomm IM SDK's `qtioverlay`. Any element that reads ROI metadata (overlays, SDKs, analytics tools) should use these.
+
+2. **`InferenceResultMeta`** — an **additional convenience layer** for flow-control elements like `edgeimpulsecontinueif`. It provides a media-agnostic summary of inference results (detection count, top class, confidence, anomaly scores) so gate conditions can be evaluated without parsing video-specific metadata. It is attached to both audio and video buffers.
+
+```mermaid
+graph TD
+    subgraph "Primary API · video-specific metadata"
+        M2["VideoRegionOfInterestMeta\n(one per detected object)"]
+        M3["VideoClassificationMeta\n(top classification label)"]
+        M4["VideoAnomalyMeta\n(anomaly scores + grid)"]
+    end
+    subgraph "Convenience layer · media-agnostic"
+        M1["InferenceResultMeta\n(summary: counts, confidence, class)"]
+    end
+    subgraph "Attached by crop element"
+        M5["CropOriginMeta\n(source region in original frame)"]
+    end
+
+    M2 -->|"read by"| O[edgeimpulseoverlay]
+    M2 -->|"read by"| C[edgeimpulsecrop]
+    M2 -->|"read by"| QC["QC IM SDK qtioverlay\n(external)"]
+    M3 -->|"read by"| O
+    M4 -->|"read by"| O
+    M1 -->|"read by"| F[edgeimpulsecontinueif]
+    C -->|"attaches"| M5
+```
+
+> **Compatibility note:** `VideoRegionOfInterestMeta` and friends remain the primary interface for all downstream consumers (including the Qualcomm IM SDK). `InferenceResultMeta` does not replace them — it supplements them with a pre-computed summary for flow-control use cases.
+
+**InferenceResultMeta** is a media-agnostic metadata type attached to both audio and video buffers. It provides a unified interface for flow-control elements to read inference results without knowing the media type:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `inference_type` | String | `"object-detection"`, `"classification"`, `"anomaly-detection"`, etc. |
+| `result_json` | String | Raw JSON result string from the model |
+| `detection_count` | u32 | Number of detected bounding boxes |
+| `max_confidence` | f64 | Highest confidence across all detections/classifications |
+| `top_class` | String | Label of the highest-confidence class |
+| `top_confidence` | f64 | Confidence of `top_class` |
+| `anomaly_score` | f64 | Overall anomaly score (0.0 if not anomaly) |
+| `visual_anomaly_max` | f64 | Peak visual anomaly grid score (0.0 if not visual anomaly) |
+
+**CropOriginMeta** is attached to each cropped buffer by `edgeimpulsecrop`, recording where the crop came from in the original frame:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_x` | u32 | X offset of the crop in the original frame |
+| `source_y` | u32 | Y offset of the crop in the original frame |
+| `source_width` | u32 | Width of the crop region (before resize) |
+| `source_height` | u32 | Height of the crop region (before resize) |
+| `original_width` | u32 | Width of the original frame |
+| `original_height` | u32 | Height of the original frame |
+| `object_id` | u64 | Object tracking ID from upstream detection |
+| `detection_label` | String | Detection class label |
+| `detection_confidence` | f64 | Detection confidence score |
+
+### Common pipeline patterns
+
+#### Single-stage video inference with overlay
+
+```mermaid
+graph LR
+    cam[camera] --> vc[videoconvert] --> caps["capsfilter\n(RGB)"] --> infer[edgeimpulsevideoinfer] --> overlay[edgeimpulseoverlay] --> display[autovideosink]
+```
+
+```bash
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! edgeimpulseoverlay ! autovideosink
+```
+
+#### Two-stage detection + classification with crop
+
+This pattern uses a detection model to find objects, gates on detection count, crops each detection, and runs a second classification model on each crop individually:
+
+```mermaid
+graph LR
+    cam[camera] --> vc[videoconvert] --> caps["capsfilter\n(RGB)"] --> det["edgeimpulsevideoinfer\n(detection)"]
+    det --> tee{tee}
+    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> display[autovideosink]
+    tee --> q2[queue] --> gate["edgeimpulsecontinueif\n(detection_count >= 1)"] --> crop["edgeimpulsecrop\n(padding=10, 96x96)"] --> cls["edgeimpulsevideoinfer\n(classification)"] --> sink[appsink]
+```
+
+```bash
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! tee name=t \
+    t. ! queue ! edgeimpulseoverlay ! autovideosink \
+    t. ! queue ! edgeimpulsecontinueif condition="detection_count >= 1" ! \
+        edgeimpulsecrop padding=10 target-width=96 target-height=96 ! \
+        edgeimpulsevideoinfer_classification ! fakesink
+```
+
+#### Audio inference
+
+```mermaid
+graph LR
+    mic[autoaudiosrc] --> ac1[audioconvert] --> ar[audioresample] --> caps["capsfilter\n(S16LE, 16kHz, mono)"] --> infer[edgeimpulseaudioinfer] --> ac2[audioconvert] --> sink[autoaudiosink]
+```
+
+```bash
+gst-launch-1.0 autoaudiosrc ! audioconvert ! audioresample ! \
+    audio/x-raw,format=S16LE,channels=1,rate=16000 ! \
+    edgeimpulseaudioinfer ! audioconvert ! autoaudiosink
+```
+
+#### Conditional gating with rules-based metadata
+
+Use the `rules` property to emit structured metadata based on inference results, enabling downstream logic without writing custom code:
+
+```mermaid
+graph LR
+    cam[camera] --> infer[edgeimpulsevideoinfer] --> gate["edgeimpulsecontinueif\n(rules)"]
+    gate -->|"bus message:\nseverity=critical"| bus["GStreamer Bus"]
+    gate -->|"buffer"| sink[downstream]
+```
+
+```bash
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer ! \
+    edgeimpulsecontinueif condition="detection_count >= 1" \
+        rules='[
+            {"condition":"detection_count > 4","metadata":{"severity":"critical","color":"purple"}},
+            {"condition":"detection_count >= 1","metadata":{"severity":"warning","color":"red"}},
+            {"condition":"detection_count == 0","metadata":{"severity":"ok","color":"green"}}
+        ]' ! \
+    fakesink
+```
+
 ## Public API: Inference and Ingestion Output
 
 The plugin exposes results and ingestion status through standardized mechanisms:
@@ -806,12 +975,12 @@ gst-launch-1.0 autoaudiosrc ! audioconvert ! audioresample ! audio/x-raw,format=
 See `examples/audio_ingestion.rs` for a full example with bus message handling.
 
 ### edgeimpulsecontinueif
-Conditional gate element that passes or drops video buffers based on upstream inference metadata. Place it after `edgeimpulsevideoinfer` (or after a `tee`) to skip downstream processing when a condition is not met — for example, to avoid running a classification model when no objects were detected.
+Conditional gate element that passes or drops buffers based on upstream inference metadata. Works with both audio and video pipelines — any buffer carrying `InferenceResultMeta` can be filtered. Place it after `edgeimpulsevideoinfer` or `edgeimpulseaudioinfer` (or after a `tee`) to skip downstream processing when a condition is not met — for example, to avoid running a classification model when no objects were detected.
 
 Element Details:
 - Long name: Edge Impulse Continue If
 - Class: Filter/Video
-- Description: Conditionally passes or drops video buffers based on upstream inference metadata
+- Description: Conditionally passes or drops buffers based on upstream inference metadata
 
 Pad Templates:
 - Sink pad (Always available):
@@ -833,6 +1002,20 @@ Properties:
    - When true, unconditionally drop all buffers (manual override)
    - Default: false
    - Flags: readable, writable, changeable in PLAYING state
+
+3. `rules` (string):
+   - JSON array of ordered rules for conditional metadata output
+   - First matching rule wins; its `metadata` key-value pairs are posted as a `edge-impulse-continue-if-metadata` bus message
+   - Default: "" (empty = no rules)
+   - Flags: readable, writable, changeable in PLAYING state
+   - Example:
+     ```json
+     [
+       {"condition": "detection_count > 4",  "metadata": {"severity": "critical", "color": "purple"}},
+       {"condition": "detection_count >= 1", "metadata": {"severity": "warning", "color": "red"}},
+       {"condition": "detection_count == 0", "metadata": {"severity": "ok", "color": "green"}}
+     ]
+     ```
 
 Available condition variables (extracted from buffer metadata):
 
@@ -858,10 +1041,11 @@ anomaly_score > 0.5
 Supported operators: `>=`, `<=`, `>`, `<`, `==`, `!=`
 
 How it works:
-- Reads inference metadata already attached to each buffer by upstream `edgeimpulsevideoinfer`
+- Reads `InferenceResultMeta` attached to each buffer by upstream `edgeimpulsevideoinfer` or `edgeimpulseaudioinfer` (falls back to video-specific metadata if `InferenceResultMeta` is not present)
 - Evaluates the condition expression against the extracted values
 - If the condition is true, the buffer passes through unchanged (zero-copy)
 - If the condition is false, the buffer is marked with `GAP | DROPPABLE` flags
+- If `rules` are configured, the first matching rule posts a `edge-impulse-continue-if-metadata` bus message with its key-value pairs
 
 Example pipelines:
 ```bash
@@ -1183,6 +1367,61 @@ This will capture audio from the default microphone and upload samples to Edge I
 
 See the [Public API](#public-api-inference-and-ingestion-output) and [edgeimpulsesink](#edgeimpulsesink) sections for details.
 
+### Continue-If Gate
+Run the conditional gating example:
+```bash
+# FFI mode with camera (default)
+cargo run --release --example continue_if
+
+# Custom condition
+cargo run --release --example continue_if -- --condition "max_confidence > 0.9"
+
+# Use test video source
+cargo run --release --example continue_if -- --source test
+```
+
+The example demonstrates:
+- Gating buffers based on `detection_count >= 1` (configurable via `--condition`)
+- Rules-based metadata output: different severity/color bus messages depending on detection count
+- Monitoring both inference results and continue-if metadata on the bus
+
+Pipeline structure:
+```mermaid
+graph LR
+    src["camera / test"] --> vc[videoconvert] --> caps["capsfilter\n(RGB)"] --> infer[edgeimpulsevideoinfer] --> gate["edgeimpulsecontinueif\n(condition + rules)"] --> sink[fakesink]
+```
+
+See `examples/continue_if.rs` for the full source.
+
+### Dynamic Crop
+Run the two-stage detection-to-crop example:
+```bash
+# FFI mode with camera (default, runs 5 seconds)
+cargo run --release --example dynamic_crop
+
+# Custom duration, crop size, output directory
+cargo run --release --example dynamic_crop -- --duration 10 --target-width 128 --output-dir ./my_crops
+
+# Use test video source
+cargo run --release --example dynamic_crop -- --source test
+```
+
+The example demonstrates:
+- A two-stage pipeline: detection → gate → crop → save PNG
+- Live display with bounding box overlay on a parallel `tee` branch
+- Saving individual crop regions as PNG files via `appsink`
+
+Pipeline structure:
+```mermaid
+graph LR
+    src["camera / test"] --> vc[videoconvert] --> caps["capsfilter\n(RGB)"] --> det[edgeimpulsevideoinfer]
+    det --> tee{tee}
+    tee --> q1[queue] --> overlay[edgeimpulseoverlay] --> cvt[videoconvert] --> display[autovideosink]
+    tee --> q2[queue] --> gate["edgeimpulsecontinueif\n(detection_count >= 1)"] --> crop["edgeimpulsecrop\n(padding, target size)"] --> app["appsink\n(save PNG)"]
+```
+
+See `examples/dynamic_crop.rs` for the full source.
+
 ## Image Slideshow Example
 
 The repository includes an `image_slideshow` example that demonstrates how to run Edge Impulse video inference on a folder of images as a configurable slideshow.
@@ -1411,6 +1650,8 @@ GST_DEBUG=edgeimpulseaudioinfer:4 # for audio inference element
 GST_DEBUG=edgeimpulsevideoinfer:4 # for video inference element
 GST_DEBUG=edgeimpulseoverlay:4 # for overlay element
 GST_DEBUG=edgeimpulsesink:4 # for ingestion element
+GST_DEBUG=edgeimpulsecontinueif:4 # for conditional gate element
+GST_DEBUG=edgeimpulsecrop:4 # for dynamic crop element
 ```
 
 ## Acknowledgments

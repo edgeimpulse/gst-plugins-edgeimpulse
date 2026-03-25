@@ -1,13 +1,54 @@
 //! # InferenceResultMeta — Generic inference result metadata for any buffer
 //!
 //! A media-agnostic metadata type attached to both audio and video buffers by
-//! `edgeimpulsevideoinfer` and `edgeimpulseaudioinfer`. Provides a unified
-//! interface for downstream elements like `edgeimpulsecontinueif` to read
-//! inference results without knowing the media type.
+//! [`edgeimpulsevideoinfer`](crate::video) and [`edgeimpulseaudioinfer`](crate::audio).
+//! Provides a unified interface for downstream elements like
+//! [`edgeimpulsecontinueif`](crate::filter) to read inference results without
+//! knowing the media type.
 //!
-//! This supplements (does not replace) the video-specific metadata types
-//! (`VideoRegionOfInterestMeta`, `VideoClassificationMeta`, `VideoAnomalyMeta`)
-//! which are still needed by `edgeimpulseoverlay` and QC IM SDK.
+//! This is an **additional convenience layer** for flow-control elements and
+//! does **not** replace the video-specific metadata types
+//! (`VideoRegionOfInterestMeta`, `VideoClassificationMeta`, `VideoAnomalyMeta`).
+//! Those remain the **primary API** for downstream consumers — including
+//! `edgeimpulseoverlay`, `edgeimpulsecrop`, and external elements such as
+//! Qualcomm IM SDK's `qtioverlay`.
+//!
+//! ## Fields
+//!
+//! | Field | Type | Description |
+//! |-------|------|-------------|
+//! | `inference_type` | `String` | `"object-detection"`, `"classification"`, `"anomaly-detection"`, etc. |
+//! | `result_json` | `String` | Raw JSON result string from the model |
+//! | `detection_count` | `u32` | Number of detected bounding boxes |
+//! | `max_confidence` | `f64` | Highest confidence across all detections/classifications |
+//! | `top_class` | `String` | Label of the highest-confidence class |
+//! | `top_confidence` | `f64` | Confidence of `top_class` |
+//! | `anomaly_score` | `f64` | Overall anomaly score (`0.0` if not anomaly) |
+//! | `visual_anomaly_max` | `f64` | Peak visual anomaly grid score (`0.0` if not visual anomaly) |
+//!
+//! ## How it is populated
+//!
+//! The [`populate_from_result`] helper parses the raw JSON result string and
+//! fills in the summary fields. Both `edgeimpulsevideoinfer` and
+//! `edgeimpulseaudioinfer` call this after each inference, before posting
+//! the bus message.
+//!
+//! ## Reading metadata downstream
+//!
+//! ```rust,ignore
+//! use gstreamer::prelude::*;
+//! use crate::meta::InferenceResultMeta;
+//!
+//! // Inside a transform or probe callback:
+//! if let Some(meta) = buffer.meta::<InferenceResultMeta>() {
+//!     println!("type={}, detections={}, top={}({:.0}%)",
+//!         meta.inference_type(),
+//!         meta.detection_count(),
+//!         meta.top_class(),
+//!         meta.top_confidence() * 100.0,
+//!     );
+//! }
+//! ```
 
 use gstreamer as gst;
 use gstreamer::glib;

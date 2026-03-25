@@ -3,15 +3,20 @@ use gstreamer::glib;
 
 mod audio;
 mod common;
+mod crop;
+mod filter;
+pub mod meta;
 mod overlay;
 pub mod sink;
-mod video;
+pub mod video;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     video::register(plugin)?;
     audio::register(plugin)?;
     overlay::register(plugin)?;
     sink::register(plugin)?;
+    filter::register(plugin)?;
+    crop::register(plugin)?;
     Ok(())
 }
 

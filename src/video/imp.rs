@@ -941,8 +941,23 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             let result_json = serde_json::to_string(&result_value).unwrap();
             gst::debug!(CAT, obj = self.obj(), "Inference result: {}", result_json);
 
-            // Raw inference result available for debugging if needed
-            // {result_json}
+            // Attach generic InferenceResultMeta (readable by edgeimpulsecontinueif
+            // and other downstream elements regardless of inference type)
+            {
+                let inference_type = if result_value
+                    .get("bounding_boxes")
+                    .and_then(|b| b.as_array())
+                    .map_or(false, |b| !b.is_empty())
+                {
+                    "object-detection"
+                } else if result_value.get("visual_anomaly_grid").is_some() {
+                    "anomaly-detection"
+                } else {
+                    "classification"
+                };
+                let mut ir_meta = crate::meta::InferenceResultMeta::add(outbuf);
+                crate::meta::populate_from_result(&mut ir_meta, inference_type, &result_json);
+            }
 
             // --- Handle visual anomaly detection metadata ---
             if let Some(grid) = result_value

@@ -1,0 +1,31 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # Only run if secrets are available (not on forks)
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run E2E tests in Docker
+      env:
+        EI_PROJECT_ID: ${{ secrets.EI_PROJECT_ID }}
+        EI_API_KEY: ${{ secrets.EI_API_KEY }}
+        EI_ENGINE: tflite
+        USE_FULL_TFLITE: 1
+      run: |
+        docker compose -f docker-compose.test.yml up \
+          --build \
+          --abort-on-container-exit \
+          --exit-code-from e2e-test

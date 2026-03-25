@@ -484,6 +484,16 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                                 String::from("{}")
                             });
 
+                        // Attach generic InferenceResultMeta to audio buffer
+                        {
+                            let mut ir_meta = crate::meta::InferenceResultMeta::add(outbuf);
+                            crate::meta::populate_from_result(
+                                &mut ir_meta,
+                                "classification",
+                                &result_json,
+                            );
+                        }
+
                         let s = crate::common::create_inference_message(
                             "audio",
                             inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
@@ -581,6 +591,16 @@ impl BaseTransformImpl for EdgeImpulseAudioInfer {
                                     );
                                     String::from("{}")
                                 });
+
+                            // Attach generic InferenceResultMeta to final audio buffer
+                            {
+                                let mut ir_meta = crate::meta::InferenceResultMeta::add(outbuf);
+                                crate::meta::populate_from_result(
+                                    &mut ir_meta,
+                                    "classification",
+                                    &result_json,
+                                );
+                            }
 
                             let s = crate::common::create_inference_message(
                                 "audio",

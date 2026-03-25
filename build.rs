@@ -107,6 +107,11 @@ fn main() {
     let type_names_path = std::path::Path::new(&out_dir).join("type_names.rs");
     let type_names_code = format!(
         r#"// Auto-generated type names for variant: {}
+//
+// Each constant is marked #[allow(dead_code)] because this file is include!()-ed
+// into every element module, but each module only uses its own constant. Rustc
+// cannot track usage across include!() boundaries, so it reports the others as dead.
+
 #[allow(dead_code)]
 pub const VIDEO_INFER_TYPE_NAME: &str = "EdgeImpulseVideoInfer{}";
 #[allow(dead_code)]
@@ -115,6 +120,24 @@ pub const AUDIO_INFER_TYPE_NAME: &str = "EdgeImpulseAudioInfer{}";
 pub const OVERLAY_TYPE_NAME: &str = "EdgeImpulseOverlay{}";
 #[allow(dead_code)]
 pub const SINK_TYPE_NAME: &str = "GstEdgeImpulseSink{}";
+
+// Filter element type name
+#[allow(dead_code)]
+pub const FILTER_TYPE_NAME: &str = "EdgeImpulseContinueIf{}";
+
+// Crop element type names
+#[allow(dead_code)]
+pub const CROP_TYPE_NAME: &str = "EdgeImpulseCrop{}";
+#[allow(dead_code)]
+pub const CROP_ORIGIN_META_API_NAME: &str = "CropOriginMetaAPI{}";
+#[allow(dead_code)]
+pub const CROP_ORIGIN_META_NAME: &str = "CropOriginMeta{}";
+
+// Generic inference result meta (shared across audio and video)
+#[allow(dead_code)]
+pub const INFERENCE_RESULT_META_API_NAME: &str = "InferenceResultMetaAPI{}";
+#[allow(dead_code)]
+pub const INFERENCE_RESULT_META_NAME: &str = "InferenceResultMeta{}";
 
 // Metadata GType names (API types)
 #[allow(dead_code)]
@@ -129,14 +152,20 @@ pub const VIDEO_CLASSIFICATION_META_NAME: &str = "VideoClassificationMeta{}";
 pub const VIDEO_ANOMALY_META_NAME: &str = "VideoAnomalyMeta{}";
 "#,
         plugin_variant,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix,
-        type_suffix
+        type_suffix, // VIDEO_INFER_TYPE_NAME
+        type_suffix, // AUDIO_INFER_TYPE_NAME
+        type_suffix, // OVERLAY_TYPE_NAME
+        type_suffix, // SINK_TYPE_NAME
+        type_suffix, // FILTER_TYPE_NAME
+        type_suffix, // CROP_TYPE_NAME
+        type_suffix, // CROP_ORIGIN_META_API_NAME
+        type_suffix, // CROP_ORIGIN_META_NAME
+        type_suffix, // INFERENCE_RESULT_META_API_NAME
+        type_suffix, // INFERENCE_RESULT_META_NAME
+        type_suffix, // VIDEO_CLASSIFICATION_META_API_NAME
+        type_suffix, // VIDEO_ANOMALY_META_API_NAME
+        type_suffix, // VIDEO_CLASSIFICATION_META_NAME
+        type_suffix, // VIDEO_ANOMALY_META_NAME
     );
     std::fs::write(&type_names_path, type_names_code).expect("Failed to write type names file");
 

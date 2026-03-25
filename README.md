@@ -42,13 +42,7 @@ graph LR
 
 ### Metadata flow
 
-Inference elements attach metadata to every buffer they process. Downstream elements read this metadata to make decisions or visualize results.
-
-There are two layers of metadata:
-
-1. **Video-specific metadata** (`VideoRegionOfInterestMeta`, `VideoClassificationMeta`, `VideoAnomalyMeta`) — the **primary API for downstream consumers**. These are standard GStreamer metadata types compatible with external elements such as Qualcomm IM SDK's `qtioverlay`. Any element that reads ROI metadata (overlays, SDKs, analytics tools) should use these.
-
-2. **`InferenceResultMeta`** — an **additional convenience layer** for flow-control elements like `edgeimpulsecontinueif`. It provides a media-agnostic summary of inference results (detection count, top class, confidence, anomaly scores) so gate conditions can be evaluated without parsing video-specific metadata. It is attached to both audio and video buffers.
+Inference elements attach metadata to every buffer they process. Downstream elements read this metadata to make decisions or visualize results. See [Public API: Inference and Ingestion Output](#public-api-inference-and-ingestion-output) for the complete metadata reference.
 
 ```mermaid
 graph TD
@@ -72,35 +66,6 @@ graph TD
     M1 -->|"read by"| F[edgeimpulsecontinueif]
     C -->|"attaches"| M5
 ```
-
-> **Compatibility note:** `VideoRegionOfInterestMeta` and friends remain the primary interface for all downstream consumers (including the Qualcomm IM SDK). `InferenceResultMeta` does not replace them — it supplements them with a pre-computed summary for flow-control use cases.
-
-**InferenceResultMeta** is a media-agnostic metadata type attached to both audio and video buffers. It provides a unified interface for flow-control elements to read inference results without knowing the media type:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `inference_type` | String | `"object-detection"`, `"classification"`, `"anomaly-detection"`, etc. |
-| `result_json` | String | Raw JSON result string from the model |
-| `detection_count` | u32 | Number of detected bounding boxes |
-| `max_confidence` | f64 | Highest confidence across all detections/classifications |
-| `top_class` | String | Label of the highest-confidence class |
-| `top_confidence` | f64 | Confidence of `top_class` |
-| `anomaly_score` | f64 | Overall anomaly score (0.0 if not anomaly) |
-| `visual_anomaly_max` | f64 | Peak visual anomaly grid score (0.0 if not visual anomaly) |
-
-**CropOriginMeta** is attached to each cropped buffer by `edgeimpulsecrop`, recording where the crop came from in the original frame:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `source_x` | u32 | X offset of the crop in the original frame |
-| `source_y` | u32 | Y offset of the crop in the original frame |
-| `source_width` | u32 | Width of the crop region (before resize) |
-| `source_height` | u32 | Height of the crop region (before resize) |
-| `original_width` | u32 | Width of the original frame |
-| `original_height` | u32 | Height of the original frame |
-| `object_id` | u64 | Object tracking ID from upstream detection |
-| `detection_label` | String | Detection class label |
-| `detection_confidence` | f64 | Detection confidence score |
 
 ### Common pipeline patterns
 
@@ -175,30 +140,85 @@ gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
 
 ## Public API: Inference and Ingestion Output
 
-The plugin exposes results and ingestion status through standardized mechanisms:
+The plugin exposes results and ingestion status through three mechanisms:
 
-1. **GStreamer Bus Messages**
-   - All inference elements emit structured messages on the GStreamer bus with the name `edge-impulse-inference-result`.
-   - The ingestion element (`edgeimpulsesink`) emits bus messages for ingestion results and errors:
-     - `edge-impulse-ingestion-result`: Sent when a sample is successfully ingested (fields: filename, media type, length, label, category).
-     - `edge-impulse-ingestion-error`: Sent when ingestion fails (fields: filename, media type, error, label, category).
-   - These messages allow applications to monitor both inference and ingestion events in real time.
+### 1. GStreamer Bus Messages
 
-2. **Video Frame Metadata (VideoRegionOfInterestMeta)**
-   - For video inference, results are also attached as metadata to each video frame using `VideoRegionOfInterestMeta`.
-   - This enables downstream elements (e.g., overlays, SDKs) to consume and visualize results directly.
-   - Available for video elements only.
+All inference elements emit structured messages on the GStreamer bus with the name `edge-impulse-inference-result`. The ingestion element (`edgeimpulsesink`) emits:
+- `edge-impulse-ingestion-result`: Sent when a sample is successfully ingested (fields: filename, media type, length, label, category).
+- `edge-impulse-ingestion-error`: Sent when ingestion fails (fields: filename, media type, error, label, category).
 
-   **VideoRegionOfInterestMeta Content:**
+The `edgeimpulsecontinueif` element can also emit `edge-impulse-continue-if-metadata` bus messages when `rules` are configured (see [edgeimpulsecontinueif](#edgeimpulsecontinueif)).
 
-   Each `VideoRegionOfInterestMeta` attached to a video frame contains:
-   - `x` (u32): X coordinate of the top-left corner of the region (in pixels)
-   - `y` (u32): Y coordinate of the top-left corner of the region (in pixels)
-   - `width` (u32): Width of the region (in pixels)
-   - `height` (u32): Height of the region (in pixels)
-   - `label` (String): Class label or description for the region
+### 2. Video Frame Metadata (Primary API)
 
-   For object detection, each detected object is represented as a separate ROI. For classification, a single ROI may cover the whole frame with the top label. For visual anomaly detection, the ROI may include anomaly scores and grid data as additional metadata.
+These are the **primary metadata API** for all downstream consumers — including `edgeimpulseoverlay`, `edgeimpulsecrop`, and external elements such as Qualcomm IM SDK's `qtioverlay`. Any element that reads inference results from video buffers should use these types.
+
+#### VideoRegionOfInterestMeta
+
+Attached by `edgeimpulsevideoinfer` — one per detected object for object detection, or a single frame-sized ROI for classification.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `x` | u32 | X coordinate of the top-left corner (pixels) |
+| `y` | u32 | Y coordinate of the top-left corner (pixels) |
+| `width` | u32 | Width of the region (pixels) |
+| `height` | u32 | Height of the region (pixels) |
+| `label` | String | Class label or description |
+
+For object detection, each detected object is a separate ROI. For classification, a single ROI covers the whole frame with the top label. For visual anomaly detection, the ROI may include anomaly scores and grid data as additional metadata.
+
+#### VideoClassificationMeta
+
+Attached by `edgeimpulsevideoinfer` for classification results. Contains the top classification label and confidence score.
+
+#### VideoAnomalyMeta
+
+Attached by `edgeimpulsevideoinfer` for anomaly detection results:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `anomaly` | f64 | Overall anomaly score for the frame |
+| `visual_anomaly_max` | f64 | Maximum anomaly score in the grid |
+| `visual_anomaly_mean` | f64 | Mean anomaly score in the grid |
+| `visual_anomaly_grid` | list | Grid cells, each with region (`x`, `y`, `width`, `height`) and anomaly `value` |
+
+Optionally, each grid cell may also be represented as a `VideoRegionOfInterestMeta`, enabling visualization overlays.
+
+### 3. InferenceResultMeta (Convenience Layer)
+
+`InferenceResultMeta` is an **additional convenience layer** — it does **not** replace the video-specific metadata above. It provides a media-agnostic summary attached to both audio and video buffers, so flow-control elements like `edgeimpulsecontinueif` can evaluate gate conditions without parsing video-specific metadata.
+
+> **Compatibility note:** `VideoRegionOfInterestMeta` and friends remain the primary interface for all downstream consumers (including the Qualcomm IM SDK). `InferenceResultMeta` supplements them with a pre-computed summary for flow-control use cases.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `inference_type` | String | `"object-detection"`, `"classification"`, `"anomaly-detection"`, etc. |
+| `result_json` | String | Raw JSON result string from the model |
+| `detection_count` | u32 | Number of detected bounding boxes |
+| `max_confidence` | f64 | Highest confidence across all detections/classifications |
+| `top_class` | String | Label of the highest-confidence class |
+| `top_confidence` | f64 | Confidence of `top_class` |
+| `anomaly_score` | f64 | Overall anomaly score (0.0 if not anomaly) |
+| `visual_anomaly_max` | f64 | Peak visual anomaly grid score (0.0 if not visual anomaly) |
+
+### 4. CropOriginMeta
+
+Attached by `edgeimpulsecrop` to each cropped buffer, recording where the crop came from in the original frame so downstream classification results can be mapped back to full-frame coordinates:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_x` | u32 | X offset of the crop in the original frame |
+| `source_y` | u32 | Y offset of the crop in the original frame |
+| `source_width` | u32 | Width of the crop region (before resize) |
+| `source_height` | u32 | Height of the crop region (before resize) |
+| `original_width` | u32 | Width of the original frame |
+| `original_height` | u32 | Height of the original frame |
+| `object_id` | u64 | Object tracking ID from upstream detection |
+| `detection_label` | String | Detection class label |
+| `detection_confidence` | f64 | Detection confidence score |
+
+> **Note:** Audio elements only emit bus messages and `InferenceResultMeta`; video elements emit bus messages plus all metadata types above.
 
 ### Supported Model Types and Output Formats
 
@@ -223,9 +243,7 @@ The plugin exposes results and ingestion status through standardized mechanisms:
     }
   }
   ```
-- **Video Metadata:**
-  - Each detected object is attached as a `VideoRegionOfInterestMeta` with bounding box coordinates, label, and confidence.
-  - When object tracking is enabled, the `object_id` field is also included to track objects across frames.
+- **Video Metadata:** Each detected object → `VideoRegionOfInterestMeta` (see [above](#videoregionofinterestmeta)). When object tracking is enabled, `object_id` is also included.
 
 #### 1.1. Object Tracking
 - **Bus Message Example:**
@@ -248,9 +266,7 @@ The plugin exposes results and ingestion status through standardized mechanisms:
     }
   }
   ```
-- **Video Metadata:**
-  - Object tracking results are attached as `VideoRegionOfInterestMeta` with bounding box coordinates, label, confidence, and object_id.
-  - The `object_id` field allows tracking the same object across multiple frames.
+- **Video Metadata:** Same as object detection, with `object_id` for cross-frame tracking.
 
 #### 2. Classification
 - **Bus Message Example:**
@@ -266,8 +282,7 @@ The plugin exposes results and ingestion status through standardized mechanisms:
     }
   }
   ```
-- **Video Metadata:**
-  - For video, the top classification result may be attached as a single ROI covering the frame, with label and confidence.
+- **Video Metadata:** Top result → `VideoClassificationMeta` (see [above](#videoclassificationmeta)). May also attach a single frame-sized `VideoRegionOfInterestMeta` with the top label.
 
 #### 3. Visual Anomaly Detection
 - **Bus Message Example:**
@@ -291,15 +306,7 @@ The plugin exposes results and ingestion status through standardized mechanisms:
     }
   }
   ```
-- **Video Metadata:**
-  - The frame will have a `VideoAnomalyMeta` attached, containing:
-    - `anomaly`: The overall anomaly score for the frame
-    - `visual_anomaly_max`: The maximum anomaly score in the grid
-    - `visual_anomaly_mean`: The mean anomaly score in the grid
-    - `visual_anomaly_grid`: A list of grid cells, each with its own region (`x`, `y`, `width`, `height`) and anomaly `value`
-  - Optionally, each grid cell may also be represented as a `VideoRegionOfInterestMeta` with the anomaly score as the label or as additional metadata, enabling visualization overlays.
-
-> **Note:** Audio elements only emit bus messages; video elements emit both bus messages and metadata.
+- **Video Metadata:** Scores → `VideoAnomalyMeta` (see [above](#videoanomalymeta)). Grid cells may also be attached as individual `VideoRegionOfInterestMeta` entries for overlay visualization.
 
 ## Dependencies
 
@@ -662,500 +669,16 @@ The compiled plugin will be available at `target/aarch64-unknown-linux-gnu/relea
 
 ## Elements
 
-### edgeimpulseaudioinfer
-Audio inference element that processes audio streams through Edge Impulse models.
-
-Element Details:
-- Long name: Edge Impulse Audio Inference
-- Class: Filter/Audio/AI
-- Description: Runs audio inference on Edge Impulse models (EIM)
-
-Pad Templates:
-- Sink pad (Always available):
-  ```
-  audio/x-raw
-    format: S16LE
-    rate: [ 8000, 48000 ]
-    channels: 1
-    layout: interleaved
-  ```
-- Source pad (Always available):
-  ```
-  audio/x-raw
-    format: S16LE
-    rate: [ 8000, 48000 ]
-    channels: 1
-    layout: interleaved
-  ```
-
-Properties:
-1. `model-path` (string):
-   - Path to Edge Impulse model file
-   - Default: null
-   - Flags: readable, writable
-
-2. `threshold` (string):
-   - Format: `blockId.type=value`
-   - Types:
-     - `min_score`: For object detection blocks
-     - `min_anomaly_score`: For anomaly detection blocks
-   - Examples:
-     - `5.min_score=0.6`: Set minimum confidence score for block 5
-     - `4.min_anomaly_score=0.35`: Set minimum anomaly score for block 4
-   - Default: ""
-   - Flags: readable, writable
-
-Key features:
-- Accepts S16LE mono audio at 8-48kHz
-- Passes audio through unchanged
-- Performs inference when model is loaded
-- Emits inference results as messages (see [Public API](#public-api-inference-output))
-
-Example pipeline:
-```bash
-# FFI mode (default)
-gst-launch-1.0 autoaudiosrc ! \
-    capsfilter caps="audio/x-raw,format=F32LE" ! \
-    audioconvert ! \
-    audioresample ! \
-    capsfilter caps="audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved" ! \
-    edgeimpulseaudioinfer ! \
-    audioconvert ! \
-    audioresample ! \
-    capsfilter caps="audio/x-raw,format=F32LE,channels=2,rate=44100" ! \
-    autoaudiosink
-
-# EIM mode (legacy)
-gst-launch-1.0 autoaudiosrc ! \
-    capsfilter caps="audio/x-raw,format=F32LE" ! \
-    audioconvert ! \
-    audioresample ! \
-    capsfilter caps="audio/x-raw,format=S16LE,channels=1,rate=16000,layout=interleaved" ! \
-    edgeimpulseaudioinfer model-path=<path-to-model> ! \
-    audioconvert ! \
-    audioresample ! \
-    capsfilter caps="audio/x-raw,format=F32LE,channels=2,rate=44100" ! \
-    autoaudiosink
-```
-
-### edgeimpulsevideoinfer
-Video inference element that processes video frames through Edge Impulse models. The element automatically handles frame resizing to match model input requirements and scales detection results back to the original resolution.
-
-Element Details:
-- Long name: Edge Impulse Video Inference
-- Class: Filter/Video/AI
-- Description: Runs video inference on Edge Impulse models (EIM)
-
-Pad Templates:
-- Sink pad (Always available):
-  ```
-  video/x-raw
-    format: RGB
-    width: [ 1, 2147483647 ]
-    height: [ 1, 2147483647 ]
-  ```
-- Source pad (Always available):
-  ```
-  video/x-raw
-    format: RGB
-    width: [ 1, 2147483647 ]
-    height: [ 1, 2147483647 ]
-  ```
-
-Properties:
-1. `model-path` (string):
-   - Path to Edge Impulse model file
-   - Default: null
-   - Flags: readable, writable
-
-2. `threshold` (string):
-   - Format: `blockId.type=value`
-   - Types:
-     - `min_score`: For object detection blocks (confidence threshold)
-     - `min_anomaly_score`: For anomaly detection blocks
-   - Examples:
-     - `5.min_score=0.6`: Set minimum confidence score for block 5
-     - `4.min_anomaly_score=0.35`: Set minimum anomaly score for block 4
-   - Default: ""
-   - Flags: readable, writable
-
-Key features:
-- Accepts RGB video frames of any resolution
-- Passes frames through unchanged
-- Performs inference when model is loaded
-- Supports classification, object detection and anomaly detection models
-- Emits inference results as messages (see [Public API](#public-api-inference-output))
-- Attaches VideoRegionOfInterestMeta to each video frame (see [Public API](#public-api-inference-output))
-
-Example pipelines:
-
-Basic pipeline with built-in overlay:
-```bash
-# FFI mode (default)
-gst-launch-1.0 avfvideosrc ! \
-  queue max-size-buffers=2 leaky=downstream ! \
-  videoconvert n-threads=4 ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  queue max-size-buffers=2 leaky=downstream ! \
-  edgeimpulsevideoinfer ! \
-  edgeimpulseoverlay ! \
-  autovideosink sync=false
-
-# EIM mode
-gst-launch-1.0 avfvideosrc ! \
-  queue max-size-buffers=2 leaky=downstream ! \
-  videoconvert n-threads=4 ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  queue max-size-buffers=2 leaky=downstream ! \
-  edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  edgeimpulseoverlay ! \
-  autovideosink sync=false
-```
-
-Pipeline with threshold settings:
-```bash
-# FFI mode (default) - Set object detection threshold
-gst-launch-1.0 avfvideosrc ! \
-  videoconvert ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  edgeimpulsevideoinfer threshold="5.min_score=0.6" ! \
-  edgeimpulseoverlay ! \
-  autovideosink sync=false
-
-# FFI mode (default) - Set multiple thresholds
-gst-launch-1.0 avfvideosrc ! \
-  videoconvert ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  edgeimpulsevideoinfer \
-    threshold="5.min_score=0.6" \
-    threshold="4.min_anomaly_score=0.35" ! \
-  edgeimpulseoverlay ! \
-  autovideosink sync=false
-
-# EIM mode - Set object detection threshold
-gst-launch-1.0 avfvideosrc ! \
-  videoconvert ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  edgeimpulsevideoinfer model-path=<path-to-model> threshold="5.min_score=0.6" ! \
-  edgeimpulseoverlay ! \
-  autovideosink sync=false
-
-# EIM mode - Set multiple thresholds
-gst-launch-1.0 avfvideosrc ! \
-  videoconvert ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  edgeimpulsevideoinfer model-path=<path-to-model> \
-    threshold="5.min_score=0.6" \
-    threshold="4.min_anomaly_score=0.35" ! \
-  edgeimpulseoverlay ! \
-  autovideosink sync=false
-```
-
-### edgeimpulseoverlay
-Video overlay element that visualizes inference results by drawing bounding boxes and labels on video frames.
-
-Element Details:
-- Long name: Edge Impulse Overlay
-- Class: Filter/Effect/Video
-- Description: Draws bounding boxes on video frames based on ROI metadata, including object tracking IDs
-
-Pad Templates:
-- Sink/Source pads (Always available):
-  ```
-  video/x-raw
-    format: { RGB, BGR, RGBA, BGRA, UYVY, YUY2, YVYU, NV12, NV21, I420, YV12 }
-    width: [ 1, 2147483647 ]
-    height: [ 1, 2147483647 ]
-  ```
-
-Key features:
-- Draws bounding boxes for object detection and visual anomaly detection results (from VideoRegionOfInterestMeta)
-- Displays class labels with confidence scores and object tracking IDs when available
-- Supports wide range of video formats
-- Automatic text sizing: Calculates optimal font size based on frame dimensions and bounding box sizes
-- Text scale control: Use `text-scale-ratio` property to fine-tune text size (0.1x to 5.0x scaling)
-
-Properties:
-1. `stroke-width` (integer):
-   - Width of the bounding box lines in pixels
-   - Range: 1 - 100
-   - Default: 2
-
-2. `text-color` (unsigned integer):
-   - Color of the text in RGB format
-   - Range: 0 - 4294967295
-   - Default: white (0xFFFFFF)
-   - If set to default white, automatic brightness-based color selection is used
-
-3. `background-color` (unsigned integer):
-   - Color of the text background in RGB format
-   - Range: 0 - 4294967295
-   - Default: black (0x000000)
-
-4. `text-font` (string):
-   - Font family to use for text rendering
-   - Default: "Sans"
-
-5. `text-scale-ratio` (double):
-   - Scale factor for text size. Values > 1.0 make text larger, < 1.0 make text smaller
-   - Range: 0.1 - 5.0
-   - Default: 1.0 (no scaling)
-   - **Note:** This property overrides the automatic text sizing. The element calculates optimal font size based on frame/bbox dimensions, then applies this scale factor.
-
-Example pipeline:
-```bash
-# FFI mode (default)
-gst-launch-1.0 avfvideosrc ! \
-  videoconvert ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  edgeimpulsevideoinfer ! \
-  edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
-  autovideosink sync=false
-
-# EIM mode
-gst-launch-1.0 avfvideosrc ! \
-  videoconvert ! \
-  video/x-raw,format=RGB,width=1920,height=1080 ! \
-  edgeimpulsevideoinfer model-path=<path-to-model> ! \
-  edgeimpulseoverlay stroke-width=3 text-scale-ratio=1.5 text-color=0x00FF00 background-color=0x000000 ! \
-  autovideosink sync=false
-```
-
-The overlay element automatically processes VideoRegionOfInterestMeta from upstream elements (like edgeimpulsevideoinfer) and visualizes them with configurable styles.
-
-### edgeimpulsesink
-Sink element that uploads audio or video buffers to Edge Impulse using the ingestion API.
-
-Element Details:
-- Long name: Edge Impulse Ingestion Sink
-- Class: Sink/AI
-- Description: Uploads audio or video buffers to Edge Impulse ingestion API (WAV for audio, PNG for video)
-
-Pad Templates:
-- Sink pad (Always available):
-  ```
-  audio/x-raw
-    format: S16LE
-    channels: 1
-    rate: 16000
-  video/x-raw
-    format: { RGB, RGBA }
-    width: [ 1, 2147483647 ]
-    height: [ 1, 2147483647 ]
-  ```
-
-Properties:
-1. `api-key` (string, required):
-   - Edge Impulse API key
-   - Flags: readable, writable
-2. `hmac-key` (string, optional):
-   - Optional HMAC key for signing requests
-   - Flags: readable, writable
-3. `label` (string, optional):
-   - Optional label for the sample
-   - Flags: readable, writable
-4. `category` (string, default: "training"):
-   - Category for the sample (training, testing, anomaly)
-   - Flags: readable, writable
-5. `upload-interval-ms` (u32, default: 0):
-   - Minimum interval in milliseconds between uploads (0 = every buffer)
-   - Flags: readable, writable
-
-Key features:
-- Supports both audio (WAV) and video (PNG) ingestion
-- Batches and uploads buffers at a configurable interval
-- Emits bus messages for ingestion results and errors (see [Public API](#public-api-inference-and-ingestion-output))
-- Can be used in pipelines for automated dataset collection
-
-Example pipeline:
-```bash
-gst-launch-1.0 autoaudiosrc ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,channels=1,rate=16000 ! edgeimpulsesink api-key=<your-api-key> upload-interval-ms=1000 category=training
-```
-
-See `examples/audio_ingestion.rs` for a full example with bus message handling.
-
-### edgeimpulsecontinueif
-Conditional gate element that passes or drops buffers based on upstream inference metadata. Works with both audio and video pipelines — any buffer carrying `InferenceResultMeta` can be filtered. Place it after `edgeimpulsevideoinfer` or `edgeimpulseaudioinfer` (or after a `tee`) to skip downstream processing when a condition is not met — for example, to avoid running a classification model when no objects were detected.
-
-Element Details:
-- Long name: Edge Impulse Continue If
-- Class: Filter/Video
-- Description: Conditionally passes or drops buffers based on upstream inference metadata
-
-Pad Templates:
-- Sink pad (Always available):
-  ```
-  ANY
-  ```
-- Source pad (Always available):
-  ```
-  ANY
-  ```
-
-Properties:
-1. `condition` (string):
-   - Expression evaluated per buffer to decide pass/drop
-   - Default: "" (empty = pass all)
-   - Flags: readable, writable, changeable in PLAYING state
-
-2. `drop` (boolean):
-   - When true, unconditionally drop all buffers (manual override)
-   - Default: false
-   - Flags: readable, writable, changeable in PLAYING state
-
-3. `rules` (string):
-   - JSON array of ordered rules for conditional metadata output
-   - First matching rule wins; its `metadata` key-value pairs are posted as a `edge-impulse-continue-if-metadata` bus message
-   - Default: "" (empty = no rules)
-   - Flags: readable, writable, changeable in PLAYING state
-   - Example:
-     ```json
-     [
-       {"condition": "detection_count > 4",  "metadata": {"severity": "critical", "color": "purple"}},
-       {"condition": "detection_count >= 1", "metadata": {"severity": "warning", "color": "red"}},
-       {"condition": "detection_count == 0", "metadata": {"severity": "ok", "color": "green"}}
-     ]
-     ```
-
-Available condition variables (extracted from buffer metadata):
-
-| Variable | Type | Source |
-|---|---|---|
-| `detection_count` | number | Count of `VideoRegionOfInterestMeta` on buffer |
-| `max_confidence` | number | Highest confidence score across all ROI detections |
-| `has_class("name")` | function | True if any ROI or classification matches the class name |
-| `classification` | string | Top classification label (from `VideoClassificationMeta`) |
-| `classification_confidence` | number | Top classification confidence score |
-| `anomaly_score` | number | Anomaly score (from `VideoAnomalyMeta`) |
-| `visual_anomaly_max` | number | Visual anomaly max score |
-
-Condition syntax:
-```
-detection_count >= 1
-max_confidence > 0.8
-has_class("crack")
-classification == "defect"
-anomaly_score > 0.5
-```
-
-Supported operators: `>=`, `<=`, `>`, `<`, `==`, `!=`
-
-How it works:
-- Reads `InferenceResultMeta` attached to each buffer by upstream `edgeimpulsevideoinfer` or `edgeimpulseaudioinfer` (falls back to video-specific metadata if `InferenceResultMeta` is not present)
-- Evaluates the condition expression against the extracted values
-- If the condition is true, the buffer passes through unchanged (zero-copy)
-- If the condition is false, the buffer is marked with `GAP | DROPPABLE` flags
-- If `rules` are configured, the first matching rule posts a `edge-impulse-continue-if-metadata` bus message with its key-value pairs
-
-Example pipelines:
-```bash
-# Skip classification when no objects are detected
-gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
-    edgeimpulsevideoinfer ! tee name=t \
-    t. ! queue ! edgeimpulseoverlay ! autovideosink \
-    t. ! queue ! edgeimpulsecontinueif condition="detection_count >= 1" ! \
-        edgeimpulsecrop ! edgeimpulsevideoinfer_classification ! fakesink
-
-# Only process high-confidence detections
-gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
-    edgeimpulsevideoinfer ! \
-    edgeimpulsecontinueif condition="max_confidence > 0.9" ! \
-    edgeimpulseoverlay ! autovideosink
-
-# Gate on specific class
-gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
-    edgeimpulsevideoinfer ! \
-    edgeimpulsecontinueif condition='has_class("crack")' ! \
-    edgeimpulseoverlay ! autovideosink
-```
-
-### edgeimpulsecrop
-Dynamic crop element that extracts detected object regions from video frames based on upstream inference metadata. For each bounding box detected by an upstream `edgeimpulsevideoinfer`, the element produces a separate cropped buffer — enabling multi-stage pipelines where a detection model finds objects and a classification model analyzes each one individually.
-
-Element Details:
-- Long name: Edge Impulse Dynamic Crop
-- Class: Filter/Video
-- Description: Crops detected object regions from video frames based on upstream inference metadata
-
-Pad Templates:
-- Sink pad (Always available):
-  ```
-  video/x-raw
-    format: RGB
-    width: [ 1, 2147483647 ]
-    height: [ 1, 2147483647 ]
-  ```
-- Source pad (Always available):
-  ```
-  video/x-raw
-    format: RGB
-    width: [ 1, 2147483647 ]
-    height: [ 1, 2147483647 ]
-  ```
-
-Properties:
-1. `padding` (integer):
-   - Extra pixels around each bounding box crop
-   - Range: 0 – 1000
-   - Default: 0
-   - Flags: readable, writable, changeable in PLAYING state
-
-2. `target-width` (integer):
-   - Resize all crops to this width. Setting a fixed target avoids GStreamer caps renegotiation per-crop.
-   - Range: 0 – 4096 (0 = keep natural crop size)
-   - Default: 0
-   - Flags: readable, writable
-
-3. `target-height` (integer):
-   - Resize all crops to this height. Setting a fixed target avoids GStreamer caps renegotiation per-crop.
-   - Range: 0 – 4096 (0 = keep natural crop size)
-   - Default: 0
-   - Flags: readable, writable
-
-How it works:
-1. Reads `VideoRegionOfInterestMeta` attached by upstream `edgeimpulsevideoinfer`
-2. For each detection bounding box:
-   - Extracts the crop region (with optional padding, clamped to frame bounds)
-   - Optionally resizes to `target-width` x `target-height`
-   - Attaches a `CropOriginMeta` with source coordinates, original frame dimensions, object_id, label, and confidence
-   - Pushes the crop buffer downstream
-3. If no detections are present, the full frame is passed through unchanged
-
-This is a **1-to-N element**: one input buffer may produce N output buffers (one per detected object). The downstream element (e.g., a classification `edgeimpulsevideoinfer`) processes each crop independently.
-
-**CropOriginMeta** attached to each crop buffer:
-
-| Field | Type | Description |
-|---|---|---|
-| `source_x` | u32 | X offset of the crop in the original frame |
-| `source_y` | u32 | Y offset of the crop in the original frame |
-| `source_width` | u32 | Width of the crop region (before resize) |
-| `source_height` | u32 | Height of the crop region (before resize) |
-| `original_width` | u32 | Width of the original frame |
-| `original_height` | u32 | Height of the original frame |
-| `object_id` | u64 | Object tracking ID from upstream detection |
-| `detection_label` | string | Detection class label |
-| `detection_confidence` | f64 | Detection confidence score |
-
-Example pipelines:
-```bash
-# Two-stage pipeline: detect objects, then classify each crop
-gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
-    edgeimpulsevideoinfer_detection ! tee name=t \
-    t. ! queue ! edgeimpulseoverlay_detection ! autovideosink \
-    t. ! queue ! \
-        edgeimpulsecontinueif condition="detection_count >= 1" ! \
-        edgeimpulsecrop padding=10 target-width=96 target-height=96 ! \
-        edgeimpulsevideoinfer_classification ! \
-        fakesink
-
-# Crop with padding and fixed output size
-gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
-    edgeimpulsevideoinfer ! \
-    edgeimpulsecrop padding=20 target-width=320 target-height=320 ! \
-    edgeimpulsevideoinfer_classification ! \
-    fakesink
-```
+For detailed documentation on each element (pad templates, properties, examples), see the dedicated pages:
+
+| Element | Description | Docs |
+|---------|-------------|------|
+| `edgeimpulseaudioinfer` | Audio inference (classification, keyword spotting) | [docs/edgeimpulseaudioinfer.md](docs/edgeimpulseaudioinfer.md) |
+| `edgeimpulsevideoinfer` | Video inference (classification, detection, anomaly) | [docs/edgeimpulsevideoinfer.md](docs/edgeimpulsevideoinfer.md) |
+| `edgeimpulseoverlay` | Draws bounding boxes and labels on video frames | [docs/edgeimpulseoverlay.md](docs/edgeimpulseoverlay.md) |
+| `edgeimpulsesink` | Uploads audio/video to Edge Impulse ingestion API | [docs/edgeimpulsesink.md](docs/edgeimpulsesink.md) |
+| `edgeimpulsecontinueif` | Conditional gate — passes or drops buffers based on inference metadata | [docs/edgeimpulsecontinueif.md](docs/edgeimpulsecontinueif.md) |
+| `edgeimpulsecrop` | Dynamic crop — extracts per-detection regions from video frames (1-to-N) | [docs/edgeimpulsecrop.md](docs/edgeimpulsecrop.md) |
 
 ## Examples
 

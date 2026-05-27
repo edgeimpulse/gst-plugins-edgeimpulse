@@ -580,6 +580,19 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
     /// Don't transform in-place even in passthrough mode
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
+    // GStreamer's default transform_meta drops metas whose API type has tags
+    // (e.g. VideoRegionOfInterestMeta with "video"/"size" tags). In multi-model
+    // pipelines the upstream element's ROI metadata must survive through this
+    // element's NeverInPlace transform so downstream overlays can draw them.
+    fn transform_meta<'a>(
+        &self,
+        _outbuf: &mut gst::BufferRef,
+        _meta: gst::MetaRef<'a, gst::Meta>,
+        _inbuf: &'a gst::BufferRef,
+    ) -> bool {
+        true
+    }
+
     /// Get the size of one unit for the given caps
     fn unit_size(&self, caps: &gst::Caps) -> Option<usize> {
         // Parse the caps into video info

@@ -149,7 +149,7 @@ impl fmt::Debug for VideoAnomalyMeta {
 }
 
 // Actual unsafe implementation of the meta
-mod imp {
+pub(crate) mod imp {
     use super::*;
     use glib::translate::*;
     use gstreamer as gst;
@@ -165,7 +165,7 @@ mod imp {
     #[repr(C)]
     pub struct VideoClassificationMeta {
         pub(super) meta: gst::ffi::GstMeta,
-        pub(super) params: Vec<gst::Structure>,
+        pub(crate) params: Vec<gst::Structure>,
     }
 
     // This is the C type that is actually stored as meta inside the buffers

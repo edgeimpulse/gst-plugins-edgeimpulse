@@ -1,5 +1,5 @@
 mod imp;
-mod meta;
+pub(crate) mod meta;
 
 use gstreamer as gst;
 use gstreamer::glib;

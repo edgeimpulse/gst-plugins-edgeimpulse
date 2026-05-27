@@ -59,7 +59,7 @@ use once_cell::sync::Lazy;
 use pangocairo::functions::*;
 use std::sync::Mutex;
 
-use crate::video::{VideoAnomalyMeta, VideoClassificationMeta};
+use crate::video::VideoAnomalyMeta;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     let variant = env!("PLUGIN_VARIANT");
@@ -406,48 +406,66 @@ impl VideoFilterImpl for EdgeImpulseOverlay {
         );
 
         // Collect all metadata and data upfront to avoid borrow checker issues
-        let classification_data = frame.buffer().meta::<VideoClassificationMeta>().and_then(|meta| {
-            gst::debug!(
-                CAT,
-                obj = self.obj(),
-                "Found VideoClassificationMeta with {} params",
-                meta.params().len()
-            );
+        //
+        // In multi-variant pipelines, the VideoClassificationMeta on this buffer
+        // may have been registered by a different plugin variant (e.g. variant 35)
+        // than this overlay (e.g. variant 34). The typed lookup meta::<T>() matches
+        // by GType, so it would miss cross-variant metas. Instead, we iterate all
+        // metas and match by API name prefix. The struct layout is identical across
+        // variants (#[repr(C)] { meta: GstMeta, params: Vec<Structure> }).
+        let classification_data: Option<(String, f64)> = {
             let mut best_result: Option<(String, f64)> = None;
-            for param in meta.params() {
+            frame.buffer().iter_meta::<gst::Meta>().for_each(|meta| {
+                let api_name = meta.api().name().to_string();
+                if !api_name.starts_with("VideoClassificationMetaAPI") {
+                    return;
+                }
+                // Safety: all VideoClassificationMeta variants share the same
+                // #[repr(C)] layout: { meta: GstMeta, params: Vec<Structure> }.
+                let raw_meta = unsafe {
+                    &*(meta.as_ptr() as *const crate::video::meta::imp::VideoClassificationMeta)
+                };
                 gst::debug!(
                     CAT,
                     obj = self.obj(),
-                    "Processing classification param: name={}, has_field_label={}, has_field_confidence={}",
-                    param.name(),
-                    param.has_field("label"),
-                    param.has_field("confidence")
+                    "Found VideoClassificationMeta (api={}) with {} params",
+                    api_name,
+                    raw_meta.params.len()
                 );
-                if param.name() != "classification" {
-                    continue;
-                }
-
-                if let (Ok(label), Ok(confidence)) =
-                    (param.get::<String>("label"), param.get::<f64>("confidence"))
-                {
+                for param in &raw_meta.params {
                     gst::debug!(
                         CAT,
                         obj = self.obj(),
-                        "Found classification result: {} ({:.1}%)",
-                        label,
-                        confidence * 100.0
+                        "Processing classification param: name={}, has_field_label={}, has_field_confidence={}",
+                        param.name(),
+                        param.has_field("label"),
+                        param.has_field("confidence")
                     );
-                    match best_result {
-                        None => best_result = Some((label, confidence)),
-                        Some((_, prev_conf)) if confidence > prev_conf => {
-                            best_result = Some((label, confidence))
+                    if param.name() != "classification" {
+                        continue;
+                    }
+                    if let (Ok(label), Ok(confidence)) =
+                        (param.get::<String>("label"), param.get::<f64>("confidence"))
+                    {
+                        gst::debug!(
+                            CAT,
+                            obj = self.obj(),
+                            "Found classification result: {} ({:.1}%)",
+                            label,
+                            confidence * 100.0
+                        );
+                        match best_result {
+                            None => best_result = Some((label, confidence)),
+                            Some((_, prev_conf)) if confidence > prev_conf => {
+                                best_result = Some((label, confidence))
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
+            });
             best_result
-        });
+        };
 
         let anomaly_data = frame.buffer().meta::<VideoAnomalyMeta>().map(|meta| {
             gst::debug!(

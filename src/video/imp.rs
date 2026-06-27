@@ -898,7 +898,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         inbuf.pts().unwrap_or(gst::ClockTime::ZERO),
                         e.to_string(),
                     );
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
                     // Put the model back in the state
                     let mut state = self.state.lock().unwrap();
                     state.model = Some(model);
@@ -1061,7 +1063,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         elapsed.as_millis() as u32,
                         resize_time_ms,
                     );
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
                 }
             }
 
@@ -1148,7 +1152,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         elapsed.as_millis() as u32,
                         resize_time_ms,
                     );
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
                 }
             }
 
@@ -1229,7 +1235,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         elapsed.as_millis() as u32,
                         resize_time_ms,
                     );
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
                 } else {
                     // Classification fallback if bounding_boxes is empty
                     if let Some(classification) = result_value
@@ -1270,7 +1278,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                         elapsed.as_millis() as u32,
                         resize_time_ms,
                     );
-                    let _ = self.obj().post_message(gst::message::Element::new(s));
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
                 }
             } else {
                 // No bounding_boxes field, treat as classification
@@ -1312,7 +1322,9 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     elapsed.as_millis() as u32,
                     resize_time_ms,
                 );
-                let _ = self.obj().post_message(gst::message::Element::new(s));
+                let _ = self
+                    .obj()
+                    .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
             }
 
             // Put the model back in the state

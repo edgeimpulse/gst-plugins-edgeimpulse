@@ -82,6 +82,7 @@ fn run_pipeline_for(pipeline_str: &str, duration: Duration) -> TestResults {
                                 "result": serde_json::from_str::<serde_json::Value>(&result_json)
                                     .unwrap_or(serde_json::Value::Null),
                                 "timing_ms": timing_ms,
+                                "src": msg.src().map(|s| s.name().to_string()),
                             });
                             res.inference_messages.push(entry);
                             res.buffer_count += 1;
@@ -198,6 +199,32 @@ fn test_video_inference_message_structure() {
         has_detections || has_classification || has_anomaly,
         "Result should contain bounding_boxes, classification, or anomaly. Got: {result}"
     );
+}
+
+/// Regression: inference element messages must carry their `src` element.
+///
+/// GStreamer element messages should identify the element that posted them so
+/// bus consumers can attribute each message to its producing element. The
+/// inference result messages are posted via `gst::message::Element` and must be
+/// built with `src` set to this element; posting without a `src` leaves the
+/// message unattributed on the bus.
+#[test]
+fn test_inference_messages_carry_src_element() {
+    let src = video_test_source(5);
+    let pipeline = format!("{src} ! edgeimpulsevideoinfer ! fakesink");
+
+    let results = run_pipeline_for(&pipeline, Duration::from_secs(10));
+
+    assert!(
+        !results.inference_messages.is_empty(),
+        "Expected at least one inference bus message"
+    );
+    for msg in &results.inference_messages {
+        assert!(
+            msg.get("src").and_then(|v| v.as_str()).is_some(),
+            "Inference element message must carry its src element. Message: {msg}"
+        );
+    }
 }
 
 #[test]

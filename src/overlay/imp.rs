@@ -894,6 +894,49 @@ impl EdgeImpulseOverlay {
         (red, 0, blue)
     }
 
+    /// Clamps a label's copy region to the visible area of the frame.
+    ///
+    /// Given a label box whose top-left origin is (`x`, `y`) with size
+    /// `box_width` x `box_height` (in frame pixels), returns the
+    /// `(x_start, x_end, y_start, y_end)` region to copy into the frame, clamped to
+    /// `[0, frame_width]` x `[0, frame_height]`.
+    ///
+    /// Returns `None` when the box lies entirely outside the frame. The returned
+    /// bounds always satisfy `x_start <= x_end` and `y_start <= y_end`, so callers
+    /// can compute the unsigned region width/height without risk of underflow.
+    ///
+    /// This guard exists because a detection whose origin falls outside the overlay
+    /// frame (e.g. a box that regressed just past the right edge) would otherwise
+    /// clamp `x_end` below `x_start`; the subsequent `x_end - x_start` on `usize`
+    /// underflows to ~2^64 and spins the pixel-copy loop forever, stalling the
+    /// pipeline and freezing every downstream consumer.
+    fn clamp_copy_region(
+        x: i32,
+        y: i32,
+        box_width: f64,
+        box_height: f64,
+        frame_width: i32,
+        frame_height: i32,
+    ) -> Option<(usize, usize, usize, usize)> {
+        // Clamp in signed space (max(0).min(frame) never panics, unlike i32::clamp
+        // when frame dimensions are degenerate).
+        let x_start = x.max(0).min(frame_width);
+        let x_end = ((x as f64 + box_width) as i32).max(0).min(frame_width);
+        let y_start = y.max(0).min(frame_height);
+        let y_end = ((y as f64 + box_height) as i32).max(0).min(frame_height);
+
+        if x_end <= x_start || y_end <= y_start {
+            return None;
+        }
+
+        Some((
+            x_start as usize,
+            x_end as usize,
+            y_start as usize,
+            y_end as usize,
+        ))
+    }
+
     /// Renders text overlay for classification results.
     /// Uses Cairo/Pango for high-quality text rendering with:
     /// - 2x resolution surface for better quality
@@ -911,6 +954,14 @@ impl EdgeImpulseOverlay {
             Some(info) => (info.width() as i32, info.height() as i32, info.stride()[0]),
             None => return Err(gst::loggable_error!(CAT, "Video info not available")),
         };
+
+        // Bail out early when the label's top-left origin is at or beyond the right/bottom
+        // edge of the frame. Nothing would be visible, and continuing would otherwise build
+        // an empty copy region whose unsigned width/height underflows the pixel-copy loop
+        // below, pegging a CPU core in an effectively infinite spin (see clamp_copy_region).
+        if params.x >= width || params.y >= height {
+            return Ok(());
+        }
 
         // Create a temporary surface at 2x resolution for better text quality
         let scale = 2.0; // Use f64 for Cairo scaling
@@ -1007,11 +1058,26 @@ impl EdgeImpulseOverlay {
             cr.move_to(params.x as f64 + bg_padding, params.y as f64 + bg_padding);
             show_layout(&cr, &layout);
 
-            // Calculate the region to copy, ensuring we stay within bounds
-            copy_y_start = params.y.max(0) as usize;
-            copy_y_end = ((params.y as f64 + total_height) as i32).min(height) as usize;
-            copy_x_start = params.x.max(0) as usize;
-            copy_x_end = ((params.x as f64 + total_width) as i32).min(width) as usize;
+            // Clamp the copy region to the frame in signed space. This guarantees
+            // copy_x_start <= copy_x_end (and likewise for y), so the unsigned
+            // subtraction in the pixel-copy loop below can never underflow. If the
+            // label is entirely outside the frame there is nothing to copy.
+            match Self::clamp_copy_region(
+                params.x,
+                params.y,
+                total_width,
+                total_height,
+                width,
+                height,
+            ) {
+                Some((x_start, x_end, y_start, y_end)) => {
+                    copy_x_start = x_start;
+                    copy_x_end = x_end;
+                    copy_y_start = y_start;
+                    copy_y_end = y_end;
+                }
+                None => return Ok(()),
+            }
         }
 
         // Get stride before dropping context
@@ -1191,5 +1257,87 @@ impl EdgeImpulseOverlay {
             }
         }
         (0, 0, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EdgeImpulseOverlay;
+
+    /// Thin wrapper around the region clamper used by `draw_text`.
+    fn region(
+        x: i32,
+        y: i32,
+        box_width: f64,
+        box_height: f64,
+        frame_width: i32,
+        frame_height: i32,
+    ) -> Option<(usize, usize, usize, usize)> {
+        EdgeImpulseOverlay::clamp_copy_region(
+            x,
+            y,
+            box_width,
+            box_height,
+            frame_width,
+            frame_height,
+        )
+    }
+
+    #[test]
+    fn fully_visible_label_is_unclamped() {
+        assert_eq!(
+            region(100, 50, 40.0, 20.0, 640, 480),
+            Some((100, 140, 50, 70))
+        );
+    }
+
+    #[test]
+    fn label_past_right_edge_is_skipped() {
+        // Regression test for the pipeline freeze: a detection at x=646 on a 640px
+        // wide frame previously clamped copy_x_end (640) below copy_x_start (646),
+        // underflowing the usize copy loop into an effectively infinite spin that
+        // pegged the CPU and froze the overlay (and every downstream consumer).
+        assert_eq!(region(646, 58, 40.0, 16.0, 640, 480), None);
+    }
+
+    #[test]
+    fn label_at_exact_right_edge_is_skipped() {
+        assert_eq!(region(640, 10, 30.0, 12.0, 640, 480), None);
+    }
+
+    #[test]
+    fn label_past_bottom_edge_is_skipped() {
+        // Same underflow hazard on the y axis (label origin past the bottom edge).
+        assert_eq!(region(10, 480, 30.0, 12.0, 640, 480), None);
+    }
+
+    #[test]
+    fn label_straddling_right_edge_is_clamped() {
+        // Only the visible portion (columns 620..640) is copied.
+        assert_eq!(
+            region(620, 50, 40.0, 20.0, 640, 480),
+            Some((620, 640, 50, 70))
+        );
+    }
+
+    #[test]
+    fn label_straddling_left_edge_is_clamped() {
+        // Origin off-screen to the left; the visible portion starts at column 0.
+        assert_eq!(region(-10, 50, 40.0, 20.0, 640, 480), Some((0, 30, 50, 70)));
+    }
+
+    #[test]
+    fn label_fully_off_left_edge_is_skipped() {
+        assert_eq!(region(-50, 50, 40.0, 20.0, 640, 480), None);
+    }
+
+    #[test]
+    fn label_fully_off_top_edge_is_skipped() {
+        assert_eq!(region(10, -30, 40.0, 20.0, 640, 480), None);
+    }
+
+    #[test]
+    fn label_straddling_top_edge_is_clamped() {
+        assert_eq!(region(10, -10, 40.0, 30.0, 640, 480), Some((10, 50, 0, 20)));
     }
 }

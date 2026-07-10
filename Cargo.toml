@@ -12,9 +12,10 @@ name = "gstedgeimpulse"
 crate-type = ["cdylib"]
 
 [features]
-default = ["ffi"]
+default = ["ffi", "ocrs"]
 eim = ["edge-impulse-runner/eim"]
 ffi = ["edge-impulse-runner/ffi"]
+ocrs = ["dep:ocrs", "dep:rten", "dep:rten-imageproc"]
 
 [dependencies]
 cairo-rs = "0.20.7"
@@ -35,6 +36,9 @@ serde_json = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
 edge-impulse-runner = { git = "https://github.com/edgeimpulse/edge-impulse-runner-rs.git", rev = "21449c2", default-features = false }
 tempfile = "3.10"
+ocrs = { version = "0.12.2", optional = true }
+rten = { version = "0.24.0", optional = true, default-features = false, features = ["rten_format"] }
+rten-imageproc = { version = "0.24.0", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"

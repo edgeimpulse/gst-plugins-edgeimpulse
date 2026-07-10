@@ -2,7 +2,7 @@
 [![CI](https://github.com/edgeimpulse/gst-plugins-edgeimpulse/actions/workflows/ci.yml/badge.svg)](https://github.com/edgeimpulse/gst-plugins-edgeimpulse/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://edgeimpulse.github.io/gst-plugins-edgeimpulse/)
 
-A GStreamer plugin that enables real-time machine learning inference and data ingestion using Edge Impulse models and APIs. The plugin provides six elements for audio and video inference, visualization, ingestion, and pipeline flow control.
+A GStreamer plugin that enables real-time machine learning inference and data ingestion using Edge Impulse models and APIs. The plugin provides seven elements for audio and video inference, visualization, ingestion, and pipeline flow control.
 
 ## Architecture Overview
 
@@ -11,6 +11,7 @@ graph LR
     subgraph "Inference"
         A[edgeimpulseaudioinfer]
         V[edgeimpulsevideoinfer]
+        R[edgeimpulseocr]
     end
     subgraph "Flow Control"
         F[edgeimpulsecontinueif]
@@ -24,6 +25,7 @@ graph LR
     V -- "VideoRegionOfInterestMeta\nInferenceResultMeta" --> O
     V -- "VideoRegionOfInterestMeta\nInferenceResultMeta" --> F
     V -- "VideoRegionOfInterestMeta" --> C
+    R -- "VideoRegionOfInterestMeta" --> O
     F -- "pass / drop" --> C
     C -- "CropOriginMeta" --> V
     A -- "InferenceResultMeta" --> F
@@ -35,6 +37,7 @@ graph LR
 |---------|-------------|-------|
 | [`edgeimpulseaudioinfer`](docs/edgeimpulseaudioinfer.md) | Runs audio inference (classification, keyword spotting) | Audio |
 | [`edgeimpulsevideoinfer`](docs/edgeimpulsevideoinfer.md) | Runs video inference (classification, detection, anomaly) | Video |
+| [`edgeimpulseocr`](docs/edgeimpulseocr.md) | Recognizes text in video frames and attaches it as ROI metadata | Video |
 | [`edgeimpulseoverlay`](docs/edgeimpulseoverlay.md) | Draws bounding boxes and labels on video frames | Video |
 | [`edgeimpulsesink`](docs/edgeimpulsesink.md) | Uploads audio/video to Edge Impulse ingestion API | Audio / Video |
 | [`edgeimpulsecontinueif`](docs/edgeimpulsecontinueif.md) | Conditional gate — passes or drops buffers based on inference metadata | Any |
@@ -311,6 +314,19 @@ Attached by `edgeimpulsecrop` to each cropped buffer, recording where the crop c
   }
   ```
 - **Video Metadata:** Scores → `VideoAnomalyMeta` (see [above](#videoanomalymeta)). Grid cells may also be attached as individual `VideoRegionOfInterestMeta` entries for overlay visualization.
+
+#### 4. Text Recognition (OCR)
+
+Produced by [`edgeimpulseocr`](docs/edgeimpulseocr.md) rather than `edgeimpulsevideoinfer`, so it uses its own `ocr` element message (one per recognized line) instead of `edge-impulse-video-inference-result`:
+
+- **Bus Message Example:**
+  ```
+  ocr, text=(string)"HELLO 12345", confidence=(double)1.0,
+       x=(int)94, y=(int)67, width=(int)451, height=(int)61,
+       timestamp=(gint64)0
+  ```
+- **Video Metadata:** Each recognized line → `VideoRegionOfInterestMeta` (see [above](#videoregionofinterestmeta)) with a `detection` param carrying the text as `label`, so `edgeimpulseoverlay` renders it like any other detection.
+- **Backends:** `ocrs` (default) performs recognition in-process with embedded rten models; an `edge-impulse` decode backend is planned. See [`edgeimpulseocr`](docs/edgeimpulseocr.md) for details.
 
 ## Dependencies
 

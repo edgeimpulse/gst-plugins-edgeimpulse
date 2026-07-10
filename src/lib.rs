@@ -78,6 +78,7 @@ mod common;
 mod crop;
 mod filter;
 pub mod meta;
+mod ocr;
 mod overlay;
 pub mod sink;
 pub mod video;
@@ -89,6 +90,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     sink::register(plugin)?;
     filter::register(plugin)?;
     crop::register(plugin)?;
+    ocr::register(plugin)?;
     Ok(())
 }
 

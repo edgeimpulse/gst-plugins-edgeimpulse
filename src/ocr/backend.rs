@@ -1,0 +1,60 @@
+//! Backend abstraction for the OCR element.
+
+/// One recognized line of text with its axis-aligned box in full-frame pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrLine {
+    pub text: String,
+    pub confidence: f32,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Recognizes text in a tightly-packed RGB frame (stride == width * 3).
+pub trait OcrBackend: Send {
+    fn recognize(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<OcrLine>, String>;
+}
+
+/// Which recognition engine the element uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Ocrs,
+    EdgeImpulse,
+}
+
+impl Backend {
+    pub fn parse(s: &str) -> Option<Backend> {
+        match s {
+            "ocrs" => Some(Backend::Ocrs),
+            "edge-impulse" => Some(Backend::EdgeImpulse),
+            _ => None,
+        }
+    }
+}
+
+/// A backend that recognizes nothing. Used as a safe default before a real
+/// backend is configured, and for tests.
+pub struct NoopBackend;
+impl OcrBackend for NoopBackend {
+    fn recognize(&mut self, _rgb: &[u8], _w: u32, _h: u32) -> Result<Vec<OcrLine>, String> {
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_known_backends() {
+        assert_eq!(Backend::parse("ocrs"), Some(Backend::Ocrs));
+        assert_eq!(Backend::parse("edge-impulse"), Some(Backend::EdgeImpulse));
+        assert_eq!(Backend::parse("nope"), None);
+    }
+
+    #[test]
+    fn noop_backend_returns_no_lines() {
+        assert!(NoopBackend.recognize(&[0u8; 12], 2, 2).unwrap().is_empty());
+    }
+}

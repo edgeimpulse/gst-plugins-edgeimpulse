@@ -150,6 +150,10 @@ pub const VIDEO_ANOMALY_META_API_NAME: &str = "VideoAnomalyMetaAPI{}";
 pub const VIDEO_CLASSIFICATION_META_NAME: &str = "VideoClassificationMeta{}";
 #[allow(dead_code)]
 pub const VIDEO_ANOMALY_META_NAME: &str = "VideoAnomalyMeta{}";
+
+// OCR element type name
+#[allow(dead_code)]
+pub const OCR_TYPE_NAME: &str = "EdgeImpulseOcr{}";
 "#,
         plugin_variant,
         type_suffix, // VIDEO_INFER_TYPE_NAME
@@ -166,6 +170,7 @@ pub const VIDEO_ANOMALY_META_NAME: &str = "VideoAnomalyMeta{}";
         type_suffix, // VIDEO_ANOMALY_META_API_NAME
         type_suffix, // VIDEO_CLASSIFICATION_META_NAME
         type_suffix, // VIDEO_ANOMALY_META_NAME
+        type_suffix, // OCR_TYPE_NAME
     );
     std::fs::write(&type_names_path, type_names_code).expect("Failed to write type names file");
 

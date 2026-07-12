@@ -33,10 +33,14 @@ fn overlap_1d(a0: u32, a1: u32, b0: u32, b1: u32) -> u32 {
 /// left-to-right within a row, one `OcrLine` per row, ordered top-to-bottom.
 ///
 /// Detections with an empty label are dropped. A box joins the current row when
-/// its vertical span overlaps the row's span by at least half the shorter of the
-/// two heights; otherwise it starts a new row. Line text is the row's labels
+/// its vertical span overlaps the row's *current* span by at least half of the
+/// shorter of (that span's height, the box's height); otherwise it starts a new
+/// row. Because the row's span grows as boxes join, a monotonic half-height
+/// vertical ramp (a slightly tilted single line) is intentionally chained into
+/// one line — this tilt tolerance is by design. Line text is the row's labels
 /// concatenated in x order (no spaces inserted); line confidence is the minimum
-/// member confidence; line bbox is the union of member boxes.
+/// finite member confidence (NaN ignored, all-NaN → 0.0); line bbox is the union
+/// of member boxes.
 pub fn assemble_lines(dets: &[Detection]) -> Vec<OcrLine> {
     let mut items: Vec<&Detection> = dets.iter().filter(|d| !d.label.is_empty()).collect();
     if items.is_empty() {
@@ -49,10 +53,11 @@ pub fn assemble_lines(dets: &[Detection]) -> Vec<OcrLine> {
     let mut rows: Vec<Vec<&Detection>> = Vec::new();
     for d in items {
         let joins_last = rows.last().is_some_and(|row| {
+            // rows are non-empty by construction, so min/max never see an empty iter
             let top = row.iter().map(|r| r.y).min().unwrap();
-            let bottom = row.iter().map(|r| r.y + r.h).max().unwrap();
+            let bottom = row.iter().map(|r| r.y.saturating_add(r.h)).max().unwrap();
             let shorter = (bottom - top).min(d.h);
-            shorter > 0 && overlap_1d(d.y, d.y + d.h, top, bottom) * 2 >= shorter
+            shorter > 0 && overlap_1d(d.y, d.y.saturating_add(d.h), top, bottom) * 2 >= shorter
         });
         if joins_last {
             rows.last_mut().unwrap().push(d);
@@ -66,14 +71,18 @@ pub fn assemble_lines(dets: &[Detection]) -> Vec<OcrLine> {
         .map(|mut row| {
             row.sort_by(|a, b| (a.x, a.y).cmp(&(b.x, b.y)));
             let text: String = row.iter().map(|d| d.label.as_str()).collect();
+            // Ignore NaN confidences; an all-NaN (or empty) result yields a finite
+            // 0.0 so a degenerate line can't slip past `min-confidence`.
             let confidence = row
                 .iter()
                 .map(|d| d.confidence)
-                .fold(f32::INFINITY, f32::min);
+                .filter(|c| !c.is_nan())
+                .reduce(f32::min)
+                .unwrap_or(0.0);
             let x = row.iter().map(|d| d.x).min().unwrap();
             let y = row.iter().map(|d| d.y).min().unwrap();
-            let right = row.iter().map(|d| d.x + d.w).max().unwrap();
-            let bottom = row.iter().map(|d| d.y + d.h).max().unwrap();
+            let right = row.iter().map(|d| d.x.saturating_add(d.w)).max().unwrap();
+            let bottom = row.iter().map(|d| d.y.saturating_add(d.h)).max().unwrap();
             OcrLine {
                 text,
                 confidence,
@@ -125,6 +134,11 @@ pub fn take_detections(buf: &mut gst::BufferRef) -> Vec<Detection> {
 /// detections, assemble them into lines, filter by confidence / length, attach
 /// one ROI meta per line, and return the lines so the caller can post `ocr`
 /// bus messages.
+///
+/// Not idempotent: the attached line ROIs carry the same `detection` param shape
+/// that `take_detections` consumes, so exactly one `edge-impulse` OCR element
+/// should appear in a pipeline branch — a second pass would re-consume the
+/// assembled lines as if they were characters.
 pub fn process_buffer(
     buf: &mut gst::BufferRef,
     min_confidence: f32,
@@ -190,6 +204,47 @@ mod tests {
     fn line_confidence_is_minimum_member() {
         let lines = assemble_lines(&[det("A", 0.9, 0, 10, 10, 20), det("B", 0.3, 20, 10, 10, 20)]);
         assert!((lines[0].confidence - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nan_confidence_does_not_corrupt_min() {
+        // A stray NaN among finite confidences must not swallow the real minimum.
+        let lines = assemble_lines(&[
+            det("A", 0.9, 0, 10, 10, 20),
+            det("B", f32::NAN, 20, 10, 10, 20),
+            det("C", 0.3, 40, 10, 10, 20),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert!((lines[0].confidence - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn all_nan_confidence_is_finite_not_infinity() {
+        // A line whose characters all carry NaN confidence must not leak past a
+        // confidence filter as +inf; it collapses to a finite 0.0.
+        let lines = assemble_lines(&[
+            det("A", f32::NAN, 0, 10, 10, 20),
+            det("B", f32::NAN, 20, 10, 10, 20),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "AB");
+        assert!(lines[0].confidence.is_finite());
+        assert_eq!(lines[0].confidence, 0.0);
+    }
+
+    #[test]
+    fn staircase_half_height_ramp_chains_into_one_line() {
+        // A monotonic half-height vertical ramp (e.g. a slightly tilted single
+        // line) is INTENTIONALLY grouped into one line by the growing-span join
+        // rule. Pinning this so the tilt-tolerant behavior stays deliberate.
+        let lines = assemble_lines(&[
+            det("A", 0.9, 0, 0, 10, 10),
+            det("B", 0.9, 10, 5, 10, 10),
+            det("C", 0.9, 20, 10, 10, 10),
+            det("D", 0.9, 30, 15, 10, 10),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "ABCD");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use gstreamer_video as gst_video;
 use gstreamer_video::VideoFrameExt;
 use gstreamer_video::VideoFrameRef;
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -87,6 +87,9 @@ pub struct EdgeImpulseOcr {
     /// Set once the worker thread is observed gone, so we warn only once
     /// instead of on every subsequently dropped frame.
     worker_gone_logged: AtomicBool,
+    /// Frames seen by the edge-impulse path, used to post an `ocr` message only
+    /// once per `interval` frames (reset in `start`).
+    ei_frame_count: AtomicU64,
 }
 
 #[glib::object_subclass]
@@ -266,7 +269,7 @@ impl EdgeImpulseOcr {
         min_confidence: f64,
         max_text_length: u32,
         post_message: bool,
-        _interval: u32,
+        interval: u32,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
         let lines = crate::ocr::decode::process_buffer(
@@ -274,7 +277,11 @@ impl EdgeImpulseOcr {
             min_confidence as f32,
             max_text_length as usize,
         );
-        if post_message {
+        // Detections are consumed and lines attached every frame (so the overlay
+        // stays stable); `interval` only throttles how often we *post* messages.
+        let n = self.ei_frame_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let due = n % (interval.max(1) as u64) == 0;
+        if post_message && due {
             for line in &lines {
                 let s = build_ocr_message(line, pts_ms);
                 let _ = self
@@ -300,6 +307,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
             Backend::parse(&settings.backend),
             Some(Backend::EdgeImpulse)
         ) {
+            self.ei_frame_count.store(0, Ordering::Relaxed);
             return self.parent_start();
         }
         self.worker_gone_logged.store(false, Ordering::Relaxed);

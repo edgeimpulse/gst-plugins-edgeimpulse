@@ -251,6 +251,88 @@ fn edge_impulse_decodes_upstream_detections() {
     );
 }
 
+#[test]
+fn edge_impulse_interval_throttles_ocr_messages() {
+    init();
+    if gst::ElementFactory::find(&ocr_element_name()).is_none() {
+        panic!(
+            "edgeimpulseocr not found — build the plugin and set \
+             GST_PLUGIN_PATH=\"$(pwd)/target/debug\""
+        );
+    }
+
+    let pipeline = gst::parse::launch(&format!(
+        "videotestsrc num-buffers=5 ! video/x-raw,format=RGB,width=80,height=48 ! \
+         videoconvert ! {elem} name=ocr backend=edge-impulse interval=5 ! \
+         appsink name=sink",
+        elem = ocr_element_name(),
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+
+    // Inject one decodable detection on every buffer.
+    let ocr = pipeline.by_name("ocr").unwrap();
+    let sinkpad = ocr.static_pad("sink").unwrap();
+    sinkpad.add_probe(gst::PadProbeType::BUFFER, |_pad, info| {
+        if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+            let buf = buffer.make_mut();
+            let mut roi =
+                gstreamer_video::VideoRegionOfInterestMeta::add(buf, "X", (0, 10, 10, 20));
+            roi.add_param(
+                gst::Structure::builder("detection")
+                    .field("label", "X")
+                    .field("confidence", 0.9f64)
+                    .build(),
+            );
+        }
+        gst::PadProbeReturn::Ok
+    });
+
+    // Drain output buffers so the pipeline runs to EOS.
+    let sink = pipeline
+        .by_name("sink")
+        .unwrap()
+        .downcast::<gstreamer_app::AppSink>()
+        .unwrap();
+    sink.set_callbacks(
+        gstreamer_app::AppSinkCallbacks::builder()
+            .new_sample(move |s| {
+                let _ = s.pull_sample().unwrap();
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    let ocr_count = Arc::new(Mutex::new(0usize));
+    let oc = ocr_count.clone();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    for msg in pipeline
+        .bus()
+        .unwrap()
+        .iter_timed(gst::ClockTime::from_seconds(10))
+    {
+        use gst::MessageView::*;
+        match msg.view() {
+            Element(e) => {
+                if e.structure().map_or(false, |st| st.name() == "ocr") {
+                    *oc.lock().unwrap() += 1;
+                }
+            }
+            Eos(..) => break,
+            Error(e) => panic!("{e:?}"),
+            _ => {}
+        }
+    }
+    pipeline.set_state(gst::State::Null).unwrap();
+
+    assert_eq!(
+        *ocr_count.lock().unwrap(),
+        1,
+        "interval=5 over 5 buffers must post exactly one ocr message"
+    );
+}
+
 /// End-to-end check of the ocrs recognition path. Recognition runs on a worker
 /// thread, so results land on a *later* output buffer than the frame that
 /// triggered them; feeding the same text frame on a loop (`imagefreeze`) lets

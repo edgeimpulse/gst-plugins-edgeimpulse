@@ -326,7 +326,7 @@ Produced by [`edgeimpulseocr`](docs/edgeimpulseocr.md) rather than `edgeimpulsev
        timestamp=(gint64)0
   ```
 - **Video Metadata:** Each recognized line → `VideoRegionOfInterestMeta` (see [above](#videoregionofinterestmeta)) with a `detection` param carrying the text as `label`, so `edgeimpulseoverlay` renders it like any other detection.
-- **Backends:** `ocrs` (default) performs recognition in-process with embedded rten models; an `edge-impulse` decode backend is planned. See [`edgeimpulseocr`](docs/edgeimpulseocr.md) for details.
+- **Backends:** `ocrs` (default) performs recognition in-process with embedded rten models; the `edge-impulse` backend decodes per-character detections from an upstream `edgeimpulsevideoinfer` element into text lines. See [`edgeimpulseocr`](docs/edgeimpulseocr.md) for details.
 
 ## Dependencies
 

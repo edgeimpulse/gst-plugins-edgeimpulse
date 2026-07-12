@@ -105,7 +105,11 @@ impl ObjectImpl for EdgeImpulseOcr {
             vec![
                 glib::ParamSpecString::builder("backend")
                     .nick("Backend")
-                    .blurb("OCR backend implementation to use")
+                    .blurb(
+                        "OCR backend: 'ocrs' runs a built-in detection+recognition \
+                         model on the RGB frame; 'edge-impulse' decodes per-character \
+                         detections from an upstream edgeimpulsevideoinfer element",
+                    )
                     .default_value(Some("ocrs"))
                     .mutable_ready()
                     .build(),

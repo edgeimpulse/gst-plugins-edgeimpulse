@@ -2,7 +2,7 @@
 
 Reads text from video frames (optical character recognition) and attaches each recognized line to the buffer as inference metadata. For every line of text found, the element attaches a `VideoRegionOfInterestMeta` — so downstream elements such as `edgeimpulseoverlay` render the text exactly like any other detection — and, optionally, posts an `ocr` message on the bus.
 
-Recognition runs on a background worker thread, fully decoupled from the streaming thread, so a slow model never stalls the pipeline: frames pass through immediately and results attach to a slightly later frame.
+With the `ocrs` backend, recognition runs on a background worker thread, fully decoupled from the streaming thread, so a slow model never stalls the pipeline: frames pass through immediately and results attach to a slightly later frame. The `edge-impulse` backend has no model of its own; it decodes the per-character detections produced by an upstream `edgeimpulsevideoinfer` element inline on every frame.
 
 ## Element Details
 
@@ -30,7 +30,7 @@ Recognition runs on a background worker thread, fully decoupled from the streami
 ## Properties
 
 1. `backend` (string):
-   - OCR engine to use. `ocrs` performs recognition in-process with embedded [rten](https://github.com/robertknight/rten) models; `edge-impulse` (decode recognition results from an upstream Edge Impulse model) is planned and currently recognizes nothing.
+   - OCR engine to use. `ocrs` performs recognition in-process with embedded [rten](https://github.com/robertknight/rten) models; `edge-impulse` decodes per-character detections from an upstream `edgeimpulsevideoinfer` element into text lines (it runs no model itself).
    - Default: `ocrs`
    - Flags: readable, writable, changeable in the NULL or READY state
 
@@ -62,19 +62,19 @@ Recognition runs on a background worker thread, fully decoupled from the streami
    - Flags: readable, writable, changeable in PLAYING state
 
 7. `interval` (unsigned integer):
-   - Run recognition on one frame out of every N (higher values reduce load).
+   - With the `ocrs` backend, run recognition on one frame out of every N (higher values reduce load). With the `edge-impulse` backend every frame is decoded and this instead throttles how often `ocr` bus messages are posted (one per N frames).
    - Range: 1 -- 4294967295
    - Default: 1
    - Flags: readable, writable, changeable in PLAYING state
 
 ## How It Works
 
-1. Every `interval`-th input frame is copied and handed to a background worker thread; all other frames pass straight through.
-2. The worker runs the configured backend (text detection followed by recognition) off the streaming thread.
+1. With the `ocrs` backend, every `interval`-th input frame is copied and handed to a background worker thread; all other frames pass straight through. (The `edge-impulse` backend skips the worker and decodes upstream detections inline on every frame.)
+2. The worker runs the `ocrs` text detection and recognition models off the streaming thread.
 3. The most recent results are attached to passing buffers as `VideoRegionOfInterestMeta` — one per line, each with a `detection` param carrying the recognized text as `label` and the confidence — so `edgeimpulseoverlay` (or any ROI consumer) can render them.
 4. When `post-message` is true, each recognized line is also emitted as an `ocr` bus message.
 
-Because recognition is asynchronous, results attach to a slightly later frame than the one they were computed from. The `ocr` message's `timestamp` field carries the PTS (in milliseconds) of the source frame the text was read from.
+With the `ocrs` backend, recognition is asynchronous, so results attach to a slightly later frame than the one they were computed from. With the `edge-impulse` backend, decoding is synchronous: each frame's lines attach to that same frame, and `interval` throttles only the `ocr` message rate. The `ocr` message's `timestamp` field carries the PTS (in milliseconds) of the source frame the text was read from.
 
 ### `ocr` Bus Message
 
@@ -88,7 +88,18 @@ ocr, text=(string), confidence=(double),
 ## Backends
 
 - **`ocrs`** (default): Pure-Rust text detection and recognition using [ocrs](https://github.com/robertknight/ocrs). The default detection and recognition models are embedded in the plugin, so no external files are required. Override them with `detection-model` / `recognition-model` to use your own; the standard models can also be fetched separately with [`examples/download-ocr-models.sh`](../examples/download-ocr-models.sh). This backend is compiled only when the plugin is built with the `ocrs` cargo feature (enabled by default).
-- **`edge-impulse`** (planned): Will decode text from an upstream Edge Impulse recognition model, letting you train and deploy custom OCR models via Edge Impulse Studio. Not yet implemented — selecting it currently recognizes nothing.
+- **`edge-impulse`**: Decodes the per-character object-detection results of an **upstream** `edgeimpulsevideoinfer` element into lines of text. It evaluates no model itself: it reads the `VideoRegionOfInterestMeta` character boxes (label + confidence in a `detection` param, in full-frame pixels), groups them into rows by vertical overlap, and concatenates each row into a line. The per-character ROIs are consumed and replaced by one ROI per assembled line, so `edgeimpulseoverlay` renders the lines, not the raw glyphs. Train and deploy the upstream character model via Edge Impulse Studio.
+
+### Property applicability
+
+| Property            | `ocrs`                    | `edge-impulse`                                |
+| ------------------- | ------------------------- | --------------------------------------------- |
+| `detection-model`   | Path to detection model   | Ignored (detection happens upstream)          |
+| `recognition-model` | Path to recognition model | Ignored (recognition happens upstream)        |
+| `min-confidence`    | Filters recognized lines  | Filters lines by their weakest character      |
+| `max-text-length`   | Truncates line text       | Truncates line text                           |
+| `post-message`      | Posts `ocr` bus messages  | Posts `ocr` bus messages                      |
+| `interval`          | 1-in-N frames recognized  | Every frame decoded; throttles `ocr` messages |
 
 > **Build in release mode.** The recognition models are large; debug builds run recognition far too slowly to be usable. Always build and run with `--release`.
 
@@ -113,6 +124,17 @@ gst-launch-1.0 -m filesrc location=text.png ! decodebin ! imagefreeze ! \
         detection-model=text-detection.rten \
         recognition-model=text-recognition.rten ! \
     fakesink
+```
+
+Decode text from an upstream Edge Impulse per-character detection model:
+
+```bash
+# Run an Edge Impulse object-detection model upstream; edgeimpulseocr
+# assembles the detected characters into text lines and overlays them.
+gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGB ! \
+    edgeimpulsevideoinfer model-path=/path/to/model ! \
+    edgeimpulseocr backend=edge-impulse ! \
+    edgeimpulseoverlay ! videoconvert ! autovideosink
 ```
 
 An end-to-end example that prints recognized text is available at [`examples/ocr_inference.rs`](../examples/ocr_inference.rs):

@@ -90,13 +90,12 @@ fn exposes_configurable_properties() {
 }
 
 #[test]
-fn noop_backend_attaches_no_metas() {
+fn edge_impulse_without_upstream_detections_attaches_no_metas() {
     init();
     let got_meta = Arc::new(Mutex::new(false));
     let gm = got_meta.clone();
-    // `edge-impulse` currently maps to the no-op backend (see `build_backend`),
-    // giving a deterministic "recognizes nothing" path — this checks the element
-    // runs in a real pipeline and attaches no ROI metas when there is no result.
+    // With no upstream detections on the buffers (plain videotestsrc), the
+    // edge-impulse backend has nothing to decode, so it must attach no ROI metas.
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=2 ! video/x-raw,format=RGB,width=80,height=48 ! \
          videoconvert ! {} backend=edge-impulse interval=1 ! appsink name=sink",
@@ -143,7 +142,112 @@ fn noop_backend_attaches_no_metas() {
     pipeline.set_state(gst::State::Null).unwrap();
     assert!(
         !*got_meta.lock().unwrap(),
-        "Noop backend must not attach metas"
+        "edge-impulse must not attach metas when there are no upstream detections"
+    );
+}
+
+#[test]
+fn edge_impulse_decodes_upstream_detections() {
+    init();
+    if gst::ElementFactory::find(&ocr_element_name()).is_none() {
+        panic!(
+            "edgeimpulseocr not found — build the plugin and set \
+             GST_PLUGIN_PATH=\"$(pwd)/target/debug\""
+        );
+    }
+
+    // Labels of ROI metas seen on output buffers, read from their `detection`
+    // param (matching how downstream consumers read them).
+    let out_labels = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ol = out_labels.clone();
+
+    let pipeline = gst::parse::launch(&format!(
+        "videotestsrc num-buffers=1 ! video/x-raw,format=RGB,width=80,height=48 ! \
+         videoconvert ! {elem} name=ocr backend=edge-impulse interval=1 ! \
+         appsink name=sink",
+        elem = ocr_element_name(),
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+
+    // Mimic an upstream edgeimpulsevideoinfer: inject two character detections
+    // ("A" at x=0, "B" at x=20, same row) on the ocr element's sink pad.
+    let ocr = pipeline.by_name("ocr").unwrap();
+    let sinkpad = ocr.static_pad("sink").unwrap();
+    sinkpad.add_probe(gst::PadProbeType::BUFFER, |_pad, info| {
+        if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+            let buf = buffer.make_mut();
+            for (label, x, conf) in [("A", 0u32, 0.9f64), ("B", 20u32, 0.8f64)] {
+                let mut roi =
+                    gstreamer_video::VideoRegionOfInterestMeta::add(buf, label, (x, 10, 10, 20));
+                roi.add_param(
+                    gst::Structure::builder("detection")
+                        .field("label", label)
+                        .field("confidence", conf)
+                        .build(),
+                );
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+
+    let sink = pipeline
+        .by_name("sink")
+        .unwrap()
+        .downcast::<gstreamer_app::AppSink>()
+        .unwrap();
+    sink.set_callbacks(
+        gstreamer_app::AppSinkCallbacks::builder()
+            .new_sample(move |s| {
+                let sample = s.pull_sample().unwrap();
+                if let Some(buf) = sample.buffer() {
+                    for m in buf.iter_meta::<gstreamer_video::VideoRegionOfInterestMeta>() {
+                        if let Some(p) = m.params().find(|p| p.name() == "detection") {
+                            if let Ok(l) = p.get::<String>("label") {
+                                ol.lock().unwrap().push(l);
+                            }
+                        }
+                    }
+                }
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    let ocr_texts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ot = ocr_texts.clone();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    for msg in pipeline
+        .bus()
+        .unwrap()
+        .iter_timed(gst::ClockTime::from_seconds(10))
+    {
+        use gst::MessageView::*;
+        match msg.view() {
+            Element(e) => {
+                if let Some(st) = e.structure() {
+                    if st.name() == "ocr" {
+                        ot.lock().unwrap().push(st.get::<String>("text").unwrap());
+                    }
+                }
+            }
+            Eos(..) => break,
+            Error(e) => panic!("{e:?}"),
+            _ => {}
+        }
+    }
+    pipeline.set_state(gst::State::Null).unwrap();
+
+    assert_eq!(
+        *ocr_texts.lock().unwrap(),
+        vec!["AB".to_string()],
+        "expected exactly one ocr message with the assembled text"
+    );
+    assert_eq!(
+        *out_labels.lock().unwrap(),
+        vec!["AB".to_string()],
+        "character ROIs must be consumed and replaced by a single line ROI"
     );
 }
 

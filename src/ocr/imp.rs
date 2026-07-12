@@ -255,6 +255,35 @@ impl EdgeImpulseOcr {
     fn build_ocrs(_settings: &Settings) -> Box<dyn OcrBackend> {
         Box::new(NoopBackend)
     }
+
+    /// Decode the character detections an upstream `edgeimpulsevideoinfer`
+    /// attached to this buffer into lines of text: consume the per-character ROI
+    /// metas, assemble them into lines, attach one line ROI, and post one `ocr`
+    /// message per line. Runs inline (no worker) because there is no model.
+    fn transform_ip_edge_impulse(
+        &self,
+        buf: &mut gst::BufferRef,
+        min_confidence: f64,
+        max_text_length: u32,
+        post_message: bool,
+        _interval: u32,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+        let lines = crate::ocr::decode::process_buffer(
+            buf,
+            min_confidence as f32,
+            max_text_length as usize,
+        );
+        if post_message {
+            for line in &lines {
+                let s = build_ocr_message(line, pts_ms);
+                let _ = self
+                    .obj()
+                    .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+            }
+        }
+        Ok(gst::FlowSuccess::Ok)
+    }
 }
 
 impl BaseTransformImpl for EdgeImpulseOcr {
@@ -265,6 +294,14 @@ impl BaseTransformImpl for EdgeImpulseOcr {
 
     fn start(&self) -> Result<(), gst::ErrorMessage> {
         let settings = self.settings.lock().unwrap().clone();
+        // The edge-impulse backend decodes upstream detection metas inline in
+        // transform_ip; it evaluates no model and needs no worker thread.
+        if matches!(
+            Backend::parse(&settings.backend),
+            Some(Backend::EdgeImpulse)
+        ) {
+            return self.parent_start();
+        }
         self.worker_gone_logged.store(false, Ordering::Relaxed);
         let latest = Arc::new(Mutex::new(Latest::default()));
         let latest_worker = latest.clone();
@@ -330,9 +367,10 @@ impl BaseTransformImpl for EdgeImpulseOcr {
     }
 
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let (interval, min_confidence, max_text_length, post_message) = {
+        let (backend, interval, min_confidence, max_text_length, post_message) = {
             let settings = self.settings.lock().unwrap();
             (
+                settings.backend.clone(),
                 // max(1) keeps the modulo below divide-by-zero-safe independent
                 // of the GObject minimum, so a direct Settings construction
                 // (e.g. in a unit test) can never panic here.
@@ -342,6 +380,18 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                 settings.post_message,
             )
         };
+
+        // The edge-impulse backend decodes upstream detection metas synchronously
+        // (no pixels, no worker); handle it before the caps/worker path below.
+        if matches!(Backend::parse(&backend), Some(Backend::EdgeImpulse)) {
+            return self.transform_ip_edge_impulse(
+                buf,
+                min_confidence,
+                max_text_length,
+                post_message,
+                interval,
+            );
+        }
 
         let info = self.info.lock().unwrap().clone();
         let Some(info) = info else {

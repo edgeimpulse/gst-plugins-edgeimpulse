@@ -8,8 +8,10 @@
 //! concatenate each row into a line, and hand the lines to `shaping`.
 
 use crate::ocr::backend::OcrLine;
+use gst::buffer::BufferMetaForeachAction;
 use gstreamer as gst;
 use gstreamer_video as gst_video;
+use std::ops::ControlFlow;
 
 /// One upstream character detection, in full-frame pixels.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +85,55 @@ pub fn assemble_lines(dets: &[Detection]) -> Vec<OcrLine> {
         })
         .collect();
     lines.sort_by(|a, b| (a.y, a.x).cmp(&(b.y, b.x)));
+    lines
+}
+
+/// Read every character detection from the buffer's `VideoRegionOfInterestMeta`
+/// entries **and remove those metas**. We consume the per-character boxes so
+/// downstream renders only the assembled line, not the raw glyphs. Only ROIs
+/// carrying a `detection` param (the Edge Impulse convention) are taken; any
+/// other ROI meta is left in place.
+pub fn take_detections(buf: &mut gst::BufferRef) -> Vec<Detection> {
+    let mut out = Vec::new();
+    buf.foreach_meta_mut(|mut meta| {
+        let action = match meta.downcast_ref::<gst_video::VideoRegionOfInterestMeta>() {
+            Some(roi) => match roi.params().find(|p| p.name() == "detection") {
+                Some(p) => {
+                    let (x, y, w, h) = roi.rect();
+                    let label = p.get::<String>("label").unwrap_or_default();
+                    let confidence = p.get::<f64>("confidence").unwrap_or(0.0) as f32;
+                    out.push(Detection {
+                        label,
+                        confidence,
+                        x,
+                        y,
+                        w,
+                        h,
+                    });
+                    BufferMetaForeachAction::Remove
+                }
+                None => BufferMetaForeachAction::Keep,
+            },
+            None => BufferMetaForeachAction::Keep,
+        };
+        ControlFlow::Continue(action)
+    });
+    out
+}
+
+/// Full edge-impulse transform for one buffer: consume the upstream character
+/// detections, assemble them into lines, filter by confidence / length, attach
+/// one ROI meta per line, and return the lines so the caller can post `ocr`
+/// bus messages.
+pub fn process_buffer(
+    buf: &mut gst::BufferRef,
+    min_confidence: f32,
+    max_len: usize,
+) -> Vec<OcrLine> {
+    let dets = take_detections(buf);
+    let lines = assemble_lines(&dets);
+    let lines = crate::ocr::shaping::filter_and_truncate(lines, min_confidence, max_len);
+    crate::ocr::shaping::attach_results(buf, &lines);
     lines
 }
 
@@ -167,5 +218,114 @@ mod tests {
         let lines = assemble_lines(&[det("A", 0.9, 0, 10, 10, 20), det("B", 0.9, 20, 12, 10, 20)]);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "AB");
+    }
+
+    #[test]
+    fn nonzero_overlap_below_threshold_splits_rows() {
+        // Vertical overlap is 4px; the shorter height is 20px, so 4*2 = 8 < 20
+        // -> the two boxes must land on SEPARATE rows (top box first).
+        let lines = assemble_lines(&[det("A", 0.9, 0, 0, 10, 20), det("B", 0.9, 0, 16, 10, 20)]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "A");
+        assert_eq!(lines[1].text, "B");
+    }
+
+    fn init() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| gst::init().expect("gst init"));
+    }
+
+    fn char_roi(buf: &mut gst::BufferRef, label: &str, x: u32, conf: f64) {
+        let mut roi = gst_video::VideoRegionOfInterestMeta::add(buf, label, (x, 10, 10, 20));
+        roi.add_param(
+            gst::Structure::builder("detection")
+                .field("label", label)
+                .field("confidence", conf)
+                .build(),
+        );
+    }
+
+    #[test]
+    fn take_detections_reads_and_consumes_detection_rois() {
+        init();
+        let mut buf = gst::Buffer::with_size(64).unwrap();
+        let b = buf.get_mut().unwrap();
+        char_roi(b, "A", 0, 0.9);
+        char_roi(b, "B", 20, 0.8);
+        let dets = take_detections(b);
+        assert_eq!(dets.len(), 2);
+        assert!(dets
+            .iter()
+            .any(|d| d.label == "A" && (d.confidence - 0.9).abs() < 1e-6));
+        assert!(dets.iter().any(|d| d.label == "B"));
+        // The character ROIs are consumed.
+        assert_eq!(
+            b.iter_meta::<gst_video::VideoRegionOfInterestMeta>()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn take_detections_ignores_rois_without_detection_param() {
+        init();
+        let mut buf = gst::Buffer::with_size(64).unwrap();
+        let b = buf.get_mut().unwrap();
+        // A plain ROI with no `detection` param must be left untouched.
+        gst_video::VideoRegionOfInterestMeta::add(b, "face", (0, 0, 4, 4));
+        let dets = take_detections(b);
+        assert!(dets.is_empty());
+        assert_eq!(
+            b.iter_meta::<gst_video::VideoRegionOfInterestMeta>()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn take_detections_on_empty_buffer_is_empty() {
+        init();
+        let mut buf = gst::Buffer::with_size(64).unwrap();
+        let b = buf.get_mut().unwrap();
+        assert!(take_detections(b).is_empty());
+    }
+
+    #[test]
+    fn process_buffer_consumes_chars_and_attaches_one_line() {
+        init();
+        let mut buf = gst::Buffer::with_size(64).unwrap();
+        let b = buf.get_mut().unwrap();
+        char_roi(b, "A", 0, 0.9);
+        char_roi(b, "B", 20, 0.8);
+        let lines = process_buffer(b, 0.0, 256);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "AB");
+        // Exactly one ROI remains: the assembled line (char ROIs consumed).
+        let labels: Vec<String> = b
+            .iter_meta::<gst_video::VideoRegionOfInterestMeta>()
+            .filter_map(|m| {
+                m.params()
+                    .find(|p| p.name() == "detection")
+                    .and_then(|p| p.get::<String>("label").ok())
+            })
+            .collect();
+        assert_eq!(labels, vec!["AB".to_string()]);
+    }
+
+    #[test]
+    fn process_buffer_filters_below_min_confidence() {
+        init();
+        let mut buf = gst::Buffer::with_size(64).unwrap();
+        let b = buf.get_mut().unwrap();
+        char_roi(b, "A", 0, 0.9);
+        char_roi(b, "B", 20, 0.8); // line confidence = min = 0.8
+        let lines = process_buffer(b, 0.85, 256);
+        assert!(lines.is_empty());
+        // Chars consumed, nothing attached.
+        assert_eq!(
+            b.iter_meta::<gst_video::VideoRegionOfInterestMeta>()
+                .count(),
+            0
+        );
     }
 }

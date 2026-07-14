@@ -120,8 +120,13 @@ impl OcrBackend for OcrsBackend {
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
-            let confidence =
-                mean_mask_prob(&text_mask, x0 as usize, y0 as usize, x1 as usize, y1 as usize);
+            let confidence = mean_mask_prob(
+                &text_mask,
+                x0 as usize,
+                y0 as usize,
+                x1 as usize,
+                y1 as usize,
+            );
             out.push(OcrLine {
                 text,
                 confidence,

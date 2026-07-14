@@ -28,6 +28,57 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::error::Error;
 
+use clap::Parser;
+
+/// Live webcam OCR with a tunable overlay.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// OCR backend: "ocrs" (embedded, pure Rust) or "edge-impulse".
+    #[arg(long, default_value = "ocrs")]
+    backend: String,
+
+    /// Drop recognized lines whose confidence is below this value (0.0..1.0).
+    #[arg(long, default_value = "0.0")]
+    min_confidence: f64,
+
+    /// Truncate recognized text to at most this many characters.
+    #[arg(long, default_value = "256")]
+    max_text_length: u32,
+
+    /// Run OCR every Nth frame (1 = every frame).
+    #[arg(long, default_value = "1")]
+    interval: u32,
+
+    /// Override the detection model (.rten); empty uses the embedded model.
+    #[arg(long, default_value = "")]
+    detection_model: String,
+
+    /// Override the recognition model (.rten); empty uses the embedded model.
+    #[arg(long, default_value = "")]
+    recognition_model: String,
+
+    /// Overlay bounding-box stroke width in pixels.
+    #[arg(long, default_value = "2")]
+    stroke_width: i32,
+
+    /// Overlay text scale ratio (0.1..5.0; >1 larger, <1 smaller).
+    #[arg(long, default_value = "1.0")]
+    text_scale_ratio: f64,
+
+    /// Hide the recognized-text labels (draw boxes only).
+    #[arg(long)]
+    no_labels: bool,
+
+    /// Overlay text color, hex RRGGBB or 0xRRGGBB.
+    #[arg(long, default_value = "0xFFFFFF")]
+    text_color: String,
+
+    /// Overlay label background color, hex RRGGBB or 0xRRGGBB.
+    #[arg(long, default_value = "0x000000")]
+    background_color: String,
+}
+
 // macOS shows the video window from the Cocoa main loop, so the pipeline runs
 // on a worker thread while `NSApplication` owns the main thread. On other
 // platforms `run` just calls the closure directly.
@@ -108,7 +159,7 @@ where
     }
 }
 
-fn create_pipeline() -> Result<gst::Pipeline, Box<dyn Error>> {
+fn create_pipeline(args: &Args) -> Result<gst::Pipeline, Box<dyn Error>> {
     gst::init()?;
 
     let pipeline = gst::Pipeline::new();
@@ -138,17 +189,37 @@ fn create_pipeline() -> Result<gst::Pipeline, Box<dyn Error>> {
         )
         .build()?;
 
-    let ocr = gst::ElementFactory::make("edgeimpulseocr")
-        .property("backend", "ocrs")
-        .build()?;
+    let mut ocr_factory = gst::ElementFactory::make("edgeimpulseocr")
+        .property("backend", &args.backend)
+        .property("min-confidence", args.min_confidence)
+        .property("max-text-length", args.max_text_length)
+        .property("interval", args.interval);
+    if !args.detection_model.is_empty() {
+        ocr_factory = ocr_factory.property("detection-model", &args.detection_model);
+    }
+    if !args.recognition_model.is_empty() {
+        ocr_factory = ocr_factory.property("recognition-model", &args.recognition_model);
+    }
+    let ocr = ocr_factory.build()?;
 
     let queue_out = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 4u32)
         .property_from_str("leaky", "downstream")
         .build()?;
 
-    // Defaults already draw boxes (stroke-width=2) and white-on-black labels.
-    let overlay = gst::ElementFactory::make("edgeimpulseoverlay").build()?;
+    let text_color =
+        u32::from_str_radix(args.text_color.trim_start_matches("0x"), 16).unwrap_or(0xFF_FF_FF);
+    let background_color = u32::from_str_radix(args.background_color.trim_start_matches("0x"), 16)
+        .unwrap_or(0x00_00_00);
+    let mut overlay_factory = gst::ElementFactory::make("edgeimpulseoverlay")
+        .property("stroke-width", args.stroke_width)
+        .property("text-color", text_color)
+        .property("background-color", background_color)
+        .property("text-scale-ratio", args.text_scale_ratio);
+    if args.no_labels {
+        overlay_factory = overlay_factory.property("show-labels", false);
+    }
+    let overlay = overlay_factory.build()?;
 
     let convert_out = gst::ElementFactory::make("videoconvert").build()?;
 
@@ -174,9 +245,23 @@ fn create_pipeline() -> Result<gst::Pipeline, Box<dyn Error>> {
 }
 
 fn example_main() -> Result<(), Box<dyn Error>> {
-    println!("🚀 Starting webcam OCR overlay (backend=ocrs)");
+    let args = Args::parse();
+    println!("🚀 Starting webcam OCR overlay");
+    println!(
+        "⚙️  backend={}  min-confidence={:.2}  max-text-length={}  interval={}",
+        args.backend, args.min_confidence, args.max_text_length, args.interval
+    );
+    println!(
+        "⚙️  overlay: stroke-width={}  text-scale-ratio={}  labels={}  text-color={}  background-color={}",
+        args.stroke_width,
+        args.text_scale_ratio,
+        !args.no_labels,
+        args.text_color,
+        args.background_color
+    );
+    println!("ℹ️  Watch the per-line confidence below to pick a --min-confidence.");
 
-    let pipeline = create_pipeline()?;
+    let pipeline = create_pipeline(&args)?;
     pipeline.set_state(gst::State::Playing)?;
     println!("▶️  Pipeline playing — hold some text up to the camera. Ctrl-C to stop.");
 

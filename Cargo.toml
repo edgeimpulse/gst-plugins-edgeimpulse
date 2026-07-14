@@ -30,7 +30,7 @@ ingestion = ["dep:edge-impulse-runner"]
 presentation = ["dep:cairo-rs", "dep:pango", "dep:pangocairo"]
 
 # Capability: ocr (self-contained ocrs/rten text recognition). No runner.
-ocr = ["dep:ocrs", "dep:rten", "dep:rten-imageproc"]
+ocr = ["dep:ocrs", "dep:rten", "dep:rten-imageproc", "dep:rten-tensor"]
 
 # Deprecated alias for `ocr` (keeps existing `--features ocrs` invocations working).
 ocrs = ["ocr"]
@@ -57,6 +57,7 @@ tempfile = "3.10"
 ocrs = { version = "0.12.2", optional = true }
 rten = { version = "0.24.0", optional = true, default-features = false, features = ["rten_format"] }
 rten-imageproc = { version = "0.24.0", optional = true }
+rten-tensor = { version = "0.24.0", optional = true }
 
 # `video_inference` imports `edge_impulse_runner::ffi`, which is only available
 # when the runner (now optional) is built with the ffi backend. Gating it keeps

@@ -2,6 +2,7 @@
 use crate::ocr::backend::{OcrBackend, OcrLine};
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten_imageproc::BoundingRect;
+use rten_tensor::{Layout, NdTensor};
 
 /// Vendored ocrs models, committed under `<crate-root>/models` for offline,
 /// reproducible builds. Populated by `examples/download-ocr-models.sh`.
@@ -30,6 +31,31 @@ fn load_model(path: &str, embedded: &'static [u8]) -> Result<rten::Model, String
         rten::Model::load_static_slice(embedded).map_err(|e| e.to_string())
     } else {
         rten::Model::load_file(path).map_err(|e| e.to_string())
+    }
+}
+
+/// Mean of the detection probability `mask` over the half-open integer box
+/// `[x0, x1) x [y0, y1)`, clamped to the mask bounds. Returns `0.0` for an
+/// empty or fully out-of-bounds box.
+fn mean_mask_prob(mask: &NdTensor<f32, 2>, x0: usize, y0: usize, x1: usize, y1: usize) -> f32 {
+    let [h, w] = mask.shape();
+    let (x0, x1) = (x0.min(w), x1.min(w));
+    let (y0, y1) = (y0.min(h), y1.min(h));
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            sum += mask[[y, x]];
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f32
     }
 }
 
@@ -100,5 +126,54 @@ impl OcrBackend for OcrsBackend {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mean_mask_prob;
+    use rten_tensor::NdTensor;
+
+    // Row-major [H=2, W=3]:
+    //   row 0: 0.0 1.0 0.5
+    //   row 1: 0.0 0.0 1.0
+    fn mask_2x3() -> NdTensor<f32, 2> {
+        NdTensor::from_data([2, 3], vec![0.0, 1.0, 0.5, 0.0, 0.0, 1.0])
+    }
+
+    #[test]
+    fn mean_mask_prob_mean_over_full_mask() {
+        let mask = mask_2x3();
+        let mean = mean_mask_prob(&mask, 0, 0, 3, 2);
+        assert!((mean - (2.5 / 6.0)).abs() < 1e-6, "got {mean}");
+    }
+
+    #[test]
+    fn mean_mask_prob_mean_over_sub_box() {
+        // row 0, cols 1..3 -> (1.0 + 0.5) / 2 = 0.75
+        let mask = mask_2x3();
+        let mean = mean_mask_prob(&mask, 1, 0, 3, 1);
+        assert!((mean - 0.75).abs() < 1e-6, "got {mean}");
+    }
+
+    #[test]
+    fn mean_mask_prob_clamps_out_of_bounds_upper_corner() {
+        // x1/y1 past the edges clamp to [3, 2]; cols 1..3, rows 0..2
+        // -> (1.0 + 0.5 + 0.0 + 1.0) / 4 = 0.625
+        let mask = mask_2x3();
+        let mean = mean_mask_prob(&mask, 1, 0, 10, 10);
+        assert!((mean - 0.625).abs() < 1e-6, "got {mean}");
+    }
+
+    #[test]
+    fn mean_mask_prob_empty_box_is_zero() {
+        let mask = mask_2x3();
+        assert_eq!(mean_mask_prob(&mask, 2, 0, 2, 2), 0.0);
+    }
+
+    #[test]
+    fn mean_mask_prob_fully_out_of_bounds_is_zero() {
+        let mask = mask_2x3();
+        assert_eq!(mean_mask_prob(&mask, 5, 5, 6, 6), 0.0);
     }
 }

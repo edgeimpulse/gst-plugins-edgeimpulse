@@ -90,6 +90,8 @@ pub mod sink;
 // `video` stays declared unconditionally: its `meta` submodule defines the
 // metadata types consumed by the always-on `filter` and the `presentation`
 // overlay. Only the inference *element* inside it is gated (see video/mod.rs).
+#[cfg(feature = "ocr")]
+mod tracker;
 pub mod video;
 
 // `inference` provides the video/audio elements but needs a runner backend to

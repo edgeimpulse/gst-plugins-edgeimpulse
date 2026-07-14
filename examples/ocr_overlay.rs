@@ -59,14 +59,16 @@ struct Args {
     text_stabilization: bool,
 
     /// Recent recognitions kept per object for the stabilization vote.
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..))]
     stabilization_window: u32,
 
     /// Minimum recognitions required before an object is first reported.
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value = "2", value_parser = clap::value_parser!(u32).range(1..))]
     stabilization_min_hits: u32,
 
     /// Consecutive absences tolerated before a stabilized object is dropped.
+    /// Acts as hysteresis: a stabilized line lingers on screen this many
+    /// recognitions after its object leaves the frame.
     #[arg(long, default_value = "5")]
     stabilization_max_misses: u32,
 

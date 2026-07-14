@@ -174,7 +174,8 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .blurb(
                         "Consolidate recognized text across recognitions per \
                          tracked object (most-frequent text, mean confidence). \
-                         Read once at start.",
+                         All raw reads vote; min-confidence filters only the \
+                         consolidated result. Read once at start.",
                     )
                     .default_value(false)
                     .mutable_ready()

@@ -24,7 +24,8 @@ fn line_to_detection(line: &OcrLine) -> Detection {
 /// Feed one recognition's `lines` through `tracker` and return the stabilized
 /// lines (most-frequent text + mean confidence per tracked object, box = latest
 /// read). Empty-text lines are dropped before tracking so they never spawn
-/// tracks.
+/// tracks. Returned lines are ordered by track age (oldest first), not by the
+/// input reading order.
 pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>) -> Vec<OcrLine> {
     let detections: Vec<Detection> = lines
         .iter()

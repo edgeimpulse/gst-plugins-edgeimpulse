@@ -916,6 +916,7 @@ dependencies = [
  "regex",
  "rten",
  "rten-imageproc",
+ "rten-tensor",
  "serde",
  "serde_json",
  "tempfile",

@@ -142,14 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn mean_mask_prob_mean_over_full_mask() {
+    fn mean_over_full_mask() {
         let mask = mask_2x3();
         let mean = mean_mask_prob(&mask, 0, 0, 3, 2);
         assert!((mean - (2.5 / 6.0)).abs() < 1e-6, "got {mean}");
     }
 
     #[test]
-    fn mean_mask_prob_mean_over_sub_box() {
+    fn mean_over_sub_box() {
         // row 0, cols 1..3 -> (1.0 + 0.5) / 2 = 0.75
         let mask = mask_2x3();
         let mean = mean_mask_prob(&mask, 1, 0, 3, 1);
@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn mean_mask_prob_clamps_out_of_bounds_upper_corner() {
+    fn clamps_out_of_bounds_upper_corner() {
         // x1/y1 past the edges clamp to [3, 2]; cols 1..3, rows 0..2
         // -> (1.0 + 0.5 + 0.0 + 1.0) / 4 = 0.625
         let mask = mask_2x3();
@@ -166,13 +166,13 @@ mod tests {
     }
 
     #[test]
-    fn mean_mask_prob_empty_box_is_zero() {
+    fn empty_box_is_zero() {
         let mask = mask_2x3();
         assert_eq!(mean_mask_prob(&mask, 2, 0, 2, 2), 0.0);
     }
 
     #[test]
-    fn mean_mask_prob_fully_out_of_bounds_is_zero() {
+    fn fully_out_of_bounds_is_zero() {
         let mask = mask_2x3();
         assert_eq!(mean_mask_prob(&mask, 5, 5, 6, 6), 0.0);
     }

@@ -6,9 +6,15 @@
 //! pure (no I/O, no GStreamer or OCR types) so it is host-testable and reusable
 //! by any detection source.
 
+// Public API is intentionally not yet consumed by the OCR element (wired in a
+// later task).  Suppress false-positive dead-code lints for the whole module.
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 
-/// Axis-aligned bounding box in full-frame pixels.
+/// Axis-aligned bounding box in full-frame pixels. `(x, y)` is the top-left
+/// corner; `w` and `h` are expected to be positive (a zero/negative extent
+/// yields an IoU of 0).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BBox {
     pub x: f32,
@@ -45,6 +51,116 @@ pub struct ConfirmedTrack {
     pub label: String,
     pub confidence: f32,
     pub bbox: BBox,
+}
+
+struct Track {
+    id: u64,
+    bbox: BBox,
+    history: VecDeque<(String, f32)>,
+    hits: u32,
+    misses: u32,
+}
+
+/// Associates detections to tracks over time and consolidates their reads.
+pub struct Tracker {
+    config: TrackerConfig,
+    tracks: Vec<Track>,
+    next_id: u64,
+}
+
+impl Tracker {
+    pub fn new(config: TrackerConfig) -> Self {
+        Self {
+            config,
+            tracks: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Feed one recognition's detections: associate to tracks, spawn new tracks
+    /// for unmatched detections, and age out tracks that were not seen.
+    pub fn update(&mut self, detections: &[Detection]) {
+        // Candidate (detection, track) pairs above the IoU threshold.
+        let mut candidates: Vec<(usize, usize, f32)> = Vec::new();
+        for (di, d) in detections.iter().enumerate() {
+            for (ti, track) in self.tracks.iter().enumerate() {
+                let score = iou(d.bbox, track.bbox);
+                if score >= self.config.iou_threshold {
+                    candidates.push((di, ti, score));
+                }
+            }
+        }
+        // Greedy one-to-one association, highest IoU first.
+        candidates.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let mut det_taken = vec![false; detections.len()];
+        let mut track_taken = vec![false; self.tracks.len()];
+        let mut match_for_det: Vec<Option<usize>> = vec![None; detections.len()];
+        for (di, ti, _score) in candidates {
+            if det_taken[di] || track_taken[ti] {
+                continue;
+            }
+            det_taken[di] = true;
+            track_taken[ti] = true;
+            match_for_det[di] = Some(ti);
+        }
+
+        // Refresh matched tracks from their detection.
+        let window = self.config.window.max(1);
+        for (di, d) in detections.iter().enumerate() {
+            if let Some(ti) = match_for_det[di] {
+                let track = &mut self.tracks[ti];
+                track.bbox = d.bbox;
+                track.history.push_back((d.label.clone(), d.confidence));
+                while track.history.len() > window {
+                    track.history.pop_front();
+                }
+                track.hits = track.hits.saturating_add(1);
+                track.misses = 0;
+            }
+        }
+
+        // Age unmatched tracks; drop those absent too long.
+        for (ti, track) in self.tracks.iter_mut().enumerate() {
+            if !track_taken[ti] {
+                track.misses = track.misses.saturating_add(1);
+            }
+        }
+        let max_misses = self.config.max_misses;
+        self.tracks.retain(|t| t.misses <= max_misses);
+
+        // Spawn tracks for unmatched detections.
+        for (di, d) in detections.iter().enumerate() {
+            if !det_taken[di] {
+                let mut history = VecDeque::new();
+                history.push_back((d.label.clone(), d.confidence));
+                self.tracks.push(Track {
+                    id: self.next_id,
+                    bbox: d.bbox,
+                    history,
+                    hits: 1,
+                    misses: 0,
+                });
+                self.next_id = self.next_id.wrapping_add(1);
+            }
+        }
+    }
+
+    /// Snapshot of tracks seen at least `min_hits` times.
+    pub fn confirmed(&self) -> Vec<ConfirmedTrack> {
+        self.tracks
+            .iter()
+            .filter(|t| t.hits >= self.config.min_hits)
+            .map(|t| {
+                let (label, confidence) = t.history.back().cloned().unwrap_or_default();
+                ConfirmedTrack {
+                    id: t.id,
+                    label,
+                    confidence,
+                    bbox: t.bbox,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Intersection-over-union of two boxes. Returns `0.0` when either box is empty
@@ -95,5 +211,80 @@ mod tests {
     #[test]
     fn iou_empty_box_is_zero() {
         assert_eq!(iou(b(0.0, 0.0, 0.0, 10.0), b(0.0, 0.0, 10.0, 10.0)), 0.0);
+    }
+
+    #[test]
+    fn iou_contained_box_is_area_ratio() {
+        // 2x2 box fully inside a 4x4 box at origin: inter=4, union=16.
+        let got = iou(b(0.0, 0.0, 4.0, 4.0), b(1.0, 1.0, 2.0, 2.0));
+        assert!((got - (4.0 / 16.0)).abs() < 1e-6, "got {got}");
+    }
+
+    fn det(label: &str, conf: f32, bx: BBox) -> Detection {
+        Detection {
+            label: label.into(),
+            confidence: conf,
+            bbox: bx,
+        }
+    }
+
+    fn cfg(iou_threshold: f32, window: usize, min_hits: u32, max_misses: u32) -> TrackerConfig {
+        TrackerConfig {
+            iou_threshold,
+            window,
+            min_hits,
+            max_misses,
+        }
+    }
+
+    #[test]
+    fn track_reported_only_after_min_hits() {
+        let mut t = Tracker::new(cfg(0.3, 10, 2, 5));
+        let d = det("A", 0.5, b(0.0, 0.0, 10.0, 10.0));
+        t.update(&[d.clone()]);
+        assert_eq!(t.confirmed().len(), 0, "one hit < min_hits(2)");
+        t.update(&[d]);
+        assert_eq!(t.confirmed().len(), 1, "two hits reaches min_hits");
+    }
+
+    #[test]
+    fn track_dropped_after_max_misses() {
+        let mut t = Tracker::new(cfg(0.3, 10, 1, 2));
+        t.update(&[det("A", 0.5, b(0.0, 0.0, 10.0, 10.0))]);
+        assert_eq!(t.confirmed().len(), 1);
+        t.update(&[]); // miss 1
+        t.update(&[]); // miss 2 (== max_misses, still alive)
+        assert_eq!(t.confirmed().len(), 1, "held through misses <= max_misses");
+        t.update(&[]); // miss 3 (> max_misses -> dropped)
+        assert_eq!(t.confirmed().len(), 0);
+    }
+
+    #[test]
+    fn overlapping_detections_do_not_share_a_track() {
+        let mut t = Tracker::new(cfg(0.3, 10, 1, 5));
+        t.update(&[det("A", 0.5, b(0.0, 0.0, 10.0, 10.0))]);
+        // Two detections both overlap the single existing track; only one may
+        // claim it, the other must spawn a new track.
+        t.update(&[
+            det("A", 0.5, b(1.0, 0.0, 10.0, 10.0)),
+            det("B", 0.5, b(2.0, 0.0, 10.0, 10.0)),
+        ]);
+        assert_eq!(t.confirmed().len(), 2);
+    }
+
+    #[test]
+    fn low_iou_detection_spawns_new_track() {
+        let mut t = Tracker::new(cfg(0.3, 10, 1, 5));
+        t.update(&[det("A", 0.5, b(0.0, 0.0, 10.0, 10.0))]);
+        t.update(&[det("B", 0.5, b(100.0, 100.0, 10.0, 10.0))]);
+        assert_eq!(t.confirmed().len(), 2);
+    }
+
+    #[test]
+    fn confirmed_bbox_is_latest_detection() {
+        let mut t = Tracker::new(cfg(0.3, 10, 1, 5));
+        t.update(&[det("A", 0.5, b(0.0, 0.0, 10.0, 10.0))]);
+        t.update(&[det("A", 0.5, b(3.0, 0.0, 10.0, 10.0))]);
+        assert_eq!(t.confirmed()[0].bbox, b(3.0, 0.0, 10.0, 10.0));
     }
 }

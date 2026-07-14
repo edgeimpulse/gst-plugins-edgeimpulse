@@ -6,10 +6,6 @@
 //! pure (no I/O, no GStreamer or OCR types) so it is host-testable and reusable
 //! by any detection source.
 
-// Public API is intentionally not yet consumed by the OCR element (wired in a
-// later task).  Suppress false-positive dead-code lints for the whole module.
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 /// Axis-aligned bounding box in full-frame pixels. `(x, y)` is the top-left
@@ -47,6 +43,10 @@ pub struct TrackerConfig {
 /// A confirmed, consolidated track emitted by [`Tracker::confirmed`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfirmedTrack {
+    /// Stable per-object id assigned by the tracker. Part of the generic
+    /// tracker contract so other consumers can correlate objects across
+    /// frames; the OCR overlay consumer does not read it yet.
+    #[allow(dead_code)]
     pub id: u64,
     pub label: String,
     pub confidence: f32,
@@ -173,10 +173,10 @@ fn consolidate(history: &VecDeque<(String, f32)>) -> (String, f32) {
     }
     let mean = history.iter().map(|(_, c)| *c).sum::<f32>() / history.len() as f32;
 
-    let mut labels: Vec<&str> = Vec::new();
-    let mut counts: Vec<u32> = Vec::new();
-    let mut conf_sums: Vec<f32> = Vec::new();
-    let mut last_index: Vec<usize> = Vec::new();
+    let mut labels: Vec<&str> = Vec::with_capacity(history.len());
+    let mut counts: Vec<u32> = Vec::with_capacity(history.len());
+    let mut conf_sums: Vec<f32> = Vec::with_capacity(history.len());
+    let mut last_index: Vec<usize> = Vec::with_capacity(history.len());
     for (i, (label, conf)) in history.iter().enumerate() {
         if let Some(pos) = labels.iter().position(|l| *l == label.as_str()) {
             counts[pos] += 1;
@@ -194,6 +194,10 @@ fn consolidate(history: &VecDeque<(String, f32)>) -> (String, f32) {
     for i in 1..labels.len() {
         let mean_i = conf_sums[i] / counts[i] as f32;
         let mean_best = conf_sums[best] / counts[best] as f32;
+        // Tie-break chain: higher count, then higher mean confidence, then more
+        // recent. The `mean_i == mean_best` check uses exact float equality on
+        // purpose — only identical bit patterns reach the last_index recency
+        // tie-break; any difference in bit pattern is resolved directly by `>`.
         let better = counts[i] > counts[best]
             || (counts[i] == counts[best]
                 && (mean_i > mean_best

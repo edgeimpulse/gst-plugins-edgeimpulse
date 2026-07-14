@@ -15,6 +15,8 @@ use std::thread::JoinHandle;
 
 use crate::ocr::backend::{Backend, NoopBackend, OcrBackend, OcrLine};
 use crate::ocr::shaping::{attach_results, build_ocr_message, filter_and_truncate};
+use crate::ocr::stabilize::stabilize;
+use crate::tracker::{Tracker, TrackerConfig};
 
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
@@ -26,6 +28,10 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
+/// IoU threshold for associating OCR detections across recognitions when text
+/// stabilization is enabled. Hardcoded in Phase 1; may become a property later.
+const STABILIZATION_IOU_THRESHOLD: f32 = 0.3;
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub backend: String,
@@ -35,6 +41,10 @@ pub struct Settings {
     pub max_text_length: u32,
     pub post_message: bool,
     pub interval: u32,
+    pub text_stabilization: bool,
+    pub stabilization_window: u32,
+    pub stabilization_min_hits: u32,
+    pub stabilization_max_misses: u32,
 }
 
 impl Default for Settings {
@@ -47,6 +57,10 @@ impl Default for Settings {
             max_text_length: 256,
             post_message: true,
             interval: 1,
+            text_stabilization: false,
+            stabilization_window: 10,
+            stabilization_min_hits: 2,
+            stabilization_max_misses: 5,
         }
     }
 }
@@ -155,6 +169,49 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .default_value(1)
                     .mutable_playing()
                     .build(),
+                glib::ParamSpecBoolean::builder("text-stabilization")
+                    .nick("Text Stabilization")
+                    .blurb(
+                        "Consolidate recognized text across recognitions per \
+                         tracked object (most-frequent text, mean confidence). \
+                         Read once at start.",
+                    )
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("stabilization-window")
+                    .nick("Stabilization Window")
+                    .blurb(
+                        "Recent recognitions kept per object for the vote. \
+                         Read once at start.",
+                    )
+                    .minimum(1)
+                    .maximum(u32::MAX)
+                    .default_value(10)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("stabilization-min-hits")
+                    .nick("Stabilization Min Hits")
+                    .blurb(
+                        "Minimum recognitions required before an object is first \
+                         reported. Read once at start.",
+                    )
+                    .minimum(1)
+                    .maximum(u32::MAX)
+                    .default_value(2)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("stabilization-max-misses")
+                    .nick("Stabilization Max Misses")
+                    .blurb(
+                        "Consecutive absences tolerated before an object is \
+                         dropped. Read once at start.",
+                    )
+                    .minimum(0)
+                    .maximum(u32::MAX)
+                    .default_value(5)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -170,6 +227,10 @@ impl ObjectImpl for EdgeImpulseOcr {
             "max-text-length" => settings.max_text_length = value.get().unwrap(),
             "post-message" => settings.post_message = value.get().unwrap(),
             "interval" => settings.interval = value.get().unwrap(),
+            "text-stabilization" => settings.text_stabilization = value.get().unwrap(),
+            "stabilization-window" => settings.stabilization_window = value.get().unwrap(),
+            "stabilization-min-hits" => settings.stabilization_min_hits = value.get().unwrap(),
+            "stabilization-max-misses" => settings.stabilization_max_misses = value.get().unwrap(),
             _ => unimplemented!(),
         }
     }
@@ -184,6 +245,10 @@ impl ObjectImpl for EdgeImpulseOcr {
             "max-text-length" => settings.max_text_length.to_value(),
             "post-message" => settings.post_message.to_value(),
             "interval" => settings.interval.to_value(),
+            "text-stabilization" => settings.text_stabilization.to_value(),
+            "stabilization-window" => settings.stabilization_window.to_value(),
+            "stabilization-min-hits" => settings.stabilization_min_hits.to_value(),
+            "stabilization-max-misses" => settings.stabilization_max_misses.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -325,9 +390,23 @@ impl BaseTransformImpl for EdgeImpulseOcr {
         // streaming thread, and recognition runs entirely off it.
         let worker = std::thread::spawn(move || {
             let mut backend = Self::build_backend(&settings);
+            let mut tracker = if settings.text_stabilization {
+                Some(Tracker::new(TrackerConfig {
+                    iou_threshold: STABILIZATION_IOU_THRESHOLD,
+                    window: settings.stabilization_window.max(1) as usize,
+                    min_hits: settings.stabilization_min_hits,
+                    max_misses: settings.stabilization_max_misses,
+                }))
+            } else {
+                None
+            };
             while let Ok(job) = frame_rx.recv() {
                 match backend.recognize(&job.rgb, job.width, job.height) {
                     Ok(lines) => {
+                        let lines = match tracker.as_mut() {
+                            Some(t) => stabilize(t, lines),
+                            None => lines,
+                        };
                         let mut latest = latest_worker.lock().unwrap();
                         latest.generation = latest.generation.wrapping_add(1);
                         latest.lines = lines;

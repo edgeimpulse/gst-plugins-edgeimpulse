@@ -5,10 +5,6 @@
 //! OCR worker calls [`stabilize`] once per recognition when text stabilization
 //! is enabled. Pure and host-testable.
 
-// `stabilize` is wired into the OCR element in a later task; until then its only
-// caller is the test module.  Suppress false-positive dead-code lints.
-#![allow(dead_code)]
-
 use crate::ocr::backend::OcrLine;
 use crate::tracker::{BBox, Detection, Tracker};
 
@@ -39,6 +35,8 @@ pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>) -> Vec<OcrLine> {
     tracker
         .confirmed()
         .into_iter()
+        // TODO(phase-2): switch `as u32` to `.round() as u32` once bbox smoothing
+        // is added — today the tracker stores boxes verbatim so they are integral.
         .map(|c| OcrLine {
             text: c.label,
             confidence: c.confidence,
@@ -104,6 +102,7 @@ mod tests {
             &mut t,
             vec![line("Qualcomm robotics", 0.35, bx.0, bx.1, bx.2, bx.3)],
         );
+        assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "Qualcomm robotics");
     }
 }

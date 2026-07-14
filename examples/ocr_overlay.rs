@@ -34,7 +34,10 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// OCR backend: "ocrs" (embedded, pure Rust) or "edge-impulse".
+    /// OCR backend. "ocrs" (embedded, pure Rust) runs OCR on the raw frames and
+    /// is the only backend this webcam pipeline supports. "edge-impulse" decodes
+    /// per-character detections from an upstream `edgeimpulsevideoinfer` element,
+    /// which this example does not add — so it produces no text here.
     #[arg(long, default_value = "ocrs")]
     backend: String,
 

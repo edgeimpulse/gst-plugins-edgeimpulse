@@ -120,6 +120,10 @@ impl OcrBackend for OcrsBackend {
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
+            // Confidence is the mean detection-mask probability over this line's
+            // box: a text-density score, not a recognition-accuracy score. It is
+            // near zero on blank frames, which is what lets `min-confidence`
+            // drop false positives.
             let confidence = mean_mask_prob(
                 &text_mask,
                 x0 as usize,

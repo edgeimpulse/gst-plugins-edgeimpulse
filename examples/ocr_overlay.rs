@@ -53,6 +53,23 @@ struct Args {
     #[arg(long, default_value = "1")]
     interval: u32,
 
+    /// Consolidate recognized text across recognitions per tracked object
+    /// (stabilizes flickering text and jumping boxes).
+    #[arg(long)]
+    text_stabilization: bool,
+
+    /// Recent recognitions kept per object for the stabilization vote.
+    #[arg(long, default_value = "10")]
+    stabilization_window: u32,
+
+    /// Minimum recognitions required before an object is first reported.
+    #[arg(long, default_value = "2")]
+    stabilization_min_hits: u32,
+
+    /// Consecutive absences tolerated before a stabilized object is dropped.
+    #[arg(long, default_value = "5")]
+    stabilization_max_misses: u32,
+
     /// Override the detection model (.rten); empty uses the embedded model.
     #[arg(long, default_value = "")]
     detection_model: String,
@@ -196,7 +213,11 @@ fn create_pipeline(args: &Args) -> Result<gst::Pipeline, Box<dyn Error>> {
         .property("backend", &args.backend)
         .property("min-confidence", args.min_confidence)
         .property("max-text-length", args.max_text_length)
-        .property("interval", args.interval);
+        .property("interval", args.interval)
+        .property("text-stabilization", args.text_stabilization)
+        .property("stabilization-window", args.stabilization_window)
+        .property("stabilization-min-hits", args.stabilization_min_hits)
+        .property("stabilization-max-misses", args.stabilization_max_misses);
     if !args.detection_model.is_empty() {
         ocr_factory = ocr_factory.property("detection-model", &args.detection_model);
     }
@@ -261,6 +282,13 @@ fn example_main() -> Result<(), Box<dyn Error>> {
         !args.no_labels,
         args.text_color,
         args.background_color
+    );
+    println!(
+        "⚙️  stabilization={}  window={}  min-hits={}  max-misses={}",
+        args.text_stabilization,
+        args.stabilization_window,
+        args.stabilization_min_hits,
+        args.stabilization_max_misses
     );
     println!("ℹ️  Watch the per-line confidence below to pick a --min-confidence.");
 

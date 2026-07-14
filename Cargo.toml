@@ -66,6 +66,15 @@ name = "video_inference"
 path = "examples/video_inference.rs"
 required-features = ["ffi"]
 
+# `ocr_overlay` loads the `edgeimpulseocr` + `edgeimpulseoverlay` elements at
+# runtime, so it is only meaningful when the plugin is built with those
+# capabilities. Gating it keeps `cargo build --examples` working for feature
+# sets that don't include them.
+[[example]]
+name = "ocr_overlay"
+path = "examples/ocr_overlay.rs"
+required-features = ["ocr", "presentation"]
+
 [dev-dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }

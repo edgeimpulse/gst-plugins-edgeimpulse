@@ -9,7 +9,7 @@ mod decode;
 mod imp;
 mod shaping;
 
-#[cfg(feature = "ocrs")]
+#[cfg(feature = "ocr")]
 mod ocrs_backend;
 
 use gstreamer as gst;

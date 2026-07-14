@@ -238,7 +238,7 @@ impl EdgeImpulseOcr {
         }
     }
 
-    #[cfg(feature = "ocrs")]
+    #[cfg(feature = "ocr")]
     fn build_ocrs(settings: &Settings) -> Box<dyn OcrBackend> {
         // Each model loads from its explicit path when set, else from the
         // embedded default (see OcrsBackend::new), so partial configuration
@@ -258,7 +258,7 @@ impl EdgeImpulseOcr {
         }
     }
 
-    #[cfg(not(feature = "ocrs"))]
+    #[cfg(not(feature = "ocr"))]
     fn build_ocrs(_settings: &Settings) -> Box<dyn OcrBackend> {
         Box::new(NoopBackend)
     }

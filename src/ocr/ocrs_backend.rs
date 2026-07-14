@@ -89,6 +89,10 @@ impl OcrBackend for OcrsBackend {
             .engine
             .recognize_text(&input, &line_rects)
             .map_err(|e| e.to_string())?;
+        let text_mask = self
+            .engine
+            .detect_text_pixels(&input)
+            .map_err(|e| e.to_string())?;
 
         let mut out = Vec::new();
         for (line, word_rects) in recognized.iter().zip(line_rects.iter()) {
@@ -116,9 +120,11 @@ impl OcrBackend for OcrsBackend {
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
+            let confidence =
+                mean_mask_prob(&text_mask, x0 as usize, y0 as usize, x1 as usize, y1 as usize);
             out.push(OcrLine {
                 text,
-                confidence: 1.0, // ocrs does not expose a per-line confidence
+                confidence,
                 x: x0 as u32,
                 y: y0 as u32,
                 w: (x1 - x0) as u32,

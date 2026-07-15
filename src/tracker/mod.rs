@@ -6,6 +6,10 @@
 //! pure (no I/O, no GStreamer or OCR types) so it is host-testable and reusable
 //! by any detection source.
 
+mod kalman;
+use kalman::Kalman1D;
+pub use kalman::KalmanConfig;
+
 use std::collections::VecDeque;
 
 /// Axis-aligned bounding box in full-frame pixels. `(x, y)` is the top-left

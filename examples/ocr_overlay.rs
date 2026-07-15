@@ -30,6 +30,16 @@ use std::error::Error;
 
 use clap::Parser;
 
+/// Parse a float and require it to be in `0.0..=1.0` (clap has no float range).
+fn parse_unit_interval(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be in 0.0..=1.0, got {v}"))
+    }
+}
+
 /// Live webcam OCR with a tunable overlay.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -71,6 +81,16 @@ struct Args {
     /// recognitions after its object leaves the frame.
     #[arg(long, default_value = "5")]
     stabilization_max_misses: u32,
+
+    /// Smooth and predict boxes with a per-object constant-velocity Kalman
+    /// filter so they follow moving objects with less lag.
+    #[arg(long)]
+    box_prediction: bool,
+
+    /// Box-prediction tracking speed (0.0..=1.0): 1.0 fast/less smooth,
+    /// 0.0 very smooth/more lag.
+    #[arg(long, default_value = "0.5", value_parser = parse_unit_interval)]
+    box_responsiveness: f64,
 
     /// Override the detection model (.rten); empty uses the embedded model.
     #[arg(long, default_value = "")]
@@ -219,7 +239,9 @@ fn create_pipeline(args: &Args) -> Result<gst::Pipeline, Box<dyn Error>> {
         .property("text-stabilization", args.text_stabilization)
         .property("stabilization-window", args.stabilization_window)
         .property("stabilization-min-hits", args.stabilization_min_hits)
-        .property("stabilization-max-misses", args.stabilization_max_misses);
+        .property("stabilization-max-misses", args.stabilization_max_misses)
+        .property("box-prediction", args.box_prediction)
+        .property("box-responsiveness", args.box_responsiveness);
     if !args.detection_model.is_empty() {
         ocr_factory = ocr_factory.property("detection-model", &args.detection_model);
     }
@@ -291,6 +313,10 @@ fn example_main() -> Result<(), Box<dyn Error>> {
         args.stabilization_window,
         args.stabilization_min_hits,
         args.stabilization_max_misses
+    );
+    println!(
+        "⚙️  box-prediction={}  box-responsiveness={:.2}",
+        args.box_prediction, args.box_responsiveness
     );
     println!("ℹ️  Watch the per-line confidence below to pick a --min-confidence.");
 

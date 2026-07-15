@@ -21,23 +21,22 @@ fn line_to_detection(line: &OcrLine) -> Detection {
     }
 }
 
-/// Feed one recognition's `lines` through `tracker` and return the stabilized
-/// lines (most-frequent text + mean confidence per tracked object, box = latest
+/// Feed one recognition's `lines` through `tracker` (advancing it by `dt`
+/// seconds since the previous recognition) and return the stabilized lines
+/// (most-frequent text + mean confidence per tracked object, box = latest
 /// read). Empty-text lines are dropped before tracking so they never spawn
 /// tracks. Returned lines are ordered by track age (oldest first), not by the
 /// input reading order.
-pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>) -> Vec<OcrLine> {
+pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>, dt: f32) -> Vec<OcrLine> {
     let detections: Vec<Detection> = lines
         .iter()
         .filter(|l| !l.text.is_empty())
         .map(line_to_detection)
         .collect();
-    tracker.update(&detections);
+    tracker.update(&detections, dt);
     tracker
         .confirmed()
         .into_iter()
-        // TODO(phase-2): switch `as u32` to `.round() as u32` once bbox smoothing
-        // is added — today the tracker stores boxes verbatim so they are integral.
         .map(|c| OcrLine {
             text: c.label,
             confidence: c.confidence,
@@ -71,13 +70,15 @@ mod tests {
             window,
             min_hits,
             max_misses,
+            kalman: None,
+            consolidate_labels: true,
         })
     }
 
     #[test]
     fn single_stable_read_is_reported_verbatim() {
         let mut t = tracker(10, 1, 5);
-        let out = stabilize(&mut t, vec![line("Hello", 0.5, 0, 0, 20, 10)]);
+        let out = stabilize(&mut t, vec![line("Hello", 0.5, 0, 0, 20, 10)], 1.0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "Hello");
         assert_eq!((out[0].x, out[0].y, out[0].w, out[0].h), (0, 0, 20, 10));
@@ -86,7 +87,7 @@ mod tests {
     #[test]
     fn empty_text_lines_are_dropped() {
         let mut t = tracker(10, 1, 5);
-        let out = stabilize(&mut t, vec![line("", 0.9, 0, 0, 20, 10)]);
+        let out = stabilize(&mut t, vec![line("", 0.9, 0, 0, 20, 10)], 1.0);
         assert!(out.is_empty());
     }
 
@@ -97,11 +98,17 @@ mod tests {
         stabilize(
             &mut t,
             vec![line("Qualcomm robotics", 0.30, bx.0, bx.1, bx.2, bx.3)],
+            1.0,
         );
-        stabilize(&mut t, vec![line("robotics", 0.90, bx.0, bx.1, bx.2, bx.3)]);
+        stabilize(
+            &mut t,
+            vec![line("robotics", 0.90, bx.0, bx.1, bx.2, bx.3)],
+            1.0,
+        );
         let out = stabilize(
             &mut t,
             vec![line("Qualcomm robotics", 0.35, bx.0, bx.1, bx.2, bx.3)],
+            1.0,
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "Qualcomm robotics");

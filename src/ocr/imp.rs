@@ -397,15 +397,30 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                     window: settings.stabilization_window.max(1) as usize,
                     min_hits: settings.stabilization_min_hits,
                     max_misses: settings.stabilization_max_misses,
+                    kalman: None,
+                    // Always true here (this branch requires text_stabilization),
+                    // but written against the flag so it stays correct once box
+                    // prediction can enable the tracker on its own: with only box
+                    // prediction on, labels are reported as the latest read.
+                    consolidate_labels: settings.text_stabilization,
                 }))
             } else {
                 None
             };
+            // Previous recognized PTS (ms), to derive the tracker time step.
+            let mut prev_pts_ms: Option<i64> = None;
             while let Ok(job) = frame_rx.recv() {
                 match backend.recognize(&job.rgb, job.width, job.height) {
                     Ok(lines) => {
                         let lines = match tracker.as_mut() {
-                            Some(t) => stabilize(t, lines),
+                            Some(t) => {
+                                let dt = match prev_pts_ms {
+                                    Some(prev) => (job.pts_ms - prev) as f32 / 1000.0,
+                                    None => 0.0,
+                                };
+                                prev_pts_ms = Some(job.pts_ms);
+                                stabilize(t, lines, dt)
+                            }
                             None => lines,
                         };
                         let mut latest = latest_worker.lock().unwrap();

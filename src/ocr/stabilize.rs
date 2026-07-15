@@ -100,6 +100,24 @@ pub fn extrapolate_box(
     (x, y, w, h)
 }
 
+/// Tracker time step (seconds) from the previous and current recognized PTS
+/// (milliseconds), plus the PTS to carry forward. A non-forward step — a
+/// missing PTS (which upstream decodes to 0) or a back-dated one — yields
+/// `dt = 0` and KEEPS the last good `prev`, so a dropout followed by recovery
+/// cannot produce a huge catch-up dt. Genuine forward gaps are clamped to
+/// `max_dt_s` to survive PTS discontinuities (e.g. seeks). Returns
+/// `(dt, next_prev)`.
+pub fn tracker_dt(prev_pts_ms: Option<i64>, pts_ms: i64, max_dt_s: f32) -> (f32, i64) {
+    match prev_pts_ms {
+        Some(prev) if pts_ms > prev => {
+            let dt = ((pts_ms - prev) as f32 / 1000.0).min(max_dt_s);
+            (dt, pts_ms)
+        }
+        Some(prev) => (0.0, prev),
+        None => (0.0, pts_ms),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +293,35 @@ mod tests {
             480,
         );
         assert_eq!(got, (10, 10, 20, 20));
+    }
+
+    #[test]
+    fn tracker_dt_first_recognition_is_zero() {
+        assert_eq!(tracker_dt(None, 5000, 1.0), (0.0, 5000));
+    }
+
+    #[test]
+    fn tracker_dt_normal_forward_step() {
+        let (dt, prev) = tracker_dt(Some(5000), 5040, 1.0);
+        assert!((dt - 0.04).abs() < 1e-6, "dt {dt}");
+        assert_eq!(prev, 5040);
+    }
+
+    #[test]
+    fn tracker_dt_missing_pts_keeps_prev_and_zero_dt() {
+        // A missing PTS decodes to 0 upstream; must not corrupt the baseline.
+        assert_eq!(tracker_dt(Some(5000), 0, 1.0), (0.0, 5000));
+    }
+
+    #[test]
+    fn tracker_dt_backdated_pts_keeps_prev_and_zero_dt() {
+        // A non-zero but back-dated PTS travels the same non-forward arm.
+        assert_eq!(tracker_dt(Some(5000), 4000, 1.0), (0.0, 5000));
+    }
+
+    #[test]
+    fn tracker_dt_forward_discontinuity_is_clamped() {
+        // 50s seek-style jump clamps to max_dt_s, baseline still advances.
+        assert_eq!(tracker_dt(Some(5000), 55000, 1.0), (1.0, 55000));
     }
 }

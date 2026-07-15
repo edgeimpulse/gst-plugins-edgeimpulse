@@ -15,8 +15,8 @@ use std::thread::JoinHandle;
 
 use crate::ocr::backend::{Backend, NoopBackend, OcrBackend, OcrLine};
 use crate::ocr::shaping::{attach_results, build_ocr_message, filter_and_truncate};
-use crate::ocr::stabilize::{extrapolate_box, passthrough, stabilize, StabilizedLine};
-use crate::tracker::{Tracker, TrackerConfig};
+use crate::ocr::stabilize::{extrapolate_box, passthrough, stabilize, tracker_dt, StabilizedLine};
+use crate::tracker::{KalmanConfig, Tracker, TrackerConfig};
 
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
@@ -36,6 +36,11 @@ const STABILIZATION_IOU_THRESHOLD: f32 = 0.3;
 /// a stalled worker cannot fling a stale box across the frame.
 const EXTRAPOLATION_DT_CAP_S: f32 = 0.5;
 
+/// Upper bound (seconds) on the tracker's per-recognition time step, so a PTS
+/// discontinuity (a missing timestamp then recovery, or a seek) cannot advance
+/// the Kalman filter by a huge dt and fling a predicted box across the frame.
+const MAX_TRACKER_DT_S: f32 = 1.0;
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub backend: String,
@@ -49,6 +54,8 @@ pub struct Settings {
     pub stabilization_window: u32,
     pub stabilization_min_hits: u32,
     pub stabilization_max_misses: u32,
+    pub box_prediction: bool,
+    pub box_responsiveness: f64,
 }
 
 impl Default for Settings {
@@ -65,6 +72,8 @@ impl Default for Settings {
             stabilization_window: 10,
             stabilization_min_hits: 2,
             stabilization_max_misses: 5,
+            box_prediction: false,
+            box_responsiveness: 0.5,
         }
     }
 }
@@ -217,6 +226,30 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .default_value(5)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoolean::builder("box-prediction")
+                    .nick("Box Prediction")
+                    .blurb(
+                        "Smooth and predict tracked boxes with a per-object \
+                         constant-velocity Kalman filter so they follow moving \
+                         objects with less lag. Enables the tracker on its own \
+                         (text is reported as the latest read unless \
+                         text-stabilization is also on). Read once at start.",
+                    )
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecDouble::builder("box-responsiveness")
+                    .nick("Box Responsiveness")
+                    .blurb(
+                        "Box-prediction tracking speed: 1.0 tracks fast with \
+                         little smoothing, 0.0 is very smooth with more lag. \
+                         Read once at start.",
+                    )
+                    .minimum(0.0)
+                    .maximum(1.0)
+                    .default_value(0.5)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -236,6 +269,8 @@ impl ObjectImpl for EdgeImpulseOcr {
             "stabilization-window" => settings.stabilization_window = value.get().unwrap(),
             "stabilization-min-hits" => settings.stabilization_min_hits = value.get().unwrap(),
             "stabilization-max-misses" => settings.stabilization_max_misses = value.get().unwrap(),
+            "box-prediction" => settings.box_prediction = value.get().unwrap(),
+            "box-responsiveness" => settings.box_responsiveness = value.get().unwrap(),
             _ => unimplemented!(),
         }
     }
@@ -254,6 +289,8 @@ impl ObjectImpl for EdgeImpulseOcr {
             "stabilization-window" => settings.stabilization_window.to_value(),
             "stabilization-min-hits" => settings.stabilization_min_hits.to_value(),
             "stabilization-max-misses" => settings.stabilization_max_misses.to_value(),
+            "box-prediction" => settings.box_prediction.to_value(),
+            "box-responsiveness" => settings.box_responsiveness.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -395,17 +432,19 @@ impl BaseTransformImpl for EdgeImpulseOcr {
         // streaming thread, and recognition runs entirely off it.
         let worker = std::thread::spawn(move || {
             let mut backend = Self::build_backend(&settings);
-            let mut tracker = if settings.text_stabilization {
+            let mut tracker = if settings.text_stabilization || settings.box_prediction {
                 Some(Tracker::new(TrackerConfig {
                     iou_threshold: STABILIZATION_IOU_THRESHOLD,
                     window: settings.stabilization_window.max(1) as usize,
                     min_hits: settings.stabilization_min_hits,
                     max_misses: settings.stabilization_max_misses,
-                    kalman: None,
-                    // Always true here (this branch requires text_stabilization),
-                    // but written against the flag so it stays correct once box
-                    // prediction can enable the tracker on its own: with only box
-                    // prediction on, labels are reported as the latest read.
+                    kalman: settings.box_prediction.then(|| {
+                        KalmanConfig::from_responsiveness(settings.box_responsiveness as f32)
+                    }),
+                    // Consolidate labels (most-frequent voted text) only when
+                    // text stabilization is on. With box prediction alone the
+                    // tracker still runs — for box smoothing/prediction — but
+                    // each line's text is reported as the latest read.
                     consolidate_labels: settings.text_stabilization,
                 }))
             } else {
@@ -418,11 +457,9 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                     Ok(lines) => {
                         let lines = match tracker.as_mut() {
                             Some(t) => {
-                                let dt = match prev_pts_ms {
-                                    Some(prev) => (job.pts_ms - prev) as f32 / 1000.0,
-                                    None => 0.0,
-                                };
-                                prev_pts_ms = Some(job.pts_ms);
+                                let (dt, next_prev) =
+                                    tracker_dt(prev_pts_ms, job.pts_ms, MAX_TRACKER_DT_S);
+                                prev_pts_ms = Some(next_prev);
                                 stabilize(t, lines, dt)
                             }
                             None => passthrough(lines),

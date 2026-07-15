@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 
 use crate::ocr::backend::{Backend, NoopBackend, OcrBackend, OcrLine};
 use crate::ocr::shaping::{attach_results, build_ocr_message, filter_and_truncate};
-use crate::ocr::stabilize::stabilize;
+use crate::ocr::stabilize::{extrapolate_box, passthrough, stabilize, StabilizedLine};
 use crate::tracker::{Tracker, TrackerConfig};
 
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
@@ -31,6 +31,10 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 /// IoU threshold for associating OCR detections across recognitions when text
 /// stabilization is enabled. Hardcoded in Phase 1; may become a property later.
 const STABILIZATION_IOU_THRESHOLD: f32 = 0.3;
+
+/// Cap on how far (seconds) a box is extrapolated past its recognition PTS, so
+/// a stalled worker cannot fling a stale box across the frame.
+const EXTRAPOLATION_DT_CAP_S: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -71,7 +75,7 @@ impl Default for Settings {
 #[derive(Default)]
 struct Latest {
     generation: u64,
-    lines: Vec<OcrLine>,
+    lines: Vec<StabilizedLine>,
     /// PTS (ms) of the frame these lines were recognized from, carried so
     /// `ocr` messages timestamp the recognized frame, not the output frame.
     pts_ms: i64,
@@ -421,7 +425,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                                 prev_pts_ms = Some(job.pts_ms);
                                 stabilize(t, lines, dt)
                             }
-                            None => lines,
+                            None => passthrough(lines),
                         };
                         let mut latest = latest_worker.lock().unwrap();
                         latest.generation = latest.generation.wrapping_add(1);
@@ -569,21 +573,67 @@ impl BaseTransformImpl for EdgeImpulseOcr {
             }
         }
 
-        // Filter on the streaming thread so `min-confidence` / `max-text-length`
-        // stay live-settable (the worker stores raw results); this is cheap.
-        let lines = filter_and_truncate(raw_lines, min_confidence as f32, max_text_length as usize);
+        // Map a stabilized line to a non-extrapolated OcrLine (recognition box,
+        // rounded). Used for bus messages and, when nothing is moving, for the
+        // overlay too — so the box-prediction-off path stays Phase-1-identical.
+        let to_static = |s: &StabilizedLine| OcrLine {
+            text: s.text.clone(),
+            confidence: s.confidence,
+            x: s.bbox[0].round().max(0.0) as u32,
+            y: s.bbox[1].round().max(0.0) as u32,
+            w: s.bbox[2].round().max(0.0) as u32,
+            h: s.bbox[3].round().max(0.0) as u32,
+        };
 
-        // Timestamp the frame the text was recognized from (carried through the
-        // worker), not the current output frame which arrives later.
+        // Bus messages carry the recognition result (non-extrapolated), stamped
+        // with the recognized frame's PTS, posted once per recognition.
         if post_new {
-            for line in &lines {
+            let bus_lines: Vec<OcrLine> = raw_lines.iter().map(&to_static).collect();
+            let bus_lines =
+                filter_and_truncate(bus_lines, min_confidence as f32, max_text_length as usize);
+            for line in &bus_lines {
                 let s = build_ocr_message(line, result_pts_ms);
                 let _ = self
                     .obj()
                     .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
             }
         }
-        attach_results(buf, &lines);
+
+        // Overlay ROI meta: fast path when nothing moves (velocity all zero ⇒
+        // Phase-1-identical static boxes); otherwise extrapolate per frame.
+        let all_static = raw_lines.iter().all(|s| s.velocity == [0.0; 4]);
+        let vis_lines: Vec<OcrLine> = if all_static {
+            raw_lines.iter().map(&to_static).collect()
+        } else {
+            let display_pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+            let dt_s = (display_pts_ms - result_pts_ms) as f32 / 1000.0;
+            let width = info.width();
+            let height = info.height();
+            raw_lines
+                .iter()
+                .map(|s| {
+                    let (x, y, w, h) = extrapolate_box(
+                        s.bbox,
+                        s.velocity,
+                        dt_s,
+                        EXTRAPOLATION_DT_CAP_S,
+                        width,
+                        height,
+                    );
+                    OcrLine {
+                        text: s.text.clone(),
+                        confidence: s.confidence,
+                        x,
+                        y,
+                        w,
+                        h,
+                    }
+                })
+                .collect()
+        };
+        let vis_lines =
+            filter_and_truncate(vis_lines, min_confidence as f32, max_text_length as usize);
+        attach_results(buf, &vis_lines);
         Ok(gst::FlowSuccess::Ok)
     }
 }

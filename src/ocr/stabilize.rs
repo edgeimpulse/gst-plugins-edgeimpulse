@@ -1,12 +1,25 @@
 //! Glue between recognized OCR lines and the generic [`crate::tracker`].
 //!
 //! Maps `OcrLine`s into tracker detections, advances the tracker for one
-//! recognition, and maps the confirmed tracks back into consolidated lines. The
-//! OCR worker calls [`stabilize`] once per recognition when text stabilization
-//! is enabled. Pure and host-testable.
+//! recognition, and maps the confirmed tracks into [`StabilizedLine`]s carrying
+//! a per-coordinate velocity. The OCR worker calls [`stabilize`] once per
+//! recognition when the tracker is enabled and [`passthrough`] otherwise. The
+//! element calls [`extrapolate_box`] per displayed frame. Pure and
+//! host-testable.
 
 use crate::ocr::backend::OcrLine;
 use crate::tracker::{BBox, Detection, Tracker};
+
+/// A recognized line after tracking: box as floats plus a per-coordinate
+/// velocity (`[vx, vy, vw, vh]`, units/second) used for per-frame extrapolation.
+/// `velocity` is `[0.0; 4]` when box prediction is off.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StabilizedLine {
+    pub text: String,
+    pub confidence: f32,
+    pub bbox: [f32; 4],
+    pub velocity: [f32; 4],
+}
 
 fn line_to_detection(line: &OcrLine) -> Detection {
     Detection {
@@ -22,12 +35,10 @@ fn line_to_detection(line: &OcrLine) -> Detection {
 }
 
 /// Feed one recognition's `lines` through `tracker` (advancing it by `dt`
-/// seconds since the previous recognition) and return the stabilized lines
-/// (most-frequent text + mean confidence per tracked object, box = latest
-/// read). Empty-text lines are dropped before tracking so they never spawn
-/// tracks. Returned lines are ordered by track age (oldest first), not by the
-/// input reading order.
-pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>, dt: f32) -> Vec<OcrLine> {
+/// seconds since the previous recognition) and return the stabilized lines.
+/// Empty-text lines are dropped before tracking so they never spawn tracks.
+/// Returned lines are ordered by track age (oldest first), not by input order.
+pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>, dt: f32) -> Vec<StabilizedLine> {
     let detections: Vec<Detection> = lines
         .iter()
         .filter(|l| !l.text.is_empty())
@@ -37,21 +48,62 @@ pub fn stabilize(tracker: &mut Tracker, lines: Vec<OcrLine>, dt: f32) -> Vec<Ocr
     tracker
         .confirmed()
         .into_iter()
-        .map(|c| OcrLine {
+        .map(|c| StabilizedLine {
             text: c.label,
             confidence: c.confidence,
-            x: c.bbox.x as u32,
-            y: c.bbox.y as u32,
-            w: c.bbox.w as u32,
-            h: c.bbox.h as u32,
+            bbox: [c.bbox.x, c.bbox.y, c.bbox.w, c.bbox.h],
+            velocity: c.velocity,
         })
         .collect()
+}
+
+/// Map raw recognition lines straight to [`StabilizedLine`]s with zero velocity,
+/// used when no tracker is active (both stabilization capabilities off).
+pub fn passthrough(lines: Vec<OcrLine>) -> Vec<StabilizedLine> {
+    lines
+        .into_iter()
+        .map(|l| StabilizedLine {
+            text: l.text,
+            confidence: l.confidence,
+            bbox: [l.x as f32, l.y as f32, l.w as f32, l.h as f32],
+            velocity: [0.0; 4],
+        })
+        .collect()
+}
+
+/// Linearly extrapolate a box to display time and clamp it to the frame.
+///
+/// `dt_s` is `(display_pts - reference_pts)` in seconds; it is clamped to
+/// `[0, dt_cap]` so a stalled worker cannot fling the box off-screen. The box
+/// origin is clamped to the frame and its extent is clamped so it never spills
+/// past the right/bottom edges. With `velocity == [0; 4]` the result is the
+/// rounded input box regardless of `dt_s`.
+pub fn extrapolate_box(
+    bbox: [f32; 4],
+    velocity: [f32; 4],
+    dt_s: f32,
+    dt_cap: f32,
+    width: u32,
+    height: u32,
+) -> (u32, u32, u32, u32) {
+    let dt = dt_s.clamp(0.0, dt_cap);
+    let x = (bbox[0] + velocity[0] * dt)
+        .round()
+        .clamp(0.0, width as f32) as u32;
+    let y = (bbox[1] + velocity[1] * dt)
+        .round()
+        .clamp(0.0, height as f32) as u32;
+    let w = (bbox[2] + velocity[2] * dt).round().max(0.0) as u32;
+    let h = (bbox[3] + velocity[3] * dt).round().max(0.0) as u32;
+    let w = w.min(width.saturating_sub(x));
+    let h = h.min(height.saturating_sub(y));
+    (x, y, w, h)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::TrackerConfig;
+    use crate::tracker::{KalmanConfig, TrackerConfig};
 
     fn line(text: &str, conf: f32, x: u32, y: u32, w: u32, h: u32) -> OcrLine {
         OcrLine {
@@ -81,7 +133,8 @@ mod tests {
         let out = stabilize(&mut t, vec![line("Hello", 0.5, 0, 0, 20, 10)], 1.0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "Hello");
-        assert_eq!((out[0].x, out[0].y, out[0].w, out[0].h), (0, 0, 20, 10));
+        assert_eq!(out[0].bbox, [0.0, 0.0, 20.0, 10.0]);
+        assert_eq!(out[0].velocity, [0.0; 4]);
     }
 
     #[test]
@@ -112,5 +165,115 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "Qualcomm robotics");
+    }
+
+    fn kalman_tracker(responsiveness: f32) -> Tracker {
+        Tracker::new(TrackerConfig {
+            iou_threshold: 0.3,
+            window: 10,
+            min_hits: 1,
+            max_misses: 5,
+            kalman: Some(KalmanConfig::from_responsiveness(responsiveness)),
+            consolidate_labels: true,
+        })
+    }
+
+    #[test]
+    fn velocity_propagates_from_tracker() {
+        let mut t = kalman_tracker(1.0);
+        let mut x = 0u32;
+        for _ in 0..40 {
+            stabilize(&mut t, vec![line("A", 0.9, x, 0, 10, 10)], 1.0);
+            x += 4;
+        }
+        let out = stabilize(&mut t, vec![line("A", 0.9, x, 0, 10, 10)], 1.0);
+        assert!(out[0].velocity[0] > 2.0, "vx {}", out[0].velocity[0]);
+    }
+
+    #[test]
+    fn passthrough_has_zero_velocity_and_float_box() {
+        let out = passthrough(vec![line("Hi", 0.7, 3, 4, 5, 6)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bbox, [3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(out[0].velocity, [0.0; 4]);
+    }
+
+    #[test]
+    fn extrapolate_zero_velocity_returns_rounded_box() {
+        // Fractional input so a `.trunc()`/`as u32` regression would be caught
+        // (round-half-away-from-zero: .4→down, .5/.6→up).
+        let got = extrapolate_box([10.4, 20.6, 30.5, 40.5], [0.0; 4], 5.0, 0.5, 640, 480);
+        assert_eq!(got, (10, 21, 31, 41));
+    }
+
+    #[test]
+    fn extrapolate_moves_box_by_velocity_times_dt() {
+        let got = extrapolate_box(
+            [10.0, 10.0, 20.0, 20.0],
+            [4.0, 0.0, 0.0, 0.0],
+            1.0,
+            2.0,
+            640,
+            480,
+        );
+        assert_eq!(got, (14, 10, 20, 20));
+    }
+
+    #[test]
+    fn extrapolate_caps_dt() {
+        // dt_s huge but dt_cap=0.5 ⇒ only 0.5s of motion applied (4*0.5=2).
+        let got = extrapolate_box(
+            [10.0, 0.0, 20.0, 20.0],
+            [4.0, 0.0, 0.0, 0.0],
+            100.0,
+            0.5,
+            640,
+            480,
+        );
+        assert_eq!(got.0, 12);
+    }
+
+    #[test]
+    fn extrapolate_clamps_to_frame() {
+        // x pushed past the right edge is clamped; width then clamps to 0.
+        let got = extrapolate_box(
+            [630.0, 0.0, 20.0, 20.0],
+            [1000.0, 0.0, 0.0, 0.0],
+            1.0,
+            0.5,
+            640,
+            480,
+        );
+        assert_eq!(got.0, 640);
+        assert_eq!(got.2, 0);
+    }
+
+    #[test]
+    fn extrapolate_clamps_to_bottom_edge() {
+        // Mirror of the right-edge case on the y axis: guards against a
+        // transposed clamp that used `width`/`x` for the vertical extent.
+        let got = extrapolate_box(
+            [0.0, 470.0, 20.0, 20.0],
+            [0.0, 1000.0, 0.0, 0.0],
+            1.0,
+            0.5,
+            640,
+            480,
+        );
+        assert_eq!(got.1, 480);
+        assert_eq!(got.3, 0);
+    }
+
+    #[test]
+    fn extrapolate_negative_dt_is_clamped_to_zero() {
+        let got = extrapolate_box(
+            [10.0, 10.0, 20.0, 20.0],
+            [4.0, 4.0, 0.0, 0.0],
+            -3.0,
+            0.5,
+            640,
+            480,
+        );
+        assert_eq!(got, (10, 10, 20, 20));
     }
 }

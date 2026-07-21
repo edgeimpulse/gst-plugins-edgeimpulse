@@ -10,6 +10,7 @@ mod decode;
 mod imp;
 mod shaping;
 mod stabilize;
+mod stabilize_by_id;
 
 #[cfg(feature = "ocr")]
 mod ocrs_backend;

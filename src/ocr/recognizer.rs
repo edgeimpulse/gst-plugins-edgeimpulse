@@ -134,7 +134,7 @@ pub mod ffi {
                 return Err(format!("crop too small: {} < {}", rgb.len(), expected));
             }
             let mut features = Vec::with_capacity(expected / 3);
-            for px in rgb.chunks_exact(3) {
+            for px in rgb[..expected].chunks_exact(3) {
                 let packed =
                     ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
                 features.push(packed as f32);

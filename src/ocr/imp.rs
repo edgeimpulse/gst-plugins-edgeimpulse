@@ -258,11 +258,13 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .nick("Charset")
                     .blurb("CTC class charset; index 0 is the blank. Default uppercase alphanumeric.")
                     .default_value(Some("_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("dictionary")
                     .nick("Dictionary")
                     .blurb("Comma-separated allowlist of valid strings; empty allows any decoded text.")
                     .default_value(Some(""))
+                    .mutable_ready()
                     .build(),
             ]
         });

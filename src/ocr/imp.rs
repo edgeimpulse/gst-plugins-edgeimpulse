@@ -56,6 +56,8 @@ pub struct Settings {
     pub stabilization_max_misses: u32,
     pub box_prediction: bool,
     pub box_responsiveness: f64,
+    pub charset: String,
+    pub dictionary: String,
 }
 
 impl Default for Settings {
@@ -74,6 +76,8 @@ impl Default for Settings {
             stabilization_max_misses: 5,
             box_prediction: false,
             box_responsiveness: 0.5,
+            charset: "_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string(),
+            dictionary: String::new(),
         }
     }
 }
@@ -250,6 +254,16 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .default_value(0.5)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecString::builder("charset")
+                    .nick("Charset")
+                    .blurb("CTC class charset; index 0 is the blank. Default uppercase alphanumeric.")
+                    .default_value(Some("_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                    .build(),
+                glib::ParamSpecString::builder("dictionary")
+                    .nick("Dictionary")
+                    .blurb("Comma-separated allowlist of valid strings; empty allows any decoded text.")
+                    .default_value(Some(""))
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -271,6 +285,8 @@ impl ObjectImpl for EdgeImpulseOcr {
             "stabilization-max-misses" => settings.stabilization_max_misses = value.get().unwrap(),
             "box-prediction" => settings.box_prediction = value.get().unwrap(),
             "box-responsiveness" => settings.box_responsiveness = value.get().unwrap(),
+            "charset" => settings.charset = value.get().unwrap_or_default(),
+            "dictionary" => settings.dictionary = value.get().unwrap_or_default(),
             _ => unimplemented!(),
         }
     }
@@ -291,6 +307,8 @@ impl ObjectImpl for EdgeImpulseOcr {
             "stabilization-max-misses" => settings.stabilization_max_misses.to_value(),
             "box-prediction" => settings.box_prediction.to_value(),
             "box-responsiveness" => settings.box_responsiveness.to_value(),
+            "charset" => settings.charset.to_value(),
+            "dictionary" => settings.dictionary.to_value(),
             _ => unimplemented!(),
         }
     }

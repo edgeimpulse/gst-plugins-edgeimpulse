@@ -24,11 +24,11 @@ pub enum Backend {
 }
 
 impl Backend {
-    pub fn parse(s: &str) -> Option<Backend> {
+    pub fn parse(s: &str) -> Self {
         match s {
-            "ocrs" => Some(Backend::Ocrs),
-            "edge-impulse" => Some(Backend::EdgeImpulse),
-            _ => None,
+            "ocrs" => Backend::Ocrs,
+            "edge-impulse-characters" => Backend::EdgeImpulse,
+            _ => Backend::Ocrs,
         }
     }
 }
@@ -47,10 +47,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_known_backends() {
-        assert_eq!(Backend::parse("ocrs"), Some(Backend::Ocrs));
-        assert_eq!(Backend::parse("edge-impulse"), Some(Backend::EdgeImpulse));
-        assert_eq!(Backend::parse("nope"), None);
+    fn parse_maps_known_backends() {
+        assert!(matches!(Backend::parse("ocrs"), Backend::Ocrs));
+        assert!(matches!(
+            Backend::parse("edge-impulse-characters"),
+            Backend::EdgeImpulse
+        ));
+        // legacy name no longer recognized (never released) -> falls back to default
+        assert!(matches!(Backend::parse("edge-impulse"), Backend::Ocrs));
     }
 
     #[test]

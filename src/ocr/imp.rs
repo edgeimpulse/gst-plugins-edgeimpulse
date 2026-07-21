@@ -134,7 +134,7 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .nick("Backend")
                     .blurb(
                         "OCR backend: 'ocrs' runs a built-in detection+recognition \
-                         model on the RGB frame; 'edge-impulse' decodes per-character \
+                        model on the RGB frame; 'edge-impulse-characters' decodes per-character \
                          detections from an upstream edgeimpulsevideoinfer element",
                     )
                     .default_value(Some("ocrs"))
@@ -340,7 +340,7 @@ impl ElementImpl for EdgeImpulseOcr {
 impl EdgeImpulseOcr {
     fn build_backend(settings: &Settings) -> Box<dyn OcrBackend> {
         match Backend::parse(&settings.backend) {
-            Some(Backend::Ocrs) => Self::build_ocrs(settings),
+            Backend::Ocrs => Self::build_ocrs(settings),
             _ => Box::new(NoopBackend),
         }
     }
@@ -416,7 +416,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
         // transform_ip; it evaluates no model and needs no worker thread.
         if matches!(
             Backend::parse(&settings.backend),
-            Some(Backend::EdgeImpulse)
+            Backend::EdgeImpulse
         ) {
             self.ei_frame_count.store(0, Ordering::Relaxed);
             return self.parent_start();
@@ -531,7 +531,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
 
         // The edge-impulse backend decodes upstream detection metas synchronously
         // (no pixels, no worker); handle it before the caps/worker path below.
-        if matches!(Backend::parse(&backend), Some(Backend::EdgeImpulse)) {
+        if matches!(Backend::parse(&backend), Backend::EdgeImpulse) {
             return self.transform_ip_edge_impulse(
                 buf,
                 min_confidence,

@@ -8,6 +8,7 @@ mod backend;
 mod ctc;
 mod decode;
 mod imp;
+mod recognizer;
 mod shaping;
 mod stabilize;
 mod stabilize_by_id;

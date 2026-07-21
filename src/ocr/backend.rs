@@ -21,6 +21,7 @@ pub trait OcrBackend: Send {
 pub enum Backend {
     Ocrs,
     EdgeImpulse,
+    EdgeImpulseRecognizer,
 }
 
 impl Backend {
@@ -28,6 +29,7 @@ impl Backend {
         match s {
             "ocrs" => Backend::Ocrs,
             "edge-impulse-characters" => Backend::EdgeImpulse,
+            "edge-impulse-recognizer" => Backend::EdgeImpulseRecognizer,
             _ => Backend::Ocrs,
         }
     }
@@ -60,5 +62,13 @@ mod tests {
     #[test]
     fn noop_backend_returns_no_lines() {
         assert!(NoopBackend.recognize(&[0u8; 12], 2, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_recognizer_backend() {
+        assert!(matches!(
+            Backend::parse("edge-impulse-recognizer"),
+            Backend::EdgeImpulseRecognizer
+        ));
     }
 }

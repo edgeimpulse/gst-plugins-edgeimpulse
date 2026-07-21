@@ -62,7 +62,7 @@ impl IdStabilizer {
         }
         let winner = counts
             .into_iter()
-            .max_by_key(|(_, c)| *c)
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
             .map(|(t, _)| t.to_string())?;
         let matching: Vec<f32> = track
             .reads
@@ -140,6 +140,20 @@ mod tests {
         assert!(s.consolidated(7).is_some(), "still alive at max_misses");
         s.end_frame(&empty); // miss 3 > max_misses -> expired
         assert_eq!(s.consolidated(7), None);
+    }
+
+    #[test]
+    fn tie_break_is_deterministic_lexicographic() {
+        // window=4, equal votes for "AB" and "CD"; lexicographically smaller wins.
+        let mut s = IdStabilizer::new(4, 1, 3);
+        s.observe(1, "CD".to_string(), 0.9);
+        s.observe(1, "AB".to_string(), 0.9);
+        s.observe(1, "CD".to_string(), 0.9);
+        s.observe(1, "AB".to_string(), 0.9);
+        // Run several times to be confident it isn't accidental ordering.
+        for _ in 0..20 {
+            assert_eq!(s.consolidated(1).unwrap().0, "AB");
+        }
     }
 
     #[test]

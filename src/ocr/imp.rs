@@ -110,6 +110,17 @@ struct State {
     last_posted_generation: u64,
 }
 
+/// State for the synchronous recognizer backend (`edge-impulse-recognizer`).
+/// Built in `start()`; no worker thread. Crops sharing a PTS form one frame.
+struct RecognizerState {
+    #[cfg(feature = "ffi")]
+    recognizer: crate::ocr::recognizer::Recognizer<crate::ocr::recognizer::ffi::FfiLogitSource>,
+    stabilizer: crate::ocr::stabilize_by_id::IdStabilizer,
+    current_pts: Option<u64>,
+    seen: std::collections::HashSet<u64>,
+    frame_index: u64,
+}
+
 #[derive(Default)]
 pub struct EdgeImpulseOcr {
     pub(crate) settings: Mutex<Settings>,
@@ -121,6 +132,7 @@ pub struct EdgeImpulseOcr {
     /// Frames seen by the edge-impulse path, used to post an `ocr` message only
     /// once per `interval` frames (reset in `start`).
     ei_frame_count: AtomicU64,
+    rec_state: Mutex<Option<RecognizerState>>,
 }
 
 #[glib::object_subclass]
@@ -422,6 +434,128 @@ impl EdgeImpulseOcr {
         }
         Ok(gst::FlowSuccess::Ok)
     }
+
+    /// Recognize one cropped buffer synchronously: read its `CropOriginMeta`
+    /// geometry, run the CRNN+CTC recognizer, stabilize per object id, and emit
+    /// the plain `ocr` ROI meta / bus message (the VIS layer labels the text).
+    fn transform_ip_recognizer(
+        &self,
+        buf: &mut gst::BufferRef,
+        min_confidence: f64,
+        max_text_length: u32,
+        post_message: bool,
+        interval: u32,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        // Crop geometry (original-frame coords). No meta ⇒ nothing to recognize.
+        let (object_id, src_x, src_y, src_w, src_h) = {
+            let Some(meta) = buf.meta::<crate::crop::meta::CropOriginMeta>() else {
+                return Ok(gst::FlowSuccess::Ok);
+            };
+            (
+                meta.object_id(),
+                meta.source_x(),
+                meta.source_y(),
+                meta.source_width(),
+                meta.source_height(),
+            )
+        };
+
+        let text_stabilization = self.settings.lock().unwrap().text_stabilization;
+
+        let info = self.info.lock().unwrap().clone();
+        let Some(info) = info else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+        let pts_ns = buf.pts().map(|t| t.nseconds()).unwrap_or(0);
+
+        let mut guard = self.rec_state.lock().unwrap();
+        let Some(rec) = guard.as_mut() else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        // Frame boundary: crops sharing a PTS are one frame. On PTS change, age
+        // tracks not seen last frame, reset the seen-set, advance the index.
+        if rec.current_pts != Some(pts_ns) {
+            if rec.current_pts.is_some() {
+                rec.stabilizer.end_frame(&rec.seen);
+            }
+            rec.seen.clear();
+            rec.frame_index = rec.frame_index.wrapping_add(1);
+            rec.current_pts = Some(pts_ns);
+        }
+        rec.seen.insert(object_id);
+
+        // Interval throttle: only run the (expensive) recognizer on due frames.
+        // Aging above still happens every frame so boxes clear promptly.
+        let due = rec.frame_index % (interval.max(1) as u64) == 0;
+        if !due {
+            return Ok(gst::FlowSuccess::Ok);
+        }
+
+        // Map the crop buffer to tightly-packed RGB (mirror the worker path).
+        let (rgb, crop_w, crop_h) = {
+            let frame = VideoFrameRef::from_buffer_ref_readable(buf, &info)
+                .map_err(|_| gst::FlowError::Error)?;
+            let width = frame.width();
+            let height = frame.height();
+            let stride = frame.plane_stride()[0] as usize;
+            let row_bytes = width as usize * 3;
+            let src = frame.plane_data(0).map_err(|_| gst::FlowError::Error)?;
+            let mut rgb = Vec::with_capacity(row_bytes * height as usize);
+            for row in 0..height as usize {
+                let start = row * stride;
+                rgb.extend_from_slice(&src[start..start + row_bytes]);
+            }
+            (rgb, width, height)
+        };
+
+        // Inference (FFI-only). Without the ffi model there is no read.
+        #[cfg(feature = "ffi")]
+        let read = rec
+            .recognizer
+            .recognize_text(&rgb, crop_w, crop_h)
+            .map_err(|e| {
+                gst::warning!(CAT, obj = self.obj(), "recognizer inference failed: {e}");
+                gst::FlowError::Error
+            })?;
+        #[cfg(not(feature = "ffi"))]
+        let read: Option<(String, f32)> = {
+            let _ = (&rgb, crop_w, crop_h);
+            None
+        };
+
+        if let Some((text, conf)) = read.clone() {
+            rec.stabilizer.observe(object_id, text, conf);
+        }
+
+        // Output: consolidated vote when stabilizing, else the raw read.
+        let decided = if text_stabilization {
+            rec.stabilizer.consolidated(object_id)
+        } else {
+            read
+        };
+        let Some((text, confidence)) = decided else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        let line = recognizer_ocr_line(text, confidence, src_x, src_y, src_w, src_h);
+        let lines =
+            filter_and_truncate(vec![line], min_confidence as f32, max_text_length as usize);
+        if !lines.is_empty() {
+            attach_results(buf, &lines);
+            if post_message {
+                for l in &lines {
+                    let s = build_ocr_message(l, pts_ms);
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+                }
+            }
+        }
+        Ok(gst::FlowSuccess::Ok)
+    }
 }
 
 impl BaseTransformImpl for EdgeImpulseOcr {
@@ -432,12 +566,43 @@ impl BaseTransformImpl for EdgeImpulseOcr {
 
     fn start(&self) -> Result<(), gst::ErrorMessage> {
         let settings = self.settings.lock().unwrap().clone();
-        // The edge-impulse backend decodes upstream detection metas inline in
-        // transform_ip; it evaluates no model and needs no worker thread.
         if matches!(
             Backend::parse(&settings.backend),
-            Backend::EdgeImpulse
+            Backend::EdgeImpulseRecognizer
         ) {
+            let stabilizer = crate::ocr::stabilize_by_id::IdStabilizer::new(
+                settings.stabilization_window.max(1) as usize,
+                settings.stabilization_min_hits as usize,
+                settings.stabilization_max_misses,
+            );
+            #[cfg(feature = "ffi")]
+            let recognizer = {
+                let source =
+                    crate::ocr::recognizer::ffi::FfiLogitSource::new(false).map_err(|e| {
+                        gst::error_msg!(
+                            gst::ResourceError::Failed,
+                            ["failed to init recognizer: {e}"]
+                        )
+                    })?;
+                crate::ocr::recognizer::Recognizer::new(
+                    source,
+                    &settings.charset,
+                    &settings.dictionary,
+                )
+            };
+            *self.rec_state.lock().unwrap() = Some(RecognizerState {
+                #[cfg(feature = "ffi")]
+                recognizer,
+                stabilizer,
+                current_pts: None,
+                seen: std::collections::HashSet::new(),
+                frame_index: 0,
+            });
+            return self.parent_start();
+        }
+        // The edge-impulse backend decodes upstream detection metas inline in
+        // transform_ip; it evaluates no model and needs no worker thread.
+        if matches!(Backend::parse(&settings.backend), Backend::EdgeImpulse) {
             self.ei_frame_count.store(0, Ordering::Relaxed);
             return self.parent_start();
         }
@@ -518,6 +683,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
             }
         }
         *self.info.lock().unwrap() = None;
+        *self.rec_state.lock().unwrap() = None;
         self.parent_stop()
     }
 
@@ -553,6 +719,16 @@ impl BaseTransformImpl for EdgeImpulseOcr {
         // (no pixels, no worker); handle it before the caps/worker path below.
         if matches!(Backend::parse(&backend), Backend::EdgeImpulse) {
             return self.transform_ip_edge_impulse(
+                buf,
+                min_confidence,
+                max_text_length,
+                post_message,
+                interval,
+            );
+        }
+
+        if matches!(Backend::parse(&backend), Backend::EdgeImpulseRecognizer) {
+            return self.transform_ip_recognizer(
                 buf,
                 min_confidence,
                 max_text_length,
@@ -692,5 +868,38 @@ impl BaseTransformImpl for EdgeImpulseOcr {
             filter_and_truncate(vis_lines, min_confidence as f32, max_text_length as usize);
         attach_results(buf, &vis_lines);
         Ok(gst::FlowSuccess::Ok)
+    }
+}
+
+/// Build the OcrLine for a recognized crop using the origin geometry from
+/// `CropOriginMeta`. Box coordinates are already in original-frame space.
+pub(crate) fn recognizer_ocr_line(
+    text: String,
+    confidence: f32,
+    source_x: u32,
+    source_y: u32,
+    source_w: u32,
+    source_h: u32,
+) -> OcrLine {
+    OcrLine {
+        text,
+        confidence,
+        x: source_x,
+        y: source_y,
+        w: source_w,
+        h: source_h,
+    }
+}
+
+#[cfg(test)]
+mod recognizer_tests {
+    use super::*;
+
+    #[test]
+    fn builds_line_in_original_coordinates() {
+        let line = recognizer_ocr_line("ABC123".into(), 0.87, 40, 60, 120, 32);
+        assert_eq!(line.text, "ABC123");
+        assert_eq!((line.x, line.y, line.w, line.h), (40u32, 60, 120, 32));
+        assert!((line.confidence - 0.87).abs() < 1e-6);
     }
 }

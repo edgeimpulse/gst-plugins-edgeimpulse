@@ -511,15 +511,17 @@ impl EdgeImpulseOcr {
             (rgb, width, height)
         };
 
-        // Inference (FFI-only). Without the ffi model there is no read.
+        // Inference (FFI-only). Without the ffi model there is no read. A
+        // transient inference failure degrades gracefully (log + skip this
+        // crop) rather than tearing down the pipeline, mirroring the worker.
         #[cfg(feature = "ffi")]
-        let read = rec
-            .recognizer
-            .recognize_text(&rgb, crop_w, crop_h)
-            .map_err(|e| {
+        let read = match rec.recognizer.recognize_text(&rgb, crop_w, crop_h) {
+            Ok(read) => read,
+            Err(e) => {
                 gst::warning!(CAT, obj = self.obj(), "recognizer inference failed: {e}");
-                gst::FlowError::Error
-            })?;
+                None
+            }
+        };
         #[cfg(not(feature = "ffi"))]
         let read: Option<(String, f32)> = {
             let _ = (&rgb, crop_w, crop_h);

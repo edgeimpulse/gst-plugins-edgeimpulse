@@ -96,3 +96,70 @@ mod tests {
         assert_eq!(rec.recognize_text(&[], 1, 1).unwrap_err(), "boom");
     }
 }
+
+#[cfg(feature = "ffi")]
+pub mod ffi {
+    use super::LogitSource;
+    use edge_impulse_runner::EdgeImpulseModel;
+
+    /// FFI-backed logit source. Loads the model baked into this plugin variant
+    /// `.so` (same mechanism as `edgeimpulsevideoinfer`) and returns the raw
+    /// classification tensor flattened as `[T, C]`.
+    pub struct FfiLogitSource {
+        model: EdgeImpulseModel,
+    }
+
+    impl FfiLogitSource {
+        pub fn new(debug: bool) -> Result<Self, String> {
+            let model = if debug {
+                EdgeImpulseModel::new_with_debug(true)
+            } else {
+                EdgeImpulseModel::new()
+            }
+            .map_err(|e| format!("failed to load recognizer model: {e:?}"))?;
+            Ok(Self { model })
+        }
+    }
+
+    impl LogitSource for FfiLogitSource {
+        fn logits(
+            &mut self,
+            rgb: &[u8],
+            width: u32,
+            height: u32,
+        ) -> Result<(Vec<f32>, usize), String> {
+            // Pack RGB -> 0xRRGGBB f32 features (mirror video/imp.rs).
+            let expected = (width as usize) * (height as usize) * 3;
+            if rgb.len() < expected {
+                return Err(format!("crop too small: {} < {}", rgb.len(), expected));
+            }
+            let mut features = Vec::with_capacity(expected / 3);
+            for px in rgb.chunks_exact(3) {
+                let packed =
+                    ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
+                features.push(packed as f32);
+            }
+
+            let response = self
+                .model
+                .infer(features, None)
+                .map_err(|e| format!("recognizer inference failed: {e:?}"))?;
+
+            extract_logits(&response)
+        }
+    }
+
+    /// DEVICE-VALIDATED SEAM: pull flattened `[T, C]` sequence logits out of the
+    /// runner response. A CRNN deployed from EI Studio surfaces its raw output
+    /// tensor here; the exact accessor MUST be confirmed against a deployed
+    /// model (Step 3, deferred). The high-level `Classification { HashMap }` enum
+    /// collapses the temporal dimension, so the raw output tensor is required.
+    fn extract_logits(
+        response: &edge_impulse_runner::InferenceResponse,
+    ) -> Result<(Vec<f32>, usize), String> {
+        // NOTE: pending on-device confirmation of the CRNN output shape. Until
+        // validated, fail explicitly rather than guess a wrong tensor shape.
+        let _ = response;
+        Err("extract_logits: pending on-device validation of CRNN output shape".into())
+    }
+}

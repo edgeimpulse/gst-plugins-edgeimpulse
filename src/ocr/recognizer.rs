@@ -107,6 +107,8 @@ pub mod ffi {
     /// classification tensor flattened as `[T, C]`.
     pub struct FfiLogitSource {
         model: EdgeImpulseModel,
+        /// One-shot latch for the on-device shape diagnostic (see `logits`).
+        diagnosed: bool,
     }
 
     impl FfiLogitSource {
@@ -117,7 +119,10 @@ pub mod ffi {
                 EdgeImpulseModel::new()
             }
             .map_err(|e| format!("failed to load recognizer model: {e:?}"))?;
-            Ok(Self { model })
+            Ok(Self {
+                model,
+                diagnosed: false,
+            })
         }
     }
 
@@ -145,8 +150,106 @@ pub mod ffi {
                 .infer(features, None)
                 .map_err(|e| format!("recognizer inference failed: {e:?}"))?;
 
+            // On the very first inference, surface a one-shot diagnostic of the
+            // real model metadata + response shape so `extract_logits` can be
+            // implemented against the deployed CRNN with certainty (Step 3). It
+            // rides the `Err` channel because the recognizer path already logs
+            // that as a warning (imp.rs), so no extra logging wiring is needed;
+            // this is a probe, not a genuine failure mode.
+            if !self.diagnosed {
+                self.diagnosed = true;
+                return Err(diagnostic(&self.model, &response));
+            }
+
             extract_logits(&response)
         }
+    }
+
+    /// One-shot on-device probe: dump the recognizer model's metadata
+    /// (`model_type`, `label_count`, `labels`, input dimensions) and the raw
+    /// `InferenceResponse` shape for a single crop. This is what tells us how the
+    /// CRNN output actually surfaces through the runner, which is the one
+    /// genuinely uncertain input needed to implement `extract_logits`.
+    ///
+    /// Read the logged line as follows: if `label_count` equals `T * C` (with
+    /// `C` = charset length) and `labels` are unique, the flat `[T, C]` tensor
+    /// can be reconstructed from the classification map via the ordered `labels`
+    /// index; if `label_count` equals just `C`, the sequence has been collapsed
+    /// and the raw tensor must be reached another way.
+    fn diagnostic(
+        model: &EdgeImpulseModel,
+        response: &edge_impulse_runner::InferenceResponse,
+    ) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::from("extract_logits DIAGNOSTIC (one-shot; pending validation)\n");
+        match model.parameters() {
+            Ok(p) => {
+                let _ = writeln!(
+                    s,
+                    "  model_type={:?} label_count={} input_features_count={} \
+                     image={}x{}x{} frames={} engine={} has_anomaly={:?}",
+                    p.model_type,
+                    p.label_count,
+                    p.input_features_count,
+                    p.image_input_width,
+                    p.image_input_height,
+                    p.image_channel_count,
+                    p.image_input_frames,
+                    p.inferencing_engine,
+                    p.has_anomaly,
+                );
+                let n = p.labels.len();
+                let head: Vec<&String> = p.labels.iter().take(32).collect();
+                let _ = writeln!(s, "  labels(n={n}) head={head:?}");
+                if n > 36 {
+                    let tail: Vec<&String> = p.labels.iter().skip(n - 4).collect();
+                    let _ = writeln!(s, "  labels tail={tail:?}");
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(s, "  parameters() unavailable: {e:?}");
+            }
+        }
+        match model.input_size() {
+            Ok(sz) => {
+                let _ = writeln!(s, "  input_size={sz}");
+            }
+            Err(e) => {
+                let _ = writeln!(s, "  input_size() unavailable: {e:?}");
+            }
+        }
+        match &response.result {
+            edge_impulse_runner::InferenceResult::Classification { classification } => {
+                let mut keys: Vec<&String> = classification.keys().collect();
+                keys.sort();
+                let sample: Vec<String> = keys
+                    .iter()
+                    .take(8)
+                    .map(|k| format!("{k}={:.4}", classification[*k]))
+                    .collect();
+                let _ = writeln!(
+                    s,
+                    "  result=Classification entries={} sample={sample:?}",
+                    classification.len()
+                );
+            }
+            edge_impulse_runner::InferenceResult::ObjectDetection {
+                bounding_boxes,
+                classification,
+                ..
+            } => {
+                let _ = writeln!(
+                    s,
+                    "  result=ObjectDetection boxes={} classification_entries={}",
+                    bounding_boxes.len(),
+                    classification.len()
+                );
+            }
+            edge_impulse_runner::InferenceResult::VisualAnomaly { anomaly, .. } => {
+                let _ = writeln!(s, "  result=VisualAnomaly anomaly={anomaly}");
+            }
+        }
+        s
     }
 
     /// DEVICE-VALIDATED SEAM: pull flattened `[T, C]` sequence logits out of the

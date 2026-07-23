@@ -23,13 +23,22 @@ pub enum ResizeMode {
 }
 
 impl ResizeMode {
+    /// Parse a property string into a canonical mode, or `None` if it is not one
+    /// of the recognized values. Callers interpreting *model metadata* (rather
+    /// than a user-supplied property) should use this to detect — and log — an
+    /// unexpected mode instead of silently squashing.
+    pub fn try_from_property(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "fit-longest" | "fit" | "longest" => Some(ResizeMode::FitLongest),
+            "fit-shortest" | "shortest" => Some(ResizeMode::FitShortest),
+            "squash" => Some(ResizeMode::Squash),
+            _ => None,
+        }
+    }
+
     /// Parse from a property string; unknown values fall back to `Squash`.
     pub fn from_property(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-            "fit-longest" | "fit" | "longest" => ResizeMode::FitLongest,
-            "fit-shortest" | "shortest" => ResizeMode::FitShortest,
-            _ => ResizeMode::Squash,
-        }
+        Self::try_from_property(s).unwrap_or(ResizeMode::Squash)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -111,6 +120,9 @@ pub fn fit_shortest_dims(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> (u32
         return (dst_w.max(1), dst_h.max(1));
     }
     let s = (dst_w as f32 / src_w as f32).max(dst_h as f32 / src_h as f32);
+    // Round (fit_longest_dims truncates): fill semantics need the scaled image to
+    // reach the target on both axes; the trailing `.max(dst_*)` enforces it even
+    // when rounding lands just under.
     (
         ((src_w as f32 * s).round() as u32).max(dst_w),
         ((src_h as f32 * s).round() as u32).max(dst_h),
@@ -157,6 +169,10 @@ pub fn crop_center(
     dst_h: u32,
     channels: usize,
 ) -> Vec<u8> {
+    debug_assert!(
+        dst_w == 0 || dst_h == 0 || (src_w >= dst_w && src_h >= dst_h),
+        "crop_center expects src >= dst on both axes (got {src_w}x{src_h} -> {dst_w}x{dst_h})"
+    );
     let mut out = vec![0u8; dst_w as usize * dst_h as usize * channels];
     if dst_w == 0 || dst_h == 0 || src_w < dst_w || src_h < dst_h {
         return out;
@@ -177,8 +193,15 @@ pub fn crop_center(
 }
 
 /// Forward mapping from original-image pixel coordinates to model-input pixel
-/// coordinates for a [`ResizeMode`]: `model = orig * scale + offset`. Used both
-/// to fit the input and to invert detection bounding boxes so the two never drift.
+/// coordinates for a [`ResizeMode`]: `model = orig * scale + offset`. Primarily
+/// used to invert detection bounding boxes back to original-image space.
+///
+/// This uses a continuous float scale, whereas the pixel resize path
+/// ([`fit_longest_dims`]/[`fit_shortest_dims`] + [`pad_center`]/[`crop_center`])
+/// rounds to integer scaled dimensions and integer center offsets. The two agree
+/// to within ~1px at realistic model input sizes; the gap only grows meaningful
+/// at very small target dimensions (tens of px). If exact parity is ever needed,
+/// derive the transform from the same integer scaled dims the pixel path uses.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResizeTransform {
     pub scale_x: f32,
@@ -192,7 +215,12 @@ impl ResizeTransform {
     /// model input under `mode`.
     pub fn for_mode(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, mode: ResizeMode) -> Self {
         if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
-            return Self { scale_x: 1.0, scale_y: 1.0, offset_x: 0.0, offset_y: 0.0 };
+            return Self {
+                scale_x: 1.0,
+                scale_y: 1.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            };
         }
         let (sw, sh) = (src_w as f32, src_h as f32);
         let (dw, dh) = (dst_w as f32, dst_h as f32);
@@ -318,6 +346,23 @@ mod tests {
     }
 
     #[test]
+    fn crop_center_offsets_on_both_axes() {
+        // 5x5 gray where each pixel encodes row*10 + col; crop 3x3 -> start (1,1).
+        let mut src = vec![0u8; 25];
+        for r in 0..5u8 {
+            for c in 0..5u8 {
+                src[(r as usize) * 5 + c as usize] = r * 10 + c;
+            }
+        }
+        let out = crop_center(&src, 5, 5, 3, 3, 1);
+        // Both start_x and start_y are (5-3)/2 = 1, so top-left copied pixel is (1,1).
+        assert_eq!(out.len(), 9);
+        assert_eq!(out[0], 11, "crop top-left = src (row 1, col 1)");
+        assert_eq!(out[2], 13, "crop top-right = src (row 1, col 3)");
+        assert_eq!(out[8], 33, "crop bottom-right = src (row 3, col 3)");
+    }
+
+    #[test]
     fn from_property_parses_fit_shortest() {
         assert_eq!(
             ResizeMode::from_property("fit-shortest"),
@@ -328,6 +373,29 @@ mod tests {
             ResizeMode::FitShortest
         );
         assert_eq!(ResizeMode::FitShortest.as_str(), "fit-shortest");
+    }
+
+    #[test]
+    fn try_from_property_distinguishes_none_and_unknown() {
+        // Canonical strings parse to Some(..).
+        assert_eq!(
+            ResizeMode::try_from_property("squash"),
+            Some(ResizeMode::Squash)
+        );
+        assert_eq!(
+            ResizeMode::try_from_property("fit-longest"),
+            Some(ResizeMode::FitLongest)
+        );
+        // "none" and typos are NOT canonical -> None, so a metadata consumer can
+        // detect and log them instead of silently squashing.
+        assert_eq!(ResizeMode::try_from_property("none"), None);
+        assert_eq!(ResizeMode::try_from_property("fit_shrotest"), None);
+        // The lenient wrapper still falls back to Squash for those.
+        assert_eq!(ResizeMode::from_property("none"), ResizeMode::Squash);
+        assert_eq!(
+            ResizeMode::from_property("fit_shrotest"),
+            ResizeMode::Squash
+        );
     }
 
     #[test]

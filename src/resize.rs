@@ -138,6 +138,58 @@ pub fn crop_center(
     out
 }
 
+/// Forward mapping from original-image pixel coordinates to model-input pixel
+/// coordinates for a [`ResizeMode`]: `model = orig * scale + offset`. Used both
+/// to fit the input and to invert detection bounding boxes so the two never drift.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResizeTransform {
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+impl ResizeTransform {
+    /// Build the transform mapping a `src_w`×`src_h` image onto a `dst_w`×`dst_h`
+    /// model input under `mode`.
+    pub fn for_mode(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, mode: ResizeMode) -> Self {
+        if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+            return Self { scale_x: 1.0, scale_y: 1.0, offset_x: 0.0, offset_y: 0.0 };
+        }
+        let (sw, sh) = (src_w as f32, src_h as f32);
+        let (dw, dh) = (dst_w as f32, dst_h as f32);
+        match mode {
+            ResizeMode::Squash => Self {
+                scale_x: dw / sw,
+                scale_y: dh / sh,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            },
+            ResizeMode::FitLongest | ResizeMode::FitShortest => {
+                let s = if mode == ResizeMode::FitLongest {
+                    (dw / sw).min(dh / sh)
+                } else {
+                    (dw / sw).max(dh / sh)
+                };
+                Self {
+                    scale_x: s,
+                    scale_y: s,
+                    offset_x: (dw - sw * s) / 2.0,
+                    offset_y: (dh - sh * s) / 2.0,
+                }
+            }
+        }
+    }
+
+    /// Map a model-input point back to original-image coordinates.
+    pub fn inverse_point(&self, mx: f32, my: f32) -> (f32, f32) {
+        (
+            (mx - self.offset_x) / self.scale_x,
+            (my - self.offset_y) / self.scale_y,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +290,34 @@ mod tests {
             ResizeMode::FitShortest
         );
         assert_eq!(ResizeMode::FitShortest.as_str(), "fit-shortest");
+    }
+
+    #[test]
+    fn transform_squash_inverts_per_axis() {
+        let t = ResizeTransform::for_mode(100, 50, 50, 50, ResizeMode::Squash);
+        assert_eq!((t.scale_x, t.scale_y), (0.5, 1.0));
+        assert_eq!(t.inverse_point(25.0, 25.0), (50.0, 25.0));
+    }
+
+    #[test]
+    fn transform_fit_longest_letterboxes_and_inverts() {
+        // 100x50 -> 50x50: s=min(0.5,1.0)=0.5, scaled 50x25, pad_y=12.5.
+        let t = ResizeTransform::for_mode(100, 50, 50, 50, ResizeMode::FitLongest);
+        assert_eq!(
+            (t.scale_x, t.scale_y, t.offset_x, t.offset_y),
+            (0.5, 0.5, 0.0, 12.5)
+        );
+        assert_eq!(t.inverse_point(25.0, 25.0), (50.0, 25.0));
+    }
+
+    #[test]
+    fn transform_fit_shortest_fills_and_inverts() {
+        // 100x50 -> 50x50: s=max(0.5,1.0)=1.0, scaled 100x50, offset_x=-25.
+        let t = ResizeTransform::for_mode(100, 50, 50, 50, ResizeMode::FitShortest);
+        assert_eq!(
+            (t.scale_x, t.scale_y, t.offset_x, t.offset_y),
+            (1.0, 1.0, -25.0, 0.0)
+        );
+        assert_eq!(t.inverse_point(0.0, 25.0), (25.0, 25.0));
     }
 }

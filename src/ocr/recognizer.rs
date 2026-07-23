@@ -175,6 +175,75 @@ mod tests {
         let decoded = ctc_greedy_decode(&logits, c, &parse_charset("_AB"));
         assert_eq!(decoded.text, "AB");
     }
+
+    /// End-to-end native validation of the FFI recognizer backend: loads the
+    /// model baked into this build and decodes a real RGB crop. Requires the
+    /// `ffi` feature and a model compiled in (see the crate README /
+    /// `EI_MODEL=<dir> cargo build --features "ffi ocr"`). Opt-in via
+    /// `EI_OCR_TEST_RGB` so the default `cargo test` run (no baked model) is
+    /// unaffected; skips cleanly when unset.
+    ///
+    /// Run on macOS:
+    ///   EI_OCR_TEST_RGB=/tmp/ocr_ABC123.rgb EI_OCR_TEST_EXPECT=ABC123 \
+    ///     cargo test --release --no-default-features --features "ffi ocr" \
+    ///     recognizer_ffi_decodes_real_crop -- --nocapture
+    ///
+    /// The `.rgb` must be tightly-packed RGB at the model's input size (the
+    /// pretrained PaddleOCR recognizer is 320x48). Override the geometry with
+    /// `EI_OCR_TEST_W` / `EI_OCR_TEST_H` if your model differs.
+    #[cfg(feature = "ffi")]
+    #[test]
+    fn recognizer_ffi_decodes_real_crop() {
+        let Ok(path) = std::env::var("EI_OCR_TEST_RGB") else {
+            eprintln!(
+                "SKIP recognizer_ffi_decodes_real_crop: set EI_OCR_TEST_RGB to a raw RGB crop"
+            );
+            return;
+        };
+        let width: u32 = std::env::var("EI_OCR_TEST_W")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(320);
+        let height: u32 = std::env::var("EI_OCR_TEST_H")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(48);
+        let rgb = std::fs::read(&path).expect("read EI_OCR_TEST_RGB");
+        let expected_len = (width as usize) * (height as usize) * 3;
+        assert_eq!(
+            rgb.len(),
+            expected_len,
+            "{path} is {} bytes, expected {expected_len} for {width}x{height} RGB",
+            rgb.len()
+        );
+
+        // The pretrained recognizer ships the 438-class PaddleOCR English
+        // charset; class count must match the model's per-timestep output.
+        let charset = include_str!("paddleocr_recognizer_charset.txt");
+        let num_classes = parse_charset(charset).len();
+        let normalize = std::env::var("EI_OCR_TEST_NORMALIZE")
+            .map(|v| Normalize::parse(&v))
+            .unwrap_or(Normalize::None);
+
+        let source = ffi::FfiLogitSource::new(false, num_classes)
+            .expect("load baked recognizer model (build with EI_MODEL + --features ffi)");
+        let mut rec = Recognizer::new(source, charset, "", normalize);
+
+        let out = rec
+            .recognize_text(&rgb, width, height)
+            .expect("recognizer inference")
+            .expect("non-empty decode");
+        eprintln!(
+            "recognizer_ffi decoded {:?} (confidence {:.4})",
+            out.0, out.1
+        );
+
+        if let Ok(expect) = std::env::var("EI_OCR_TEST_EXPECT") {
+            assert_eq!(out.0, expect, "decoded text mismatch");
+        } else {
+            assert!(!out.0.is_empty(), "decoded text should be non-empty");
+        }
+    }
 }
 
 #[cfg(feature = "ffi")]

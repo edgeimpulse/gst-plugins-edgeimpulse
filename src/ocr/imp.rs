@@ -41,6 +41,16 @@ const EXTRAPOLATION_DT_CAP_S: f32 = 0.5;
 /// the Kalman filter by a huge dt and fling a predicted box across the frame.
 const MAX_TRACKER_DT_S: f32 = 1.0;
 
+/// Default CTC charset for the two-stage recognizer backend. Matches the
+/// pretrained PaddleOCR English recognition head deployed from Edge Impulse
+/// Studio: index 0 is the CTC blank (U+E000 placeholder), indices 1..=436 are
+/// the PaddleOCR English dictionary, and index 437 is the space
+/// (`use_space_char`). It is overridable via the `charset` property, but the
+/// recognizer requires `charset.len()` to equal the model's class count, so
+/// solutions that only read a subset (e.g. uppercase alphanumeric codes) should
+/// keep this default and set `normalize` rather than shrink the charset.
+const DEFAULT_RECOGNIZER_CHARSET: &str = include_str!("paddleocr_recognizer_charset.txt");
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub backend: String,
@@ -58,6 +68,7 @@ pub struct Settings {
     pub box_responsiveness: f64,
     pub charset: String,
     pub dictionary: String,
+    pub normalize: String,
 }
 
 impl Default for Settings {
@@ -76,8 +87,9 @@ impl Default for Settings {
             stabilization_max_misses: 5,
             box_prediction: false,
             box_responsiveness: 0.5,
-            charset: "_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string(),
+            charset: DEFAULT_RECOGNIZER_CHARSET.to_string(),
             dictionary: String::new(),
+            normalize: "none".into(),
         }
     }
 }
@@ -268,14 +280,30 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .build(),
                 glib::ParamSpecString::builder("charset")
                     .nick("Charset")
-                    .blurb("CTC class charset; index 0 is the blank. Default uppercase alphanumeric.")
-                    .default_value(Some("_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                    .blurb(
+                        "CTC class charset, one Unicode char per class; index 0 is \
+                         the blank. Its length must equal the recognizer model's \
+                         class count. Defaults to the pretrained PaddleOCR English \
+                         charset (438 classes).",
+                    )
+                    .default_value(Some(DEFAULT_RECOGNIZER_CHARSET))
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("dictionary")
                     .nick("Dictionary")
                     .blurb("Comma-separated allowlist of valid strings; empty allows any decoded text.")
                     .default_value(Some(""))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("normalize")
+                    .nick("Normalize")
+                    .blurb(
+                        "Post-decode text normalization for the recognizer backend: \
+                         'none' (verbatim), 'upper' (uppercase), or 'upper-alnum' \
+                         (uppercase and keep only [A-Z0-9]). Lets a solution read a \
+                         subset of a large charset without retraining.",
+                    )
+                    .default_value(Some("none"))
                     .mutable_ready()
                     .build(),
             ]
@@ -301,6 +329,7 @@ impl ObjectImpl for EdgeImpulseOcr {
             "box-responsiveness" => settings.box_responsiveness = value.get().unwrap(),
             "charset" => settings.charset = value.get().unwrap_or_default(),
             "dictionary" => settings.dictionary = value.get().unwrap_or_default(),
+            "normalize" => settings.normalize = value.get().unwrap_or_default(),
             _ => unimplemented!(),
         }
     }
@@ -323,6 +352,7 @@ impl ObjectImpl for EdgeImpulseOcr {
             "box-responsiveness" => settings.box_responsiveness.to_value(),
             "charset" => settings.charset.to_value(),
             "dictionary" => settings.dictionary.to_value(),
+            "normalize" => settings.normalize.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -579,17 +609,19 @@ impl BaseTransformImpl for EdgeImpulseOcr {
             );
             #[cfg(feature = "ffi")]
             let recognizer = {
-                let source =
-                    crate::ocr::recognizer::ffi::FfiLogitSource::new(false).map_err(|e| {
-                        gst::error_msg!(
-                            gst::ResourceError::Failed,
-                            ["failed to init recognizer: {e}"]
-                        )
-                    })?;
+                let num_classes = crate::ocr::ctc::parse_charset(&settings.charset).len();
+                let source = crate::ocr::recognizer::ffi::FfiLogitSource::new(false, num_classes)
+                    .map_err(|e| {
+                    gst::error_msg!(
+                        gst::ResourceError::Failed,
+                        ["failed to init recognizer: {e}"]
+                    )
+                })?;
                 crate::ocr::recognizer::Recognizer::new(
                     source,
                     &settings.charset,
                     &settings.dictionary,
+                    crate::ocr::normalize::Normalize::parse(&settings.normalize),
                 )
             };
             *self.rec_state.lock().unwrap() = Some(RecognizerState {

@@ -5,6 +5,7 @@
 //! unit-testable without a deployed Edge Impulse model.
 
 use super::ctc::{ctc_greedy_decode, parse_charset, parse_dictionary, passes_dictionary};
+use super::normalize::{normalize_text, Normalize};
 
 /// Produces flat `[T, C]` logits for one RGB crop. Implemented by the FFI model
 /// wrapper in production and by a fake in tests.
@@ -20,19 +21,25 @@ pub struct Recognizer<S: LogitSource> {
     source: S,
     charset: Vec<char>,
     dictionary: Vec<String>,
+    normalize: Normalize,
 }
 
 impl<S: LogitSource> Recognizer<S> {
-    pub fn new(source: S, charset: &str, dictionary: &str) -> Self {
+    pub fn new(source: S, charset: &str, dictionary: &str, normalize: Normalize) -> Self {
         Self {
             source,
             charset: parse_charset(charset),
             dictionary: parse_dictionary(dictionary),
+            normalize,
         }
     }
 
     /// Recognize one crop. Returns `Ok(None)` when the read is empty or fails
     /// the dictionary gate, `Ok(Some((text, confidence)))` otherwise.
+    ///
+    /// Normalization is applied to the decoded text *before* the empty/dictionary
+    /// gates so a dictionary is matched against (and truncation counts) the
+    /// emitted form.
     pub fn recognize_text(
         &mut self,
         rgb: &[u8],
@@ -41,11 +48,41 @@ impl<S: LogitSource> Recognizer<S> {
     ) -> Result<Option<(String, f32)>, String> {
         let (logits, num_classes) = self.source.logits(rgb, width, height)?;
         let decoded = ctc_greedy_decode(&logits, num_classes, &self.charset);
-        if decoded.text.is_empty() || !passes_dictionary(&decoded.text, &self.dictionary) {
+        let text = normalize_text(&decoded.text, self.normalize);
+        if text.is_empty() || !passes_dictionary(&text, &self.dictionary) {
             return Ok(None);
         }
-        Ok(Some((decoded.text, decoded.confidence)))
+        Ok(Some((text, decoded.confidence)))
     }
+}
+
+/// Turn the runner's freeform output tensors into flat `[T, C]` sequence logits
+/// for CTC decoding. A CRNN recognizer exposes a single output tensor of shape
+/// `[T, num_classes]` (row-major), so the first tensor is taken as-is and
+/// validated to contain a whole number of timesteps. `num_classes` is the
+/// charset size (blank + symbols) the model was trained against.
+#[cfg(any(feature = "ffi", test))]
+pub(crate) fn logits_from_freeform(
+    outputs: Vec<Vec<f32>>,
+    num_classes: usize,
+) -> Result<(Vec<f32>, usize), String> {
+    if num_classes == 0 {
+        return Err("recognizer num_classes must be > 0".to_string());
+    }
+    let logits = outputs
+        .into_iter()
+        .next()
+        .ok_or_else(|| "recognizer produced no freeform output tensors".to_string())?;
+    if logits.is_empty() {
+        return Err("recognizer freeform output tensor is empty".to_string());
+    }
+    if logits.len() % num_classes != 0 {
+        return Err(format!(
+            "recognizer output length {} is not a multiple of num_classes {num_classes}",
+            logits.len(),
+        ));
+    }
+    Ok((logits, num_classes))
 }
 
 #[cfg(test)]
@@ -69,9 +106,22 @@ mod tests {
             logits: vec![0.0, 10.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0],
             num_classes: 3,
         };
-        let mut rec = Recognizer::new(src, "_AB", "");
+        let mut rec = Recognizer::new(src, "_AB", "", Normalize::None);
         let out = rec.recognize_text(&[], 4, 4).unwrap();
         assert_eq!(out.unwrap().0, "AB");
+    }
+
+    #[test]
+    fn normalize_is_applied_before_dictionary_gate() {
+        // charset "_ab": timesteps a, a(repeat), b => "ab"; upper-alnum => "AB".
+        let src = FakeSource {
+            logits: vec![0.0, 10.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0],
+            num_classes: 3,
+        };
+        // Dictionary lists the *normalized* form; the raw decode ("ab") only
+        // passes because normalization runs first.
+        let mut rec = Recognizer::new(src, "_ab", "AB", Normalize::UpperAlnum);
+        assert_eq!(rec.recognize_text(&[], 4, 4).unwrap().unwrap().0, "AB");
     }
 
     #[test]
@@ -80,7 +130,7 @@ mod tests {
             logits: vec![0.0, 10.0, 0.0, 0.0, 0.0, 10.0],
             num_classes: 3,
         }; // decodes "AB"
-        let mut rec = Recognizer::new(src, "_AB", "XY,ZZ");
+        let mut rec = Recognizer::new(src, "_AB", "XY,ZZ", Normalize::None);
         assert_eq!(rec.recognize_text(&[], 4, 4).unwrap(), None);
     }
 
@@ -92,37 +142,67 @@ mod tests {
                 Err("boom".into())
             }
         }
-        let mut rec = Recognizer::new(ErrSource, "_AB", "");
+        let mut rec = Recognizer::new(ErrSource, "_AB", "", Normalize::None);
         assert_eq!(rec.recognize_text(&[], 1, 1).unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn freeform_takes_first_tensor_as_flat_logits() {
+        let out = vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]];
+        let (logits, c) = logits_from_freeform(out, 3).unwrap();
+        assert_eq!(c, 3);
+        assert_eq!(logits, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn freeform_rejects_length_not_multiple_of_classes() {
+        let out = vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]]; // 5 not divisible by 3
+        assert!(logits_from_freeform(out, 3).is_err());
+    }
+
+    #[test]
+    fn freeform_rejects_empty_or_zero_classes() {
+        assert!(logits_from_freeform(Vec::new(), 3).is_err());
+        assert!(logits_from_freeform(vec![vec![]], 3).is_err());
+        assert!(logits_from_freeform(vec![vec![1.0, 2.0]], 0).is_err());
+    }
+
+    #[test]
+    fn freeform_output_decodes_through_ctc() {
+        // 3 timesteps, C=3 charset "_AB": argmax A, A(repeat), B => "AB".
+        let out = vec![vec![0.0, 10.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0]];
+        let (logits, c) = logits_from_freeform(out, 3).unwrap();
+        let decoded = ctc_greedy_decode(&logits, c, &parse_charset("_AB"));
+        assert_eq!(decoded.text, "AB");
     }
 }
 
 #[cfg(feature = "ffi")]
 pub mod ffi {
-    use super::LogitSource;
+    use super::{logits_from_freeform, LogitSource};
     use edge_impulse_runner::EdgeImpulseModel;
 
     /// FFI-backed logit source. Loads the model baked into this plugin variant
-    /// `.so` (same mechanism as `edgeimpulsevideoinfer`) and returns the raw
-    /// classification tensor flattened as `[T, C]`.
+    /// `.so` (same mechanism as `edgeimpulsevideoinfer`) and returns the
+    /// recognizer's raw sequence logits as a flat `[T, C]` tensor via the
+    /// runner's freeform-output API. CRNN/OCR models expose their raw output
+    /// tensor this way rather than through the collapsed classification map.
     pub struct FfiLogitSource {
         model: EdgeImpulseModel,
-        /// One-shot latch for the on-device shape diagnostic (see `logits`).
-        diagnosed: bool,
+        /// Charset size (blank + symbols) the model was trained against, i.e.
+        /// the number of classes `C` per timestep in the `[T, C]` output.
+        num_classes: usize,
     }
 
     impl FfiLogitSource {
-        pub fn new(debug: bool) -> Result<Self, String> {
+        pub fn new(debug: bool, num_classes: usize) -> Result<Self, String> {
             let model = if debug {
                 EdgeImpulseModel::new_with_debug(true)
             } else {
                 EdgeImpulseModel::new()
             }
             .map_err(|e| format!("failed to load recognizer model: {e:?}"))?;
-            Ok(Self {
-                model,
-                diagnosed: false,
-            })
+            Ok(Self { model, num_classes })
         }
     }
 
@@ -140,129 +220,16 @@ pub mod ffi {
             }
             let mut features = Vec::with_capacity(expected / 3);
             for px in rgb[..expected].chunks_exact(3) {
-                let packed =
-                    ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
+                let packed = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
                 features.push(packed as f32);
             }
 
-            let response = self
+            let outputs = self
                 .model
-                .infer(features, None)
+                .infer_freeform(features, None)
                 .map_err(|e| format!("recognizer inference failed: {e:?}"))?;
 
-            // On the very first inference, surface a one-shot diagnostic of the
-            // real model metadata + response shape so `extract_logits` can be
-            // implemented against the deployed CRNN with certainty (Step 3). It
-            // rides the `Err` channel because the recognizer path already logs
-            // that as a warning (imp.rs), so no extra logging wiring is needed;
-            // this is a probe, not a genuine failure mode.
-            if !self.diagnosed {
-                self.diagnosed = true;
-                return Err(diagnostic(&self.model, &response));
-            }
-
-            extract_logits(&response)
+            logits_from_freeform(outputs, self.num_classes)
         }
-    }
-
-    /// One-shot on-device probe: dump the recognizer model's metadata
-    /// (`model_type`, `label_count`, `labels`, input dimensions) and the raw
-    /// `InferenceResponse` shape for a single crop. This is what tells us how the
-    /// CRNN output actually surfaces through the runner, which is the one
-    /// genuinely uncertain input needed to implement `extract_logits`.
-    ///
-    /// Read the logged line as follows: if `label_count` equals `T * C` (with
-    /// `C` = charset length) and `labels` are unique, the flat `[T, C]` tensor
-    /// can be reconstructed from the classification map via the ordered `labels`
-    /// index; if `label_count` equals just `C`, the sequence has been collapsed
-    /// and the raw tensor must be reached another way.
-    fn diagnostic(
-        model: &EdgeImpulseModel,
-        response: &edge_impulse_runner::InferenceResponse,
-    ) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::from("extract_logits DIAGNOSTIC (one-shot; pending validation)\n");
-        match model.parameters() {
-            Ok(p) => {
-                let _ = writeln!(
-                    s,
-                    "  model_type={:?} label_count={} input_features_count={} \
-                     image={}x{}x{} frames={} engine={} has_anomaly={:?}",
-                    p.model_type,
-                    p.label_count,
-                    p.input_features_count,
-                    p.image_input_width,
-                    p.image_input_height,
-                    p.image_channel_count,
-                    p.image_input_frames,
-                    p.inferencing_engine,
-                    p.has_anomaly,
-                );
-                let n = p.labels.len();
-                let head: Vec<&String> = p.labels.iter().take(32).collect();
-                let _ = writeln!(s, "  labels(n={n}) head={head:?}");
-                if n > 36 {
-                    let tail: Vec<&String> = p.labels.iter().skip(n - 4).collect();
-                    let _ = writeln!(s, "  labels tail={tail:?}");
-                }
-            }
-            Err(e) => {
-                let _ = writeln!(s, "  parameters() unavailable: {e:?}");
-            }
-        }
-        match model.input_size() {
-            Ok(sz) => {
-                let _ = writeln!(s, "  input_size={sz}");
-            }
-            Err(e) => {
-                let _ = writeln!(s, "  input_size() unavailable: {e:?}");
-            }
-        }
-        match &response.result {
-            edge_impulse_runner::InferenceResult::Classification { classification } => {
-                let mut keys: Vec<&String> = classification.keys().collect();
-                keys.sort();
-                let sample: Vec<String> = keys
-                    .iter()
-                    .take(8)
-                    .map(|k| format!("{k}={:.4}", classification[*k]))
-                    .collect();
-                let _ = writeln!(
-                    s,
-                    "  result=Classification entries={} sample={sample:?}",
-                    classification.len()
-                );
-            }
-            edge_impulse_runner::InferenceResult::ObjectDetection {
-                bounding_boxes,
-                classification,
-                ..
-            } => {
-                let _ = writeln!(
-                    s,
-                    "  result=ObjectDetection boxes={} classification_entries={}",
-                    bounding_boxes.len(),
-                    classification.len()
-                );
-            }
-            edge_impulse_runner::InferenceResult::VisualAnomaly { anomaly, .. } => {
-                let _ = writeln!(s, "  result=VisualAnomaly anomaly={anomaly}");
-            }
-        }
-        s
-    }
-
-    /// DEVICE-VALIDATED SEAM: pull flattened `[T, C]` sequence logits out of the
-    /// runner response. A CRNN deployed from EI Studio surfaces its raw output
-    /// tensor here; the exact accessor MUST be confirmed against a deployed
-    /// model (Step 3, deferred). The high-level `Classification { HashMap }` enum
-    /// collapses the temporal dimension, so the raw output tensor is required.
-    fn extract_logits(
-        response: &edge_impulse_runner::InferenceResponse,
-    ) -> Result<(Vec<f32>, usize), String> {
-        // NOTE: pending on-device confirmation of the CRNN output shape. Until
-        // validated, fail explicitly rather than guess a wrong tensor shape.
-        let _ = response;
-        Err("extract_logits: pending on-device validation of CRNN output shape".into())
     }
 }

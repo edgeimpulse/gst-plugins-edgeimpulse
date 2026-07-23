@@ -8,6 +8,7 @@ mod backend;
 mod ctc;
 mod decode;
 mod imp;
+mod normalize;
 mod recognizer;
 mod shaping;
 mod stabilize;

@@ -183,37 +183,50 @@ fn pipeline_description(args: &Args) -> String {
     // Front-end: convert to the RGB the OCR element requires.
     let front = "queue max-size-buffers=4 leaky=downstream ! videoconvert ! video/x-raw,format=RGB";
 
-    // Inference branch: crop resizes to the model size and attaches CropOriginMeta;
-    // the recognizer decodes text and posts an `ocr` element message.
-    let infer = format!(
-        "edgeimpulsecrop name=crop target-width={w} target-height={h} \
-         ! edgeimpulseocr backend=edge-impulse-recognizer normalize={n} \
-         min-confidence={c} interval=1 post-message=true \
-         ! fakesink sync=false",
+    // Crop fits the reading-zone ROI (attached by the probe) to the model size
+    // preserving aspect ratio (resize-mode=fit-longest, matching how the model
+    // was trained) and attaches CropOriginMeta for the recognizer.
+    let crop = format!(
+        "edgeimpulsecrop name=crop target-width={w} target-height={h} resize-mode=fit-longest",
         w = args.width,
         h = args.height,
+    );
+
+    // Recognizer: decodes text from the cropped band and posts an `ocr` message.
+    let ocr = format!(
+        "edgeimpulseocr backend=edge-impulse-recognizer normalize={n} \
+         min-confidence={c} interval=1 post-message=true ! fakesink sync=false",
         n = args.normalize,
         c = args.min_confidence,
     );
 
     if args.preview {
-        // Tee the RGB stream: one branch to inference, one to a preview window.
+        // Tee AFTER the crop so the preview window shows the exact model input
+        // (the central band, fit to the model size) upscaled — align text to it.
+        let pw = args.width * 2;
+        let ph = args.height * 2;
         format!(
-            "{source} ! {front} ! tee name=tp \
-             tp. ! queue max-size-buffers=4 leaky=downstream ! {infer} \
-             tp. ! queue max-size-buffers=4 leaky=downstream ! videoconvert ! autovideosink sync=false"
+            "{source} ! {front} ! {crop} ! tee name=t \
+             t. ! queue max-size-buffers=4 leaky=downstream ! {ocr} \
+             t. ! queue max-size-buffers=4 leaky=downstream ! videoscale \
+             ! video/x-raw,width={pw},height={ph} ! videoconvert ! autovideosink sync=false"
         )
     } else {
-        format!("{source} ! {front} ! {infer}")
+        format!("{source} ! {front} ! {crop} ! {ocr}")
     }
 }
 
-/// Attach a full-frame detection ROI to every buffer entering the crop, so the
-/// crop -> recognizer path runs without an upstream detector.
-fn install_full_frame_probe(
+/// Attach a central reading-zone ROI to every buffer entering the crop, so the
+/// crop -> recognizer path runs without an upstream detector. The zone is a
+/// horizontal band whose aspect ratio matches the model input (target_w:target_h),
+/// centered vertically. A band keeps the text large and legible instead of
+/// squeezing the whole (often vertical) camera frame into 320x48.
+fn install_reading_zone_probe(
     pipeline: &gst::Pipeline,
+    target: (u32, u32),
     fallback: (u32, u32),
 ) -> Result<(), Box<dyn Error>> {
+    let (target_w, target_h) = target;
     let crop = pipeline
         .by_name("crop")
         .ok_or("pipeline is missing the 'crop' element")?;
@@ -229,9 +242,16 @@ fn install_full_frame_probe(
             .map(|vi| (vi.width(), vi.height()))
             .unwrap_or(fallback);
 
+        // Reading band: full width, height set so the band matches the model's
+        // aspect ratio, centered vertically.
+        let band_h =
+            ((w as u64 * target_h as u64) / target_w.max(1) as u64).clamp(1, h as u64) as u32;
+        let y_off = h.saturating_sub(band_h) / 2;
+
         if let Some(buffer) = info.buffer_mut() {
             let buffer = buffer.make_mut();
-            let mut roi = gst_video::VideoRegionOfInterestMeta::add(buffer, "text", (0, 0, w, h));
+            let mut roi =
+                gst_video::VideoRegionOfInterestMeta::add(buffer, "text", (0, y_off, w, band_h));
             roi.add_param(
                 gst::Structure::builder("detection")
                     .field("label", "text")
@@ -274,10 +294,16 @@ fn example_main(args: Args) -> Result<(), Box<dyn Error>> {
         .downcast::<gst::Pipeline>()
         .map_err(|_| "parsed pipeline is not a gst::Pipeline")?;
 
-    install_full_frame_probe(&pipeline, (args.width, args.height))?;
+    install_reading_zone_probe(
+        &pipeline,
+        (args.width, args.height),
+        (args.width, args.height),
+    )?;
 
     pipeline.set_state(gst::State::Playing)?;
-    println!("▶️  playing — hold an uppercase code to the camera. Ctrl-C to stop.");
+    println!(
+        "▶️  playing — hold an uppercase code in the central horizontal band. Ctrl-C to stop."
+    );
 
     let bus = pipeline.bus().ok_or("pipeline has no bus")?;
     for msg in bus.iter_timed(gst::ClockTime::NONE) {

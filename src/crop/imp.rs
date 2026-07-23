@@ -59,6 +59,8 @@ struct State {
     target_width: i32,
     /// Target height for output crops (0 = use crop's natural size)
     target_height: i32,
+    /// How crops are fitted to the target dimensions
+    resize_mode: ResizeMode,
     /// Input video info (set during caps negotiation)
     video_info: Option<gst_video::VideoInfo>,
     /// Whether we've set output caps yet
@@ -73,6 +75,7 @@ impl Default for State {
             padding: 0,
             target_width: 0,
             target_height: 0,
+            resize_mode: ResizeMode::Squash,
             video_info: None,
             src_caps_set: false,
             pending_segment: None,
@@ -162,6 +165,17 @@ impl ObjectImpl for EdgeImpulseCrop {
                     .default_value(0)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecString::builder("resize-mode")
+                    .nick("Resize Mode")
+                    .blurb(
+                        "How crops are fitted to target-width/target-height: \
+                         'squash' stretches ignoring aspect ratio (default); \
+                         'fit-longest' preserves aspect ratio and zero-pads \
+                         (matches Edge Impulse FIT_LONGEST model preprocessing).",
+                    )
+                    .default_value(Some("squash"))
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -173,6 +187,10 @@ impl ObjectImpl for EdgeImpulseCrop {
             "padding" => state.padding = value.get::<i32>().unwrap_or(0),
             "target-width" => state.target_width = value.get::<i32>().unwrap_or(0),
             "target-height" => state.target_height = value.get::<i32>().unwrap_or(0),
+            "resize-mode" => {
+                state.resize_mode =
+                    ResizeMode::from_property(&value.get::<String>().unwrap_or_default())
+            }
             _ => unimplemented!(),
         }
     }
@@ -183,6 +201,7 @@ impl ObjectImpl for EdgeImpulseCrop {
             "padding" => state.padding.to_value(),
             "target-width" => state.target_width.to_value(),
             "target-height" => state.target_height.to_value(),
+            "resize-mode" => state.resize_mode.as_str().to_value(),
             _ => unimplemented!(),
         }
     }
@@ -297,6 +316,7 @@ impl EdgeImpulseCrop {
         let padding = state.padding;
         let target_width = state.target_width;
         let target_height = state.target_height;
+        let resize_mode = state.resize_mode;
         drop(state);
 
         let frame_width = video_info.width();
@@ -318,6 +338,7 @@ impl EdgeImpulseCrop {
                     frame_height,
                     target_width as u32,
                     target_height as u32,
+                    resize_mode,
                 )?;
                 return self.src_pad.push(resized);
             }
@@ -342,6 +363,7 @@ impl EdgeImpulseCrop {
                 padding,
                 target_width,
                 target_height,
+                resize_mode,
             );
             match result {
                 Ok(gst::FlowSuccess::Ok) => {}
@@ -406,6 +428,7 @@ impl EdgeImpulseCrop {
     }
 
     /// Create a cropped buffer for a single detection and push it downstream.
+    #[allow(clippy::too_many_arguments)]
     fn push_crop(
         &self,
         buffer: &gst::Buffer,
@@ -414,6 +437,7 @@ impl EdgeImpulseCrop {
         padding: i32,
         target_width: i32,
         target_height: i32,
+        resize_mode: ResizeMode,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         let frame_w = video_info.width() as i32;
         let frame_h = video_info.height() as i32;
@@ -473,27 +497,15 @@ impl EdgeImpulseCrop {
             && target_height > 0
             && (crop_w != target_width as u32 || crop_h != target_height as u32)
         {
-            // Resize to target dimensions
-            let img: RgbImage =
-                ImageBuffer::from_raw(crop_w, crop_h, crop_data).ok_or_else(|| {
-                    gst::error!(
-                        CAT,
-                        obj = self.obj(),
-                        "Failed to create image from crop data"
-                    );
-                    gst::FlowError::Error
-                })?;
-            let resized = image::imageops::resize(
-                &img,
+            let out = resize_rgb(
+                &crop_data,
+                crop_w,
+                crop_h,
                 target_width as u32,
                 target_height as u32,
-                FilterType::Triangle,
+                resize_mode,
             );
-            (
-                target_width as u32,
-                target_height as u32,
-                resized.into_raw(),
-            )
+            (target_width as u32, target_height as u32, out)
         } else {
             (crop_w, crop_h, crop_data)
         };
@@ -546,6 +558,7 @@ impl EdgeImpulseCrop {
     }
 
     /// Resize a full buffer to target dimensions.
+    #[allow(clippy::too_many_arguments)]
     fn resize_buffer(
         &self,
         buffer: &gst::Buffer,
@@ -554,6 +567,7 @@ impl EdgeImpulseCrop {
         frame_h: u32,
         target_w: u32,
         target_h: u32,
+        resize_mode: ResizeMode,
     ) -> Result<gst::Buffer, gst::FlowError> {
         let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer.as_ref(), video_info)
             .map_err(|_| gst::FlowError::Error)?;
@@ -573,11 +587,16 @@ impl EdgeImpulseCrop {
         }
         drop(frame);
 
-        let img: RgbImage =
-            ImageBuffer::from_raw(frame_w, frame_h, contiguous).ok_or(gst::FlowError::Error)?;
-        let resized = image::imageops::resize(&img, target_w, target_h, FilterType::Triangle);
+        let resized = resize_rgb(
+            &contiguous,
+            frame_w,
+            frame_h,
+            target_w,
+            target_h,
+            resize_mode,
+        );
 
-        let mut out_buf = gst::Buffer::from_mut_slice(resized.into_raw());
+        let mut out_buf = gst::Buffer::from_mut_slice(resized);
         {
             let out_ref = out_buf.make_mut();
             out_ref.set_pts(buffer.pts());
@@ -628,5 +647,203 @@ impl EdgeImpulseCrop {
             self.src_pad.push_event(segment);
         }
         Ok(())
+    }
+}
+
+// ─── Resize policy ───────────────────────────────────────────────────────────
+
+/// How a crop is fitted to the target dimensions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResizeMode {
+    /// Stretch to the target, ignoring aspect ratio (legacy behavior).
+    Squash,
+    /// Scale preserving aspect ratio to fit within the target, then center on a
+    /// zero-padded (black) canvas. Mirrors Edge Impulse's
+    /// `EI_CLASSIFIER_RESIZE_FIT_LONGEST` preprocessing so recognizer/classifier
+    /// input matches how the model was trained.
+    FitLongest,
+}
+
+impl ResizeMode {
+    /// Parse from a property string; unknown values fall back to `Squash`.
+    fn from_property(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "fit-longest" | "fit" | "longest" => ResizeMode::FitLongest,
+            _ => ResizeMode::Squash,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            ResizeMode::Squash => "squash",
+            ResizeMode::FitLongest => "fit-longest",
+        }
+    }
+}
+
+/// Resize `src` RGB (`src_w`×`src_h`, tightly packed) to `dst_w`×`dst_h` using
+/// `mode`. Returns exactly `dst_w*dst_h*3` bytes. Invalid input yields a black
+/// canvas of the target size.
+fn resize_rgb(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    mode: ResizeMode,
+) -> Vec<u8> {
+    let black = || vec![0u8; (dst_w as usize) * (dst_h as usize) * 3];
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return black();
+    }
+    let img: RgbImage = match ImageBuffer::from_raw(src_w, src_h, src.to_vec()) {
+        Some(i) => i,
+        None => return black(),
+    };
+
+    match mode {
+        ResizeMode::Squash => {
+            image::imageops::resize(&img, dst_w, dst_h, FilterType::Triangle).into_raw()
+        }
+        ResizeMode::FitLongest => {
+            // Scale by the limiting axis, preserving aspect ratio, then center on
+            // a zero-padded canvas (Edge Impulse's FIT_LONGEST, processing.cpp).
+            let src_aspect = src_w as f32 / src_h as f32;
+            let dst_aspect = dst_w as f32 / dst_h as f32;
+            let (resize_w, resize_h) = if src_aspect > dst_aspect {
+                (
+                    dst_w,
+                    ((dst_w as f32 / src_aspect) as u32).max(1).min(dst_h),
+                )
+            } else {
+                (
+                    ((dst_h as f32 * src_aspect) as u32).max(1).min(dst_w),
+                    dst_h,
+                )
+            };
+
+            let resized =
+                image::imageops::resize(&img, resize_w, resize_h, FilterType::Triangle).into_raw();
+
+            let start_x = (dst_w - resize_w) / 2;
+            let start_y = (dst_h - resize_h) / 2;
+            let dst_row = (dst_w as usize) * 3;
+            let src_row = (resize_w as usize) * 3;
+            let mut canvas = black();
+            for row in 0..resize_h as usize {
+                let s = row * src_row;
+                let d = (start_y as usize + row) * dst_row + (start_x as usize) * 3;
+                canvas[d..d + src_row].copy_from_slice(&resized[s..s + src_row]);
+            }
+            canvas
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32, rgb: (u8, u8, u8)) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..(w * h) {
+            v.push(rgb.0);
+            v.push(rgb.1);
+            v.push(rgb.2);
+        }
+        v
+    }
+
+    fn px(buf: &[u8], w: u32, x: u32, y: u32) -> (u8, u8, u8) {
+        let o = ((y * w + x) * 3) as usize;
+        (buf[o], buf[o + 1], buf[o + 2])
+    }
+
+    #[test]
+    fn fit_longest_pads_narrow_source_with_black_sides() {
+        // 48x48 white (aspect 1) into 320x48 (aspect ~6.67): limited by height,
+        // resized to 48x48 centered at x=136, black on both sides.
+        let src = solid(48, 48, (255, 255, 255));
+        let out = resize_rgb(&src, 48, 48, 320, 48, ResizeMode::FitLongest);
+        assert_eq!(out.len(), 320 * 48 * 3);
+        assert_eq!(
+            px(&out, 320, 0, 24),
+            (0, 0, 0),
+            "left padding must be black"
+        );
+        assert_eq!(
+            px(&out, 320, 160, 24),
+            (255, 255, 255),
+            "center must hold the image"
+        );
+        assert_eq!(
+            px(&out, 320, 315, 24),
+            (0, 0, 0),
+            "right padding must be black"
+        );
+    }
+
+    #[test]
+    fn fit_longest_pads_wide_source_with_black_top_bottom() {
+        // 640x48 white (aspect ~13.3) into 320x48: limited by width, resized to
+        // 320x24 centered at y=12, black top and bottom.
+        let src = solid(640, 48, (255, 255, 255));
+        let out = resize_rgb(&src, 640, 48, 320, 48, ResizeMode::FitLongest);
+        assert_eq!(
+            px(&out, 320, 160, 0),
+            (0, 0, 0),
+            "top padding must be black"
+        );
+        assert_eq!(
+            px(&out, 320, 160, 24),
+            (255, 255, 255),
+            "center must hold the image"
+        );
+        assert_eq!(
+            px(&out, 320, 160, 47),
+            (0, 0, 0),
+            "bottom padding must be black"
+        );
+    }
+
+    #[test]
+    fn fit_longest_matching_aspect_fills_without_padding() {
+        // 640x96 (aspect ~6.67) into 320x48 (same aspect): fills entirely.
+        let src = solid(640, 96, (200, 100, 50));
+        let out = resize_rgb(&src, 640, 96, 320, 48, ResizeMode::FitLongest);
+        assert_eq!(
+            px(&out, 320, 0, 24),
+            (200, 100, 50),
+            "left edge filled (no padding)"
+        );
+        assert_eq!(
+            px(&out, 320, 319, 24),
+            (200, 100, 50),
+            "right edge filled (no padding)"
+        );
+    }
+
+    #[test]
+    fn squash_fills_entire_target_ignoring_aspect() {
+        // Squash stretches a square to fill the wide target — no black padding.
+        let src = solid(48, 48, (255, 255, 255));
+        let out = resize_rgb(&src, 48, 48, 320, 48, ResizeMode::Squash);
+        assert_eq!(px(&out, 320, 0, 24), (255, 255, 255));
+        assert_eq!(px(&out, 320, 315, 24), (255, 255, 255));
+    }
+
+    #[test]
+    fn resize_mode_parses_from_property_string() {
+        assert_eq!(
+            ResizeMode::from_property("fit-longest"),
+            ResizeMode::FitLongest
+        );
+        assert_eq!(
+            ResizeMode::from_property("Fit_Longest"),
+            ResizeMode::FitLongest
+        );
+        assert_eq!(ResizeMode::from_property("squash"), ResizeMode::Squash);
+        assert_eq!(ResizeMode::from_property("whatever"), ResizeMode::Squash);
+        assert_eq!(ResizeMode::FitLongest.as_str(), "fit-longest");
     }
 }

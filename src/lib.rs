@@ -85,6 +85,7 @@ pub mod meta;
 mod ocr;
 #[cfg(feature = "presentation")]
 mod overlay;
+mod resize;
 #[cfg(feature = "ingestion")]
 pub mod sink;
 // `video` stays declared unconditionally: its `meta` submodule defines the

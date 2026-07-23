@@ -21,6 +21,7 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
 use super::meta::CropOriginMeta;
+use crate::resize::{self, ResizeMode};
 
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
@@ -652,35 +653,6 @@ impl EdgeImpulseCrop {
 
 // ─── Resize policy ───────────────────────────────────────────────────────────
 
-/// How a crop is fitted to the target dimensions.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ResizeMode {
-    /// Stretch to the target, ignoring aspect ratio (legacy behavior).
-    Squash,
-    /// Scale preserving aspect ratio to fit within the target, then center on a
-    /// zero-padded (black) canvas. Mirrors Edge Impulse's
-    /// `EI_CLASSIFIER_RESIZE_FIT_LONGEST` preprocessing so recognizer/classifier
-    /// input matches how the model was trained.
-    FitLongest,
-}
-
-impl ResizeMode {
-    /// Parse from a property string; unknown values fall back to `Squash`.
-    fn from_property(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-            "fit-longest" | "fit" | "longest" => ResizeMode::FitLongest,
-            _ => ResizeMode::Squash,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            ResizeMode::Squash => "squash",
-            ResizeMode::FitLongest => "fit-longest",
-        }
-    }
-}
-
 /// Resize `src` RGB (`src_w`×`src_h`, tightly packed) to `dst_w`×`dst_h` using
 /// `mode`. Returns exactly `dst_w*dst_h*3` bytes. Invalid input yields a black
 /// canvas of the target size.
@@ -706,36 +678,12 @@ fn resize_rgb(
             image::imageops::resize(&img, dst_w, dst_h, FilterType::Triangle).into_raw()
         }
         ResizeMode::FitLongest => {
-            // Scale by the limiting axis, preserving aspect ratio, then center on
-            // a zero-padded canvas (Edge Impulse's FIT_LONGEST, processing.cpp).
-            let src_aspect = src_w as f32 / src_h as f32;
-            let dst_aspect = dst_w as f32 / dst_h as f32;
-            let (resize_w, resize_h) = if src_aspect > dst_aspect {
-                (
-                    dst_w,
-                    ((dst_w as f32 / src_aspect) as u32).max(1).min(dst_h),
-                )
-            } else {
-                (
-                    ((dst_h as f32 * src_aspect) as u32).max(1).min(dst_w),
-                    dst_h,
-                )
-            };
-
-            let resized =
+            // Scale by the limiting axis (aspect-preserving), then center on a
+            // zero-padded canvas — Edge Impulse's FIT_LONGEST preprocessing.
+            let (resize_w, resize_h) = resize::fit_longest_dims(src_w, src_h, dst_w, dst_h);
+            let scaled =
                 image::imageops::resize(&img, resize_w, resize_h, FilterType::Triangle).into_raw();
-
-            let start_x = (dst_w - resize_w) / 2;
-            let start_y = (dst_h - resize_h) / 2;
-            let dst_row = (dst_w as usize) * 3;
-            let src_row = (resize_w as usize) * 3;
-            let mut canvas = black();
-            for row in 0..resize_h as usize {
-                let s = row * src_row;
-                let d = (start_y as usize + row) * dst_row + (start_x as usize) * 3;
-                canvas[d..d + src_row].copy_from_slice(&resized[s..s + src_row]);
-            }
-            canvas
+            resize::pad_center(&scaled, resize_w, resize_h, dst_w, dst_h, 3)
         }
     }
 }
@@ -830,20 +778,5 @@ mod tests {
         let out = resize_rgb(&src, 48, 48, 320, 48, ResizeMode::Squash);
         assert_eq!(px(&out, 320, 0, 24), (255, 255, 255));
         assert_eq!(px(&out, 320, 315, 24), (255, 255, 255));
-    }
-
-    #[test]
-    fn resize_mode_parses_from_property_string() {
-        assert_eq!(
-            ResizeMode::from_property("fit-longest"),
-            ResizeMode::FitLongest
-        );
-        assert_eq!(
-            ResizeMode::from_property("Fit_Longest"),
-            ResizeMode::FitLongest
-        );
-        assert_eq!(ResizeMode::from_property("squash"), ResizeMode::Squash);
-        assert_eq!(ResizeMode::from_property("whatever"), ResizeMode::Squash);
-        assert_eq!(ResizeMode::FitLongest.as_str(), "fit-longest");
     }
 }

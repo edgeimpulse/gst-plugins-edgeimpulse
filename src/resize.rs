@@ -60,6 +60,20 @@ pub fn fit_longest_dims(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> (u32,
     }
 }
 
+/// Dimensions to scale a `src_w`×`src_h` image to so it *fills* `dst_w`×`dst_h`
+/// while preserving aspect ratio (FIT_SHORTEST). At least as large as the target
+/// on both axes; the overflow is meant to be center-cropped by [`crop_center`].
+pub fn fit_shortest_dims(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return (dst_w.max(1), dst_h.max(1));
+    }
+    let s = (dst_w as f32 / src_w as f32).max(dst_h as f32 / src_h as f32);
+    (
+        ((src_w as f32 * s).round() as u32).max(dst_w),
+        ((src_h as f32 * s).round() as u32).max(dst_h),
+    )
+}
+
 /// Center a `src_w`×`src_h` image (`channels` bytes/pixel, tightly packed) onto
 /// a black `dst_w`×`dst_h` canvas. Returns exactly `dst_w*dst_h*channels` bytes.
 pub fn pad_center(
@@ -142,5 +156,15 @@ mod tests {
         assert_eq!(out.len(), 16);
         assert_eq!(out[0], 0, "corner must be black");
         assert_eq!(out[4 + 1], 200, "center must be gray value");
+    }
+
+    #[test]
+    fn fit_shortest_dims_fills_and_overflows() {
+        // Equal aspect: exact fill.
+        assert_eq!(fit_shortest_dims(200, 30, 320, 48), (320, 48));
+        // Tall source: width fills, height overflows.
+        assert_eq!(fit_shortest_dims(100, 400, 320, 48), (320, 1280));
+        // Wide source: height-limited scale, width overflows target.
+        assert_eq!(fit_shortest_dims(400, 100, 320, 48), (320, 80));
     }
 }

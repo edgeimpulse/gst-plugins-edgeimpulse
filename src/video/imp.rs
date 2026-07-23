@@ -199,7 +199,7 @@
 // Include generated type names for variant-specific builds
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
-use crate::resize::{self, ResizeMode};
+use crate::resize::{self, ResizeMode, ResizeTransform};
 use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -493,26 +493,25 @@ fn resize_gray_image(
     Ok(resized.into_raw())
 }
 
-/// Helper function to scale bounding box coordinates from model resolution to original resolution
+/// Invert a model-space bounding box back to original-frame coordinates using the
+/// same [`ResizeTransform`] that fitted the input, so all resize modes stay correct.
 fn scale_bounding_box(
     x: u32,
     y: u32,
     width: u32,
     height: u32,
-    model_width: u32,
-    model_height: u32,
+    transform: &ResizeTransform,
     original_width: u32,
     original_height: u32,
 ) -> (u32, u32, u32, u32) {
-    let scale_x = original_width as f32 / model_width as f32;
-    let scale_y = original_height as f32 / model_height as f32;
-
-    let scaled_x = (x as f32 * scale_x) as u32;
-    let scaled_y = (y as f32 * scale_y) as u32;
-    let scaled_width = (width as f32 * scale_x) as u32;
-    let scaled_height = (height as f32 * scale_y) as u32;
-
-    (scaled_x, scaled_y, scaled_width, scaled_height)
+    let (x0, y0) = transform.inverse_point(x as f32, y as f32);
+    let (x1, y1) = transform.inverse_point((x + width) as f32, (y + height) as f32);
+    let clamp = |v: f32, max: u32| v.max(0.0).min(max as f32);
+    let x0 = clamp(x0, original_width);
+    let y0 = clamp(y0, original_height);
+    let x1 = clamp(x1, original_width);
+    let y1 = clamp(y1, original_height);
+    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
 impl crate::common::DebugState for VideoState {
@@ -979,6 +978,16 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     (in_map.to_vec(), width, height, 0u32)
                 };
 
+            // Single source of truth for inverting detection boxes back to the
+            // original frame — matches how the input was fitted above.
+            let bbox_transform = ResizeTransform::for_mode(
+                width,
+                height,
+                inference_width,
+                inference_height,
+                resize_mode,
+            );
+
             // Pre-allocate features vector with exact capacity
             let pixel_count = (inference_width * inference_height) as usize;
             let mut features = Vec::with_capacity(pixel_count);
@@ -1139,8 +1148,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y as u32,
                                         cell_width as u32,
                                         cell_height as u32,
-                                        inference_width,
-                                        inference_height,
+                                        &bbox_transform,
                                         width,
                                         height,
                                     )
@@ -1224,8 +1232,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y as u32,
                                         bbox_width as u32,
                                         bbox_height as u32,
-                                        inference_width,
-                                        inference_height,
+                                        &bbox_transform,
                                         width,
                                         height,
                                     )
@@ -1315,8 +1322,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y as u32,
                                         bbox_width as u32,
                                         bbox_height as u32,
-                                        inference_width,
-                                        inference_height,
+                                        &bbox_transform,
                                         width,
                                         height,
                                     )
@@ -1545,8 +1551,8 @@ impl AsMut<Option<EdgeImpulseModel>> for VideoState {
 
 #[cfg(test)]
 mod tests {
-    use super::{resize_gray_image, resize_rgb_image};
-    use crate::resize::ResizeMode;
+    use super::{resize_gray_image, resize_rgb_image, scale_bounding_box};
+    use crate::resize::{ResizeMode, ResizeTransform};
 
     // A 4x4 solid-white source fitted into an 8x4 target must be aspect-preserved
     // and centered with black zero-padding on the left/right, NOT stretched.
@@ -1609,5 +1615,36 @@ mod tests {
         let out = resize_gray_image(&src, 2, 4, 2, 2, ResizeMode::FitShortest)
             .expect("resize should work");
         assert_eq!(out, vec![200, 200, 200, 200]);
+    }
+
+    #[test]
+    fn scale_bbox_squash_matches_axis_ratio() {
+        let t = ResizeTransform::for_mode(200, 100, 100, 50, ResizeMode::Squash);
+        // model box (10,10,20,20) -> orig (20,20,40,40)
+        assert_eq!(
+            scale_bounding_box(10, 10, 20, 20, &t, 200, 100),
+            (20, 20, 40, 40)
+        );
+    }
+
+    #[test]
+    fn scale_bbox_fit_longest_removes_padding() {
+        // orig 100x60 -> model 50x50 fit-longest: s=0.5, pad_y=10. A box spanning
+        // the content band maps to the full original frame.
+        let t = ResizeTransform::for_mode(100, 60, 50, 50, ResizeMode::FitLongest);
+        assert_eq!(
+            scale_bounding_box(0, 10, 50, 30, &t, 100, 60),
+            (0, 0, 100, 60)
+        );
+    }
+
+    #[test]
+    fn scale_bbox_fit_shortest_adds_crop_offset() {
+        // orig 100x50 -> model 50x50 fit-shortest: s=1.0, crop 25px each side.
+        let t = ResizeTransform::for_mode(100, 50, 50, 50, ResizeMode::FitShortest);
+        assert_eq!(
+            scale_bounding_box(0, 0, 50, 50, &t, 100, 50),
+            (25, 0, 50, 50)
+        );
     }
 }

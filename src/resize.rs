@@ -41,6 +41,44 @@ impl ResizeMode {
     }
 }
 
+/// User-facing resize-mode selection for `edgeimpulsevideoinfer`. `Auto` defers
+/// to the model's declared mode (`ModelParameters.image_resize_mode`);
+/// `Explicit` overrides it (e.g. for testing or when metadata is wrong).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ResizeModeSetting {
+    #[default]
+    Auto,
+    Explicit(ResizeMode),
+}
+
+impl ResizeModeSetting {
+    /// Parse from a property string. `"auto"` (case-insensitive) selects `Auto`;
+    /// anything else is an explicit [`ResizeMode`].
+    pub fn from_property(s: &str) -> Self {
+        if s.trim().eq_ignore_ascii_case("auto") {
+            ResizeModeSetting::Auto
+        } else {
+            ResizeModeSetting::Explicit(ResizeMode::from_property(s))
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResizeModeSetting::Auto => "auto",
+            ResizeModeSetting::Explicit(m) => m.as_str(),
+        }
+    }
+
+    /// Resolve to a concrete [`ResizeMode`], reading the model's declared mode
+    /// string when set to `Auto`.
+    pub fn resolve(self, model_mode: &str) -> ResizeMode {
+        match self {
+            ResizeModeSetting::Auto => ResizeMode::from_property(model_mode),
+            ResizeModeSetting::Explicit(m) => m,
+        }
+    }
+}
+
 /// Dimensions to scale a `src_w`×`src_h` image to so it fits within
 /// `dst_w`×`dst_h` while preserving aspect ratio (FIT_LONGEST). The result is
 /// clamped to at least 1px and never exceeds the target on either axis.
@@ -319,5 +357,38 @@ mod tests {
             (1.0, 1.0, -25.0, 0.0)
         );
         assert_eq!(t.inverse_point(0.0, 25.0), (25.0, 25.0));
+    }
+
+    #[test]
+    fn setting_from_property_auto_and_explicit() {
+        assert_eq!(
+            ResizeModeSetting::from_property("auto"),
+            ResizeModeSetting::Auto
+        );
+        assert_eq!(
+            ResizeModeSetting::from_property("fit-shortest"),
+            ResizeModeSetting::Explicit(ResizeMode::FitShortest)
+        );
+        assert_eq!(ResizeModeSetting::Auto.as_str(), "auto");
+        assert_eq!(
+            ResizeModeSetting::Explicit(ResizeMode::FitShortest).as_str(),
+            "fit-shortest"
+        );
+    }
+
+    #[test]
+    fn setting_resolve_uses_model_mode_only_when_auto() {
+        assert_eq!(
+            ResizeModeSetting::Auto.resolve("fit-longest"),
+            ResizeMode::FitLongest
+        );
+        assert_eq!(
+            ResizeModeSetting::Auto.resolve("fit-shortest"),
+            ResizeMode::FitShortest
+        );
+        assert_eq!(
+            ResizeModeSetting::Explicit(ResizeMode::Squash).resolve("fit-longest"),
+            ResizeMode::Squash
+        );
     }
 }

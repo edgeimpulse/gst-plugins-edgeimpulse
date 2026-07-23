@@ -333,6 +333,24 @@ fn resize_rgb_image(
         ));
     }
 
+    // FitShortest: preserve aspect ratio to fill, then center-crop the overflow.
+    if mode == ResizeMode::FitShortest {
+        let (scaled_w, scaled_h) =
+            resize::fit_shortest_dims(src_width, src_height, dst_width, dst_height);
+        let img: RgbImage = ImageBuffer::from_raw(src_width, src_height, data.to_vec())
+            .ok_or("Failed to create image buffer")?;
+        let scaled = image::imageops::resize(
+            &img,
+            scaled_w,
+            scaled_h,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        return Ok(resize::crop_center(
+            &scaled, scaled_w, scaled_h, dst_width, dst_height, 3,
+        ));
+    }
+
     // Try fast resize first for simple cases
     if let Some(result) = fast_resize_rgb(data, src_width, src_height, dst_width, dst_height) {
         return Ok(result);
@@ -421,6 +439,25 @@ fn resize_gray_image(
         )
         .into_raw();
         return Ok(resize::pad_center(
+            &scaled, scaled_w, scaled_h, dst_width, dst_height, 1,
+        ));
+    }
+
+    // FitShortest: preserve aspect ratio to fill, then center-crop the overflow.
+    if mode == ResizeMode::FitShortest {
+        let (scaled_w, scaled_h) =
+            resize::fit_shortest_dims(src_width, src_height, dst_width, dst_height);
+        let img =
+            ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(src_width, src_height, data.to_vec())
+                .ok_or("Failed to create grayscale image buffer")?;
+        let scaled = image::imageops::resize(
+            &img,
+            scaled_w,
+            scaled_h,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        return Ok(resize::crop_center(
             &scaled, scaled_w, scaled_h, dst_width, dst_height, 1,
         ));
     }
@@ -1541,5 +1578,36 @@ mod tests {
         assert_eq!(out[0], 0, "left column must be black padding");
         let center = (2 * 8 + 4) as usize;
         assert_eq!(out[center], 255, "centered content must stay white");
+    }
+
+    #[test]
+    fn resize_rgb_fit_shortest_crops_instead_of_squashing() {
+        // 2x4 with the middle 2 rows white; fit-shortest to 2x2 (s=1.0) crops the
+        // top/bottom rows -> all white. A squash would blend the black rows in.
+        let mut src = vec![0u8; 2 * 4 * 3];
+        for row in 1..3usize {
+            for col in 0..2usize {
+                let i = (row * 2 + col) * 3;
+                src[i] = 255;
+                src[i + 1] = 255;
+                src[i + 2] = 255;
+            }
+        }
+        let out = resize_rgb_image(&src, 2, 4, 2, 2, ResizeMode::FitShortest)
+            .expect("resize should work");
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert!(out.iter().all(|&b| b == 255), "center rows fill the crop");
+    }
+
+    #[test]
+    fn resize_gray_fit_shortest_crops_instead_of_squashing() {
+        let mut src = vec![0u8; 2 * 4];
+        src[2] = 200; // row1
+        src[3] = 200;
+        src[4] = 200; // row2
+        src[5] = 200;
+        let out = resize_gray_image(&src, 2, 4, 2, 2, ResizeMode::FitShortest)
+            .expect("resize should work");
+        assert_eq!(out, vec![200, 200, 200, 200]);
     }
 }

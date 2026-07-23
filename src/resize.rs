@@ -17,6 +17,9 @@ pub enum ResizeMode {
     /// `EI_CLASSIFIER_RESIZE_FIT_LONGEST` preprocessing so recognizer/classifier
     /// input matches how the model was trained.
     FitLongest,
+    /// Scale preserving aspect ratio to *fill* the target, then center-crop the
+    /// overflow. Mirrors Edge Impulse's `EI_CLASSIFIER_RESIZE_FIT_SHORTEST`.
+    FitShortest,
 }
 
 impl ResizeMode {
@@ -24,6 +27,7 @@ impl ResizeMode {
     pub fn from_property(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
             "fit-longest" | "fit" | "longest" => ResizeMode::FitLongest,
+            "fit-shortest" | "shortest" => ResizeMode::FitShortest,
             _ => ResizeMode::Squash,
         }
     }
@@ -32,6 +36,7 @@ impl ResizeMode {
         match self {
             ResizeMode::Squash => "squash",
             ResizeMode::FitLongest => "fit-longest",
+            ResizeMode::FitShortest => "fit-shortest",
         }
     }
 }
@@ -220,5 +225,18 @@ mod tests {
         }
         let out = crop_center(&src, 4, 4, 2, 2, 1);
         assert_eq!(out, vec![200, 200, 200, 200]);
+    }
+
+    #[test]
+    fn from_property_parses_fit_shortest() {
+        assert_eq!(
+            ResizeMode::from_property("fit-shortest"),
+            ResizeMode::FitShortest
+        );
+        assert_eq!(
+            ResizeMode::from_property("FIT_SHORTEST"),
+            ResizeMode::FitShortest
+        );
+        assert_eq!(ResizeMode::FitShortest.as_str(), "fit-shortest");
     }
 }

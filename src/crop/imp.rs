@@ -171,8 +171,9 @@ impl ObjectImpl for EdgeImpulseCrop {
                     .blurb(
                         "How crops are fitted to target-width/target-height: \
                          'squash' stretches ignoring aspect ratio (default); \
-                         'fit-longest' preserves aspect ratio and zero-pads \
-                         (matches Edge Impulse FIT_LONGEST model preprocessing).",
+                         'fit-longest' preserves aspect ratio and zero-pads; \
+                         'fit-shortest' preserves aspect ratio and center-crops \
+                         (matching Edge Impulse model preprocessing).",
                     )
                     .default_value(Some("squash"))
                     .mutable_ready()
@@ -685,6 +686,14 @@ fn resize_rgb(
                 image::imageops::resize(&img, resize_w, resize_h, FilterType::Triangle).into_raw();
             resize::pad_center(&scaled, resize_w, resize_h, dst_w, dst_h, 3)
         }
+        ResizeMode::FitShortest => {
+            // Scale to fill (aspect-preserving), then center-crop the overflow —
+            // Edge Impulse's FIT_SHORTEST preprocessing.
+            let (resize_w, resize_h) = resize::fit_shortest_dims(src_w, src_h, dst_w, dst_h);
+            let scaled =
+                image::imageops::resize(&img, resize_w, resize_h, FilterType::Triangle).into_raw();
+            resize::crop_center(&scaled, resize_w, resize_h, dst_w, dst_h, 3)
+        }
     }
 }
 
@@ -778,5 +787,24 @@ mod tests {
         let out = resize_rgb(&src, 48, 48, 320, 48, ResizeMode::Squash);
         assert_eq!(px(&out, 320, 0, 24), (255, 255, 255));
         assert_eq!(px(&out, 320, 315, 24), (255, 255, 255));
+    }
+
+    #[test]
+    fn fit_shortest_crops_vertical_center() {
+        // 4x8 with the middle 4 rows white; fit-shortest to 4x4 (s=1.0) crops the
+        // top/bottom 2 rows, leaving an all-white 4x4 — a squash would blend grey.
+        let (w, h) = (4u32, 8u32);
+        let mut src = vec![0u8; (w * h) as usize * 3];
+        for row in 2..6usize {
+            for col in 0..4usize {
+                let i = (row * 4 + col) * 3;
+                src[i] = 255;
+                src[i + 1] = 255;
+                src[i + 2] = 255;
+            }
+        }
+        let out = resize_rgb(&src, w, h, 4, 4, ResizeMode::FitShortest);
+        assert_eq!(out.len(), 4 * 4 * 3);
+        assert!(out.iter().all(|&b| b == 255), "center band fills the crop");
     }
 }

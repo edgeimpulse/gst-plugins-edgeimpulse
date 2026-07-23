@@ -103,6 +103,36 @@ pub fn pad_center(
     canvas
 }
 
+/// Center-crop a `src_w`×`src_h` image (`channels` bytes/pixel, tightly packed,
+/// with `src_w >= dst_w` and `src_h >= dst_h`) down to `dst_w`×`dst_h`. Returns
+/// exactly `dst_w*dst_h*channels` bytes. Invalid input yields a black canvas.
+pub fn crop_center(
+    scaled: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    channels: usize,
+) -> Vec<u8> {
+    let mut out = vec![0u8; dst_w as usize * dst_h as usize * channels];
+    if dst_w == 0 || dst_h == 0 || src_w < dst_w || src_h < dst_h {
+        return out;
+    }
+    let start_x = (src_w - dst_w) / 2;
+    let start_y = (src_h - dst_h) / 2;
+    let src_row = src_w as usize * channels;
+    let dst_row = dst_w as usize * channels;
+    if scaled.len() < src_row * src_h as usize {
+        return out;
+    }
+    for row in 0..dst_h as usize {
+        let s = (start_y as usize + row) * src_row + start_x as usize * channels;
+        let d = row * dst_row;
+        out[d..d + dst_row].copy_from_slice(&scaled[s..s + dst_row]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +196,29 @@ mod tests {
         assert_eq!(fit_shortest_dims(100, 400, 320, 48), (320, 1280));
         // Wide source: height-limited scale, width overflows target.
         assert_eq!(fit_shortest_dims(400, 100, 320, 48), (320, 80));
+    }
+
+    #[test]
+    fn crop_center_rgb_takes_middle() {
+        // 4x4 with a 2x2 red center on black; crop to 2x2 -> all red.
+        let mut src = vec![0u8; 4 * 4 * 3];
+        for (r, c) in [(1usize, 1usize), (1, 2), (2, 1), (2, 2)] {
+            let i = (r * 4 + c) * 3;
+            src[i] = 255;
+        }
+        let out = crop_center(&src, 4, 4, 2, 2, 3);
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert_eq!(&out[0..3], &[255, 0, 0], "top-left of crop is red");
+        assert_eq!(&out[9..12], &[255, 0, 0], "bottom-right of crop is red");
+    }
+
+    #[test]
+    fn crop_center_gray_takes_middle() {
+        let mut src = vec![0u8; 16];
+        for (r, c) in [(1usize, 1usize), (1, 2), (2, 1), (2, 2)] {
+            src[r * 4 + c] = 200;
+        }
+        let out = crop_center(&src, 4, 4, 2, 2, 1);
+        assert_eq!(out, vec![200, 200, 200, 200]);
     }
 }

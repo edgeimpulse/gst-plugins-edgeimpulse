@@ -76,6 +76,15 @@ name = "ocr_overlay"
 path = "examples/ocr_overlay.rs"
 required-features = ["ocr", "presentation"]
 
+# `webcam_text_recognizer` drives the FFI recognizer backend
+# (`edgeimpulseocr backend=edge-impulse-recognizer`), so it needs both the FFI
+# model bindings and the OCR element. It attaches a full-frame ROI itself, so no
+# `presentation`/overlay capability is required.
+[[example]]
+name = "webcam_text_recognizer"
+path = "examples/webcam_text_recognizer.rs"
+required-features = ["ffi", "ocr"]
+
 [dev-dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }

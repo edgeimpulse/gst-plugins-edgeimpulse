@@ -199,7 +199,7 @@
 // Include generated type names for variant-specific builds
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
-use crate::resize::{self, ResizeMode, ResizeTransform};
+use crate::resize::{self, ResizeMode, ResizeModeSetting, ResizeTransform};
 use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -246,8 +246,8 @@ pub struct VideoState {
     /// Format of the input frames
     pub format: Option<VideoFormat>,
 
-    /// Resize mode used to fit input frames to the model input size
-    pub resize_mode: ResizeMode,
+    /// Resize mode setting (auto or explicit) used to fit input frames to the model input size
+    pub resize_mode_setting: ResizeModeSetting,
 
     /// Debug mode flag for FFI mode (lazy initialization)
     #[cfg(feature = "ffi")]
@@ -261,7 +261,7 @@ impl Default for VideoState {
             width: None,
             height: None,
             format: None,
-            resize_mode: ResizeMode::default(),
+            resize_mode_setting: ResizeModeSetting::default(),
             #[cfg(feature = "ffi")]
             debug_enabled: false,
         }
@@ -588,11 +588,12 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
                     .nick("Resize Mode")
                     .blurb(
                         "How frames are fitted to the model input size: \
-                         'squash' stretches ignoring aspect ratio (default); \
-                         'fit-longest' preserves aspect ratio and zero-pads \
-                         (matches Edge Impulse FIT_LONGEST model preprocessing).",
+                         'auto' (default) uses the model's declared resize mode; \
+                         'squash' stretches ignoring aspect ratio; \
+                         'fit-longest' preserves aspect ratio and zero-pads; \
+                         'fit-shortest' preserves aspect ratio and center-crops.",
                     )
-                    .default_value(Some("squash"))
+                    .default_value(Some("auto"))
                     .mutable_ready()
                     .build(),
             );
@@ -604,8 +605,8 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
     fn set_property(&self, id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         if pspec.name() == "resize-mode" {
             let mut state = self.state.lock().unwrap();
-            state.resize_mode =
-                ResizeMode::from_property(&value.get::<String>().unwrap_or_default());
+            state.resize_mode_setting =
+                ResizeModeSetting::from_property(&value.get::<String>().unwrap_or_default());
             return;
         }
         {
@@ -623,7 +624,7 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
     fn property(&self, id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         if pspec.name() == "resize-mode" {
             let state = self.state.lock().unwrap();
-            return state.resize_mode.as_str().to_value();
+            return state.resize_mode_setting.as_str().to_value();
         }
         {
             crate::common::get_common_property::<VideoState>(&self.state, id, pspec)
@@ -722,12 +723,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         // Get all state values upfront to minimize mutex lock time
-        let (width, height, format, resize_mode, model) = {
+        let (width, height, format, resize_mode_setting, model) = {
             let mut state = self.state.lock().unwrap();
             let width = state.width.unwrap_or(0);
             let height = state.height.unwrap_or(0);
             let format = state.format;
-            let resize_mode = state.resize_mode;
+            let resize_mode_setting = state.resize_mode_setting;
             let model_exists = state.model.is_some();
 
             #[cfg(feature = "ffi")]
@@ -816,7 +817,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
             };
 
-            (width, height, format, resize_mode, model)
+            (width, height, format, resize_mode_setting, model)
         };
 
         // Map the input buffer for reading (keep it mapped for inference)
@@ -868,6 +869,33 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     params.has_anomaly,
                     edge_impulse_runner::types::RunnerHelloHasAnomaly::VisualGMM
                 );
+
+            // Resolve the effective resize mode: `auto` reads the model's declared
+            // mode; an explicit property overrides it. `none`/unknown -> squash.
+            let resize_mode = resize_mode_setting.resolve(&params.image_resize_mode);
+            // Don't silently squash on unrecognized model metadata — warn so a
+            // mis-declared/unknown mode is visible (bbox inversion would otherwise
+            // be wrong with no signal).
+            if resize_mode_setting == ResizeModeSetting::Auto
+                && ResizeMode::try_from_property(&params.image_resize_mode).is_none()
+            {
+                gst::warning!(
+                    CAT,
+                    obj = self.obj(),
+                    "Model declared unrecognized resize mode '{}'; falling back to '{}'. \
+                     Set the resize-mode property explicitly if this is wrong.",
+                    params.image_resize_mode,
+                    resize_mode.as_str()
+                );
+            }
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Resize mode: setting={}, model_declared='{}', effective={}",
+                resize_mode_setting.as_str(),
+                params.image_resize_mode,
+                resize_mode.as_str()
+            );
 
             gst::debug!(
                 CAT,

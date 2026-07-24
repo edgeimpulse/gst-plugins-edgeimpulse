@@ -79,6 +79,7 @@ mod audio;
 #[cfg(feature = "inference")]
 mod common;
 mod crop;
+mod detection;
 mod filter;
 pub mod meta;
 #[cfg(feature = "ocr")]

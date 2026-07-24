@@ -1,7 +1,12 @@
-//! Shared image-resize helpers used by the crop and video-inference elements.
+//! Shared image-resize helpers used by the crop, video-inference and OCR
+//! recognizer elements.
 //!
-//! These are pure (no GStreamer or runner dependencies) so they can be used by
-//! elements that build without an inference backend (e.g. `edgeimpulsecrop`).
+//! These have no GStreamer or runner dependencies (only the `image` crate) so
+//! they can be used by elements that build without an inference backend (e.g.
+//! `edgeimpulsecrop`).
+
+use image::imageops::FilterType;
+use image::{ImageBuffer, RgbImage};
 
 /// How an image is fitted to target dimensions during preprocessing.
 ///
@@ -192,6 +197,53 @@ pub fn crop_center(
     out
 }
 
+/// Resize `src` RGB (`src_w`×`src_h`, tightly packed) to `dst_w`×`dst_h` using
+/// `mode`. Returns exactly `dst_w*dst_h*3` bytes. Invalid input yields a black
+/// canvas of the target size.
+///
+/// Shared by `edgeimpulsecrop` (crop-then-resize) and the `edgeimpulseocr`
+/// recognizer's compose mode (resize each detector region to the model input),
+/// so both preprocess pixels identically to how the model was trained.
+pub fn resize_rgb(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    mode: ResizeMode,
+) -> Vec<u8> {
+    let black = || vec![0u8; (dst_w as usize) * (dst_h as usize) * 3];
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return black();
+    }
+    let img: RgbImage = match ImageBuffer::from_raw(src_w, src_h, src.to_vec()) {
+        Some(i) => i,
+        None => return black(),
+    };
+
+    match mode {
+        ResizeMode::Squash => {
+            image::imageops::resize(&img, dst_w, dst_h, FilterType::Triangle).into_raw()
+        }
+        ResizeMode::FitLongest => {
+            // Scale by the limiting axis (aspect-preserving), then center on a
+            // zero-padded canvas — Edge Impulse's FIT_LONGEST preprocessing.
+            let (resize_w, resize_h) = fit_longest_dims(src_w, src_h, dst_w, dst_h);
+            let scaled =
+                image::imageops::resize(&img, resize_w, resize_h, FilterType::Triangle).into_raw();
+            pad_center(&scaled, resize_w, resize_h, dst_w, dst_h, 3)
+        }
+        ResizeMode::FitShortest => {
+            // Scale to fill (aspect-preserving), then center-crop the overflow —
+            // Edge Impulse's FIT_SHORTEST preprocessing.
+            let (resize_w, resize_h) = fit_shortest_dims(src_w, src_h, dst_w, dst_h);
+            let scaled =
+                image::imageops::resize(&img, resize_w, resize_h, FilterType::Triangle).into_raw();
+            crop_center(&scaled, resize_w, resize_h, dst_w, dst_h, 3)
+        }
+    }
+}
+
 /// Forward mapping from original-image pixel coordinates to model-input pixel
 /// coordinates for a [`ResizeMode`]: `model = orig * scale + offset`. Primarily
 /// used to invert detection bounding boxes back to original-image space.
@@ -259,6 +311,113 @@ impl ResizeTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn solid(w: u32, h: u32, rgb: (u8, u8, u8)) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..(w * h) {
+            v.push(rgb.0);
+            v.push(rgb.1);
+            v.push(rgb.2);
+        }
+        v
+    }
+
+    fn px(buf: &[u8], w: u32, x: u32, y: u32) -> (u8, u8, u8) {
+        let o = ((y * w + x) * 3) as usize;
+        (buf[o], buf[o + 1], buf[o + 2])
+    }
+
+    #[test]
+    fn resize_rgb_fit_longest_pads_narrow_source_with_black_sides() {
+        // 48x48 white (aspect 1) into 320x48 (aspect ~6.67): limited by height,
+        // resized to 48x48 centered at x=136, black on both sides.
+        let src = solid(48, 48, (255, 255, 255));
+        let out = resize_rgb(&src, 48, 48, 320, 48, ResizeMode::FitLongest);
+        assert_eq!(out.len(), 320 * 48 * 3);
+        assert_eq!(
+            px(&out, 320, 0, 24),
+            (0, 0, 0),
+            "left padding must be black"
+        );
+        assert_eq!(
+            px(&out, 320, 160, 24),
+            (255, 255, 255),
+            "center must hold the image"
+        );
+        assert_eq!(
+            px(&out, 320, 315, 24),
+            (0, 0, 0),
+            "right padding must be black"
+        );
+    }
+
+    #[test]
+    fn resize_rgb_fit_longest_pads_wide_source_with_black_top_bottom() {
+        // 640x48 white (aspect ~13.3) into 320x48: limited by width, resized to
+        // 320x24 centered at y=12, black top and bottom.
+        let src = solid(640, 48, (255, 255, 255));
+        let out = resize_rgb(&src, 640, 48, 320, 48, ResizeMode::FitLongest);
+        assert_eq!(
+            px(&out, 320, 160, 0),
+            (0, 0, 0),
+            "top padding must be black"
+        );
+        assert_eq!(
+            px(&out, 320, 160, 24),
+            (255, 255, 255),
+            "center must hold the image"
+        );
+        assert_eq!(
+            px(&out, 320, 160, 47),
+            (0, 0, 0),
+            "bottom padding must be black"
+        );
+    }
+
+    #[test]
+    fn resize_rgb_fit_longest_matching_aspect_fills_without_padding() {
+        // 640x96 (aspect ~6.67) into 320x48 (same aspect): fills entirely.
+        let src = solid(640, 96, (200, 100, 50));
+        let out = resize_rgb(&src, 640, 96, 320, 48, ResizeMode::FitLongest);
+        assert_eq!(
+            px(&out, 320, 0, 24),
+            (200, 100, 50),
+            "left edge filled (no padding)"
+        );
+        assert_eq!(
+            px(&out, 320, 319, 24),
+            (200, 100, 50),
+            "right edge filled (no padding)"
+        );
+    }
+
+    #[test]
+    fn resize_rgb_squash_fills_entire_target_ignoring_aspect() {
+        // Squash stretches a square to fill the wide target — no black padding.
+        let src = solid(48, 48, (255, 255, 255));
+        let out = resize_rgb(&src, 48, 48, 320, 48, ResizeMode::Squash);
+        assert_eq!(px(&out, 320, 0, 24), (255, 255, 255));
+        assert_eq!(px(&out, 320, 315, 24), (255, 255, 255));
+    }
+
+    #[test]
+    fn resize_rgb_fit_shortest_crops_vertical_center() {
+        // 4x8 with the middle 4 rows white; fit-shortest to 4x4 (s=1.0) crops the
+        // top/bottom 2 rows, leaving an all-white 4x4 — a squash would blend grey.
+        let (w, h) = (4u32, 8u32);
+        let mut src = vec![0u8; (w * h) as usize * 3];
+        for row in 2..6usize {
+            for col in 0..4usize {
+                let i = (row * 4 + col) * 3;
+                src[i] = 255;
+                src[i + 1] = 255;
+                src[i + 2] = 255;
+            }
+        }
+        let out = resize_rgb(&src, w, h, 4, 4, ResizeMode::FitShortest);
+        assert_eq!(out.len(), 4 * 4 * 3);
+        assert!(out.iter().all(|&b| b == 255), "center band fills the crop");
+    }
 
     #[test]
     fn from_property_parses_fit_longest_and_defaults_to_squash() {

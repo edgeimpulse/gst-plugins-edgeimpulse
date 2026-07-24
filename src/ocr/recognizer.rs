@@ -13,6 +13,13 @@ pub trait LogitSource {
     /// Returns `(logits, num_classes)` or an error string. `rgb` is tightly
     /// packed 24-bit RGB, row-major, `width * height * 3` bytes.
     fn logits(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<(Vec<f32>, usize), String>;
+
+    /// Model input geometry as `(width, height, resize_mode)` when known, used
+    /// by compose mode to resize each detector region to the exact model input
+    /// before recognition. Sources without a real model (fakes) return `None`.
+    fn model_input(&self) -> Option<(u32, u32, String)> {
+        None
+    }
 }
 
 /// Recognizer configuration + decode pipeline. Owns the charset/dictionary and
@@ -53,6 +60,12 @@ impl<S: LogitSource> Recognizer<S> {
             return Ok(None);
         }
         Ok(Some((text, decoded.confidence)))
+    }
+
+    /// Model input geometry `(width, height, resize_mode)` when the underlying
+    /// source exposes it (FFI-backed sources do; fakes return `None`).
+    pub fn model_input(&self) -> Option<(u32, u32, String)> {
+        self.source.model_input()
     }
 }
 
@@ -97,6 +110,30 @@ mod tests {
         fn logits(&mut self, _rgb: &[u8], _w: u32, _h: u32) -> Result<(Vec<f32>, usize), String> {
             Ok((self.logits.clone(), self.num_classes))
         }
+    }
+
+    #[test]
+    fn model_input_defaults_none_and_delegates_to_source() {
+        // Fake with no model geometry -> Recognizer reports None.
+        let bare = FakeSource {
+            logits: vec![],
+            num_classes: 3,
+        };
+        let rec = Recognizer::new(bare, "_AB", "", Normalize::None);
+        assert_eq!(rec.model_input(), None);
+
+        // A source that exposes geometry -> Recognizer delegates it verbatim.
+        struct SizedSource;
+        impl LogitSource for SizedSource {
+            fn logits(&mut self, _: &[u8], _: u32, _: u32) -> Result<(Vec<f32>, usize), String> {
+                Ok((vec![], 0))
+            }
+            fn model_input(&self) -> Option<(u32, u32, String)> {
+                Some((320, 48, "fit-longest".into()))
+            }
+        }
+        let rec = Recognizer::new(SizedSource, "_AB", "", Normalize::None);
+        assert_eq!(rec.model_input(), Some((320, 48, "fit-longest".into())));
     }
 
     #[test]
@@ -299,6 +336,15 @@ pub mod ffi {
                 .map_err(|e| format!("recognizer inference failed: {e:?}"))?;
 
             logits_from_freeform(outputs, self.num_classes)
+        }
+
+        fn model_input(&self) -> Option<(u32, u32, String)> {
+            let params = self.model.parameters().ok()?;
+            Some((
+                params.image_input_width,
+                params.image_input_height,
+                params.image_resize_mode.clone(),
+            ))
         }
     }
 }

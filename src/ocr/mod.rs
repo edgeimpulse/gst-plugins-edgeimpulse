@@ -5,6 +5,7 @@
 //! it, and optionally posts an `ocr` element message on the bus.
 
 mod backend;
+mod compose;
 mod ctc;
 mod decode;
 mod imp;

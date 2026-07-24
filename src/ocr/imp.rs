@@ -69,6 +69,15 @@ pub struct Settings {
     pub charset: String,
     pub dictionary: String,
     pub normalize: String,
+    /// Compose mode: run the recognizer in-place on the full frame, reading the
+    /// detector's ROI metas, recognizing each region, and rewriting the frame's
+    /// metas with the recognized text (so a downstream overlay shows the text).
+    /// `false` = classic crop-fed mode (expects `CropOriginMeta` buffers).
+    pub compose: bool,
+    /// Resize mode used to fit each detector region to the model input in
+    /// compose mode. `auto` uses the model's declared mode; an explicit
+    /// `squash`/`fit-longest`/`fit-shortest` overrides it.
+    pub resize_mode: String,
 }
 
 impl Default for Settings {
@@ -90,6 +99,8 @@ impl Default for Settings {
             charset: DEFAULT_RECOGNIZER_CHARSET.to_string(),
             dictionary: String::new(),
             normalize: "none".into(),
+            compose: false,
+            resize_mode: "auto".into(),
         }
     }
 }
@@ -131,6 +142,14 @@ struct RecognizerState {
     current_pts: Option<u64>,
     seen: std::collections::HashSet<u64>,
     frame_index: u64,
+    /// Recognizer model input geometry, queried once at start. Compose mode
+    /// resizes each detector region to exactly these dimensions before
+    /// recognition. `(0, 0)` when no FFI model is loaded (compose is a no-op).
+    model_input_w: u32,
+    model_input_h: u32,
+    /// Resolved resize mode (the model's declared mode, or the `resize-mode`
+    /// property override) used to fit each region to the model input.
+    resize_mode: crate::resize::ResizeMode,
 }
 
 #[derive(Default)]
@@ -306,6 +325,31 @@ impl ObjectImpl for EdgeImpulseOcr {
                     .default_value(Some("none"))
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoolean::builder("compose")
+                    .nick("Compose")
+                    .blurb(
+                        "Run the recognizer in-place on the full frame: read the \
+                         upstream detector's region-of-interest metas, recognize \
+                         each region, and rewrite the frame's metas with the \
+                         recognized text so a downstream overlay renders it. When \
+                         false, the element expects pre-cropped buffers carrying \
+                         a CropOriginMeta (classic crop-fed cascade). Read once at \
+                         start; recognizer backend only.",
+                    )
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("resize-mode")
+                    .nick("Resize Mode")
+                    .blurb(
+                        "How to fit each detector region to the recognizer model \
+                         input in compose mode: 'auto' uses the model's declared \
+                         resize mode, or override with 'squash', 'fit-longest', or \
+                         'fit-shortest'. Read once at start.",
+                    )
+                    .default_value(Some("auto"))
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -330,6 +374,8 @@ impl ObjectImpl for EdgeImpulseOcr {
             "charset" => settings.charset = value.get().unwrap_or_default(),
             "dictionary" => settings.dictionary = value.get().unwrap_or_default(),
             "normalize" => settings.normalize = value.get().unwrap_or_default(),
+            "compose" => settings.compose = value.get().unwrap(),
+            "resize-mode" => settings.resize_mode = value.get().unwrap_or_default(),
             _ => unimplemented!(),
         }
     }
@@ -353,6 +399,8 @@ impl ObjectImpl for EdgeImpulseOcr {
             "charset" => settings.charset.to_value(),
             "dictionary" => settings.dictionary.to_value(),
             "normalize" => settings.normalize.to_value(),
+            "compose" => settings.compose.to_value(),
+            "resize-mode" => settings.resize_mode.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -525,21 +573,7 @@ impl EdgeImpulseOcr {
         }
 
         // Map the crop buffer to tightly-packed RGB (mirror the worker path).
-        let (rgb, crop_w, crop_h) = {
-            let frame = VideoFrameRef::from_buffer_ref_readable(buf, &info)
-                .map_err(|_| gst::FlowError::Error)?;
-            let width = frame.width();
-            let height = frame.height();
-            let stride = frame.plane_stride()[0] as usize;
-            let row_bytes = width as usize * 3;
-            let src = frame.plane_data(0).map_err(|_| gst::FlowError::Error)?;
-            let mut rgb = Vec::with_capacity(row_bytes * height as usize);
-            for row in 0..height as usize {
-                let start = row * stride;
-                rgb.extend_from_slice(&src[start..start + row_bytes]);
-            }
-            (rgb, width, height)
-        };
+        let (rgb, crop_w, crop_h) = self.frame_to_rgb(buf, &info)?;
 
         // Inference (FFI-only). Without the ffi model there is no read. A
         // transient inference failure degrades gracefully (log + skip this
@@ -588,6 +622,147 @@ impl EdgeImpulseOcr {
         }
         Ok(gst::FlowSuccess::Ok)
     }
+
+    /// Copy a buffer's single RGB plane into a tightly-packed `Vec<u8>`,
+    /// stripping any row padding. Returns `(rgb, width, height)`.
+    fn frame_to_rgb(
+        &self,
+        buf: &gst::BufferRef,
+        info: &gst_video::VideoInfo,
+    ) -> Result<(Vec<u8>, u32, u32), gst::FlowError> {
+        let frame = VideoFrameRef::from_buffer_ref_readable(buf, info)
+            .map_err(|_| gst::FlowError::Error)?;
+        let width = frame.width();
+        let height = frame.height();
+        let stride = frame.plane_stride()[0] as usize;
+        let row_bytes = width as usize * 3;
+        let src = frame.plane_data(0).map_err(|_| gst::FlowError::Error)?;
+        let mut rgb = Vec::with_capacity(row_bytes * height as usize);
+        for row in 0..height as usize {
+            let start = row * stride;
+            rgb.extend_from_slice(&src[start..start + row_bytes]);
+        }
+        Ok((rgb, width, height))
+    }
+
+    /// Compose mode: recognize each detector region in place on the full frame.
+    ///
+    /// Reads the standard `VideoRegionOfInterestMeta` boxes the upstream
+    /// detector attached, crops and resizes each to the recognizer model input,
+    /// recognizes the text, then rewrites the frame's metas so a downstream
+    /// overlay renders the recognized text instead of the detector's generic
+    /// labels. Unlike the crop-fed path this needs no `CropOriginMeta`, so it
+    /// works across plugin variants (the ROI meta is a shared GType).
+    fn transform_ip_recognizer_compose(
+        &self,
+        buf: &mut gst::BufferRef,
+        min_confidence: f64,
+        max_text_length: u32,
+        post_message: bool,
+        interval: u32,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        let text_stabilization = self.settings.lock().unwrap().text_stabilization;
+
+        let info = self.info.lock().unwrap().clone();
+        let Some(info) = info else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+        let pts_ns = buf.pts().map(|t| t.nseconds()).unwrap_or(0);
+
+        // Snapshot the full frame as packed RGB before mutating metas.
+        let (frame_rgb, frame_w, frame_h) = self.frame_to_rgb(buf, &info)?;
+
+        let mut guard = self.rec_state.lock().unwrap();
+        let Some(rec) = guard.as_mut() else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        // Each compose buffer is one full frame: age the previous frame's tracks,
+        // reset the seen-set, and advance the index once per call.
+        if rec.current_pts.is_some() {
+            rec.stabilizer.end_frame(&rec.seen);
+        }
+        rec.seen.clear();
+        rec.frame_index = rec.frame_index.wrapping_add(1);
+        rec.current_pts = Some(pts_ns);
+        let due = rec.frame_index % (interval.max(1) as u64) == 0;
+
+        let model_w = rec.model_input_w;
+        let model_h = rec.model_input_h;
+        let resize_mode = rec.resize_mode;
+
+        // Recognize each detector region, rewriting the frame's ROI metas so the
+        // overlay shows text. On non-due frames recognition is skipped but the
+        // detector boxes are still removed and (when stabilizing) the last
+        // consolidated text is re-attached, so the overlay never flashes the
+        // detector's labels.
+        let lines = crate::ocr::compose::recognize_and_rewrite(
+            buf,
+            min_confidence as f32,
+            max_text_length as usize,
+            |det| {
+                rec.seen.insert(det.object_id);
+
+                // Recognize this region (due frames only). Mirrors the crop-fed
+                // path: observe every read, then output the stabilized vote when
+                // stabilizing, else the raw read.
+                let read: Option<(String, f32)> = if due && model_w > 0 && model_h > 0 {
+                    let (crop, cw, ch) = crate::ocr::compose::crop_region(
+                        &frame_rgb, frame_w, frame_h, det.x, det.y, det.width, det.height,
+                    );
+                    if cw > 0 && ch > 0 {
+                        let resized =
+                            crate::resize::resize_rgb(&crop, cw, ch, model_w, model_h, resize_mode);
+                        #[cfg(feature = "ffi")]
+                        let r: Option<(String, f32)> =
+                            match rec.recognizer.recognize_text(&resized, model_w, model_h) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    gst::warning!(
+                                        CAT,
+                                        obj = self.obj(),
+                                        "recognizer inference failed: {e}"
+                                    );
+                                    None
+                                }
+                            };
+                        #[cfg(not(feature = "ffi"))]
+                        let r: Option<(String, f32)> = {
+                            let _ = &resized;
+                            None
+                        };
+                        r
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((text, conf)) = read.clone() {
+                    rec.stabilizer.observe(det.object_id, text, conf);
+                }
+
+                if text_stabilization {
+                    rec.stabilizer.consolidated(det.object_id)
+                } else {
+                    read
+                }
+            },
+        );
+
+        if post_message {
+            for l in &lines {
+                let s = build_ocr_message(l, pts_ms);
+                let _ = self
+                    .obj()
+                    .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+            }
+        }
+        Ok(gst::FlowSuccess::Ok)
+    }
 }
 
 impl BaseTransformImpl for EdgeImpulseOcr {
@@ -624,6 +799,19 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                     crate::ocr::normalize::Normalize::parse(&settings.normalize),
                 )
             };
+            // Query the model input geometry (compose resizes each detector
+            // region to it) and resolve the resize mode: `auto` follows the
+            // model's declared mode, an explicit property value overrides it.
+            #[cfg(feature = "ffi")]
+            let (model_input_w, model_input_h, model_mode) =
+                recognizer
+                    .model_input()
+                    .unwrap_or((0, 0, "squash".to_string()));
+            #[cfg(not(feature = "ffi"))]
+            let (model_input_w, model_input_h, model_mode) = (0u32, 0u32, "squash".to_string());
+            let resize_mode =
+                crate::resize::ResizeModeSetting::from_property(&settings.resize_mode)
+                    .resolve(&model_mode);
             *self.rec_state.lock().unwrap() = Some(RecognizerState {
                 #[cfg(feature = "ffi")]
                 recognizer,
@@ -631,6 +819,9 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                 current_pts: None,
                 seen: std::collections::HashSet::new(),
                 frame_index: 0,
+                model_input_w,
+                model_input_h,
+                resize_mode,
             });
             return self.parent_start();
         }
@@ -735,7 +926,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
     }
 
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let (backend, interval, min_confidence, max_text_length, post_message) = {
+        let (backend, interval, min_confidence, max_text_length, post_message, compose) = {
             let settings = self.settings.lock().unwrap();
             (
                 settings.backend.clone(),
@@ -746,6 +937,7 @@ impl BaseTransformImpl for EdgeImpulseOcr {
                 settings.min_confidence,
                 settings.max_text_length,
                 settings.post_message,
+                settings.compose,
             )
         };
 
@@ -762,6 +954,15 @@ impl BaseTransformImpl for EdgeImpulseOcr {
         }
 
         if matches!(Backend::parse(&backend), Backend::EdgeImpulseRecognizer) {
+            if compose {
+                return self.transform_ip_recognizer_compose(
+                    buf,
+                    min_confidence,
+                    max_text_length,
+                    post_message,
+                    interval,
+                );
+            }
             return self.transform_ip_recognizer(
                 buf,
                 min_confidence,
@@ -935,5 +1136,18 @@ mod recognizer_tests {
         assert_eq!(line.text, "ABC123");
         assert_eq!((line.x, line.y, line.w, line.h), (40u32, 60, 120, 32));
         assert!((line.confidence - 0.87).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compose_settings_default_off_with_auto_resize() {
+        let settings = Settings::default();
+        assert!(
+            !settings.compose,
+            "compose must default to false (classic crop-fed cascade)"
+        );
+        assert_eq!(
+            settings.resize_mode, "auto",
+            "resize-mode must default to 'auto' (follow the model's declared mode)"
+        );
     }
 }

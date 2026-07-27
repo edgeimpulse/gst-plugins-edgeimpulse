@@ -15,12 +15,12 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
-use image::imageops::FilterType;
-use image::{ImageBuffer, RgbImage};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
 use super::meta::CropOriginMeta;
+use crate::detection::{extract_detections, Detection};
+use crate::resize::{resize_rgb, ResizeMode};
 
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
@@ -38,18 +38,6 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
-// ─── Detection extracted from ROI metadata ───────────────────────────────────
-
-struct Detection {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    label: String,
-    confidence: f64,
-    object_id: u64,
-}
-
 // ─── Element state ───────────────────────────────────────────────────────────
 
 struct State {
@@ -59,6 +47,8 @@ struct State {
     target_width: i32,
     /// Target height for output crops (0 = use crop's natural size)
     target_height: i32,
+    /// How crops are fitted to the target dimensions
+    resize_mode: ResizeMode,
     /// Input video info (set during caps negotiation)
     video_info: Option<gst_video::VideoInfo>,
     /// Whether we've set output caps yet
@@ -73,6 +63,7 @@ impl Default for State {
             padding: 0,
             target_width: 0,
             target_height: 0,
+            resize_mode: ResizeMode::Squash,
             video_info: None,
             src_caps_set: false,
             pending_segment: None,
@@ -162,6 +153,18 @@ impl ObjectImpl for EdgeImpulseCrop {
                     .default_value(0)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecString::builder("resize-mode")
+                    .nick("Resize Mode")
+                    .blurb(
+                        "How crops are fitted to target-width/target-height: \
+                         'squash' stretches ignoring aspect ratio (default); \
+                         'fit-longest' preserves aspect ratio and zero-pads; \
+                         'fit-shortest' preserves aspect ratio and center-crops \
+                         (matching Edge Impulse model preprocessing).",
+                    )
+                    .default_value(Some("squash"))
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -173,6 +176,10 @@ impl ObjectImpl for EdgeImpulseCrop {
             "padding" => state.padding = value.get::<i32>().unwrap_or(0),
             "target-width" => state.target_width = value.get::<i32>().unwrap_or(0),
             "target-height" => state.target_height = value.get::<i32>().unwrap_or(0),
+            "resize-mode" => {
+                state.resize_mode =
+                    ResizeMode::from_property(&value.get::<String>().unwrap_or_default())
+            }
             _ => unimplemented!(),
         }
     }
@@ -183,6 +190,7 @@ impl ObjectImpl for EdgeImpulseCrop {
             "padding" => state.padding.to_value(),
             "target-width" => state.target_width.to_value(),
             "target-height" => state.target_height.to_value(),
+            "resize-mode" => state.resize_mode.as_str().to_value(),
             _ => unimplemented!(),
         }
     }
@@ -297,13 +305,14 @@ impl EdgeImpulseCrop {
         let padding = state.padding;
         let target_width = state.target_width;
         let target_height = state.target_height;
+        let resize_mode = state.resize_mode;
         drop(state);
 
         let frame_width = video_info.width();
         let frame_height = video_info.height();
 
         // Extract detections from ROI metadata
-        let detections = self.extract_detections(&buffer);
+        let detections = extract_detections(&buffer);
 
         // No detections → pass full frame through unchanged
         if detections.is_empty() {
@@ -318,6 +327,7 @@ impl EdgeImpulseCrop {
                     frame_height,
                     target_width as u32,
                     target_height as u32,
+                    resize_mode,
                 )?;
                 return self.src_pad.push(resized);
             }
@@ -342,6 +352,7 @@ impl EdgeImpulseCrop {
                 padding,
                 target_width,
                 target_height,
+                resize_mode,
             );
             match result {
                 Ok(gst::FlowSuccess::Ok) => {}
@@ -362,50 +373,8 @@ impl EdgeImpulseCrop {
         Ok(gst::FlowSuccess::Ok)
     }
 
-    /// Extract detection bounding boxes from ROI metadata on the buffer.
-    fn extract_detections(&self, buffer: &gst::Buffer) -> Vec<Detection> {
-        let mut detections = Vec::new();
-
-        for roi in buffer.iter_meta::<gst_video::VideoRegionOfInterestMeta>() {
-            let meta = unsafe { &*roi.as_ptr() };
-            let x = meta.x;
-            let y = meta.y;
-            let width = meta.w;
-            let height = meta.h;
-
-            let mut label = String::new();
-            let mut confidence = 0.0_f64;
-            let mut object_id = 0_u64;
-
-            for param in roi.params() {
-                if param.name() == "detection" {
-                    if let Ok(l) = param.get::<&str>("label") {
-                        label = l.to_string();
-                    }
-                    if let Ok(c) = param.get::<f64>("confidence") {
-                        confidence = c;
-                    }
-                    if let Ok(id) = param.get::<u64>("object_id") {
-                        object_id = id;
-                    }
-                }
-            }
-
-            detections.push(Detection {
-                x,
-                y,
-                width,
-                height,
-                label,
-                confidence,
-                object_id,
-            });
-        }
-
-        detections
-    }
-
     /// Create a cropped buffer for a single detection and push it downstream.
+    #[allow(clippy::too_many_arguments)]
     fn push_crop(
         &self,
         buffer: &gst::Buffer,
@@ -414,6 +383,7 @@ impl EdgeImpulseCrop {
         padding: i32,
         target_width: i32,
         target_height: i32,
+        resize_mode: ResizeMode,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         let frame_w = video_info.width() as i32;
         let frame_h = video_info.height() as i32;
@@ -473,27 +443,15 @@ impl EdgeImpulseCrop {
             && target_height > 0
             && (crop_w != target_width as u32 || crop_h != target_height as u32)
         {
-            // Resize to target dimensions
-            let img: RgbImage =
-                ImageBuffer::from_raw(crop_w, crop_h, crop_data).ok_or_else(|| {
-                    gst::error!(
-                        CAT,
-                        obj = self.obj(),
-                        "Failed to create image from crop data"
-                    );
-                    gst::FlowError::Error
-                })?;
-            let resized = image::imageops::resize(
-                &img,
+            let out = resize_rgb(
+                &crop_data,
+                crop_w,
+                crop_h,
                 target_width as u32,
                 target_height as u32,
-                FilterType::Triangle,
+                resize_mode,
             );
-            (
-                target_width as u32,
-                target_height as u32,
-                resized.into_raw(),
-            )
+            (target_width as u32, target_height as u32, out)
         } else {
             (crop_w, crop_h, crop_data)
         };
@@ -546,6 +504,7 @@ impl EdgeImpulseCrop {
     }
 
     /// Resize a full buffer to target dimensions.
+    #[allow(clippy::too_many_arguments)]
     fn resize_buffer(
         &self,
         buffer: &gst::Buffer,
@@ -554,6 +513,7 @@ impl EdgeImpulseCrop {
         frame_h: u32,
         target_w: u32,
         target_h: u32,
+        resize_mode: ResizeMode,
     ) -> Result<gst::Buffer, gst::FlowError> {
         let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer.as_ref(), video_info)
             .map_err(|_| gst::FlowError::Error)?;
@@ -573,11 +533,16 @@ impl EdgeImpulseCrop {
         }
         drop(frame);
 
-        let img: RgbImage =
-            ImageBuffer::from_raw(frame_w, frame_h, contiguous).ok_or(gst::FlowError::Error)?;
-        let resized = image::imageops::resize(&img, target_w, target_h, FilterType::Triangle);
+        let resized = resize_rgb(
+            &contiguous,
+            frame_w,
+            frame_h,
+            target_w,
+            target_h,
+            resize_mode,
+        );
 
-        let mut out_buf = gst::Buffer::from_mut_slice(resized.into_raw());
+        let mut out_buf = gst::Buffer::from_mut_slice(resized);
         {
             let out_ref = out_buf.make_mut();
             out_ref.set_pts(buffer.pts());

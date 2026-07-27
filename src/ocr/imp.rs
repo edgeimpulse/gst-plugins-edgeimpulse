@@ -1,0 +1,1153 @@
+use gstreamer as gst;
+use gstreamer::glib;
+use gstreamer::prelude::*;
+use gstreamer::subclass::prelude::*;
+use gstreamer_base as gst_base;
+use gstreamer_base::subclass::prelude::*;
+use gstreamer_video as gst_video;
+use gstreamer_video::VideoFrameExt;
+use gstreamer_video::VideoFrameRef;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+use crate::ocr::backend::{Backend, NoopBackend, OcrBackend, OcrLine};
+use crate::ocr::shaping::{attach_results, build_ocr_message, filter_and_truncate};
+use crate::ocr::stabilize::{extrapolate_box, passthrough, stabilize, tracker_dt, StabilizedLine};
+use crate::tracker::{KalmanConfig, Tracker, TrackerConfig};
+
+include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
+
+static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    gst::DebugCategory::new(
+        "edgeimpulseocr",
+        gst::DebugColorFlags::empty(),
+        Some("Edge Impulse OCR"),
+    )
+});
+
+/// IoU threshold for associating OCR detections across recognitions when text
+/// stabilization is enabled. Hardcoded in Phase 1; may become a property later.
+const STABILIZATION_IOU_THRESHOLD: f32 = 0.3;
+
+/// Cap on how far (seconds) a box is extrapolated past its recognition PTS, so
+/// a stalled worker cannot fling a stale box across the frame.
+const EXTRAPOLATION_DT_CAP_S: f32 = 0.5;
+
+/// Upper bound (seconds) on the tracker's per-recognition time step, so a PTS
+/// discontinuity (a missing timestamp then recovery, or a seek) cannot advance
+/// the Kalman filter by a huge dt and fling a predicted box across the frame.
+const MAX_TRACKER_DT_S: f32 = 1.0;
+
+/// Default CTC charset for the two-stage recognizer backend. Matches the
+/// pretrained PaddleOCR English recognition head deployed from Edge Impulse
+/// Studio: index 0 is the CTC blank (U+E000 placeholder), indices 1..=436 are
+/// the PaddleOCR English dictionary, and index 437 is the space
+/// (`use_space_char`). It is overridable via the `charset` property, but the
+/// recognizer requires `charset.len()` to equal the model's class count, so
+/// solutions that only read a subset (e.g. uppercase alphanumeric codes) should
+/// keep this default and set `normalize` rather than shrink the charset.
+const DEFAULT_RECOGNIZER_CHARSET: &str = include_str!("paddleocr_recognizer_charset.txt");
+
+#[derive(Debug, Clone)]
+pub struct Settings {
+    pub backend: String,
+    pub detection_model: String,
+    pub recognition_model: String,
+    pub min_confidence: f64,
+    pub max_text_length: u32,
+    pub post_message: bool,
+    pub interval: u32,
+    pub text_stabilization: bool,
+    pub stabilization_window: u32,
+    pub stabilization_min_hits: u32,
+    pub stabilization_max_misses: u32,
+    pub box_prediction: bool,
+    pub box_responsiveness: f64,
+    pub charset: String,
+    pub dictionary: String,
+    pub normalize: String,
+    /// Compose mode: run the recognizer in-place on the full frame, reading the
+    /// detector's ROI metas, recognizing each region, and rewriting the frame's
+    /// metas with the recognized text (so a downstream overlay shows the text).
+    /// `false` = classic crop-fed mode (expects `CropOriginMeta` buffers).
+    pub compose: bool,
+    /// Resize mode used to fit each detector region to the model input in
+    /// compose mode. `auto` uses the model's declared mode; an explicit
+    /// `squash`/`fit-longest`/`fit-shortest` overrides it.
+    pub resize_mode: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            backend: "ocrs".into(),
+            detection_model: String::new(),
+            recognition_model: String::new(),
+            min_confidence: 0.0,
+            max_text_length: 256,
+            post_message: true,
+            interval: 1,
+            text_stabilization: false,
+            stabilization_window: 10,
+            stabilization_min_hits: 2,
+            stabilization_max_misses: 5,
+            box_prediction: false,
+            box_responsiveness: 0.5,
+            charset: DEFAULT_RECOGNIZER_CHARSET.to_string(),
+            dictionary: String::new(),
+            normalize: "none".into(),
+            compose: false,
+            resize_mode: "auto".into(),
+        }
+    }
+}
+
+/// Recognition results shared from the worker thread to the streaming thread.
+/// `generation` bumps on every new result so the streaming thread can post an
+/// `ocr` message once per recognition rather than once per output frame.
+#[derive(Default)]
+struct Latest {
+    generation: u64,
+    lines: Vec<StabilizedLine>,
+    /// PTS (ms) of the frame these lines were recognized from, carried so
+    /// `ocr` messages timestamp the recognized frame, not the output frame.
+    pts_ms: i64,
+}
+
+/// A frame handed to the worker for recognition.
+struct FrameJob {
+    rgb: Vec<u8>,
+    width: u32,
+    height: u32,
+    pts_ms: i64,
+}
+
+struct State {
+    frame_tx: SyncSender<FrameJob>,
+    worker: Option<JoinHandle<()>>,
+    latest: Arc<Mutex<Latest>>,
+    frame_count: u64,
+    last_posted_generation: u64,
+}
+
+/// State for the synchronous recognizer backend (`edge-impulse-recognizer`).
+/// Built in `start()`; no worker thread. Crops sharing a PTS form one frame.
+struct RecognizerState {
+    #[cfg(feature = "ffi")]
+    recognizer: crate::ocr::recognizer::Recognizer<crate::ocr::recognizer::ffi::FfiLogitSource>,
+    stabilizer: crate::ocr::stabilize_by_id::IdStabilizer,
+    current_pts: Option<u64>,
+    seen: std::collections::HashSet<u64>,
+    frame_index: u64,
+    /// Recognizer model input geometry, queried once at start. Compose mode
+    /// resizes each detector region to exactly these dimensions before
+    /// recognition. `(0, 0)` when no FFI model is loaded (compose is a no-op).
+    model_input_w: u32,
+    model_input_h: u32,
+    /// Resolved resize mode (the model's declared mode, or the `resize-mode`
+    /// property override) used to fit each region to the model input.
+    resize_mode: crate::resize::ResizeMode,
+}
+
+#[derive(Default)]
+pub struct EdgeImpulseOcr {
+    pub(crate) settings: Mutex<Settings>,
+    state: Mutex<Option<State>>,
+    info: Mutex<Option<gst_video::VideoInfo>>,
+    /// Set once the worker thread is observed gone, so we warn only once
+    /// instead of on every subsequently dropped frame.
+    worker_gone_logged: AtomicBool,
+    /// Frames seen by the edge-impulse path, used to post an `ocr` message only
+    /// once per `interval` frames (reset in `start`).
+    ei_frame_count: AtomicU64,
+    rec_state: Mutex<Option<RecognizerState>>,
+}
+
+#[glib::object_subclass]
+impl ObjectSubclass for EdgeImpulseOcr {
+    const NAME: &'static str = OCR_TYPE_NAME;
+    type Type = super::EdgeImpulseOcr;
+    type ParentType = gst_base::BaseTransform;
+}
+
+impl ObjectImpl for EdgeImpulseOcr {
+    fn properties() -> &'static [glib::ParamSpec] {
+        static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
+            vec![
+                glib::ParamSpecString::builder("backend")
+                    .nick("Backend")
+                    .blurb(
+                        "OCR backend: 'ocrs' runs a built-in detection+recognition \
+                        model on the RGB frame; 'edge-impulse-characters' decodes per-character \
+                         detections from an upstream edgeimpulsevideoinfer element",
+                    )
+                    .default_value(Some("ocrs"))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("detection-model")
+                    .nick("Detection Model")
+                    .blurb("Path to the OCR text detection model file")
+                    .default_value(Some(""))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("recognition-model")
+                    .nick("Recognition Model")
+                    .blurb("Path to the OCR text recognition model file")
+                    .default_value(Some(""))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecDouble::builder("min-confidence")
+                    .nick("Minimum Confidence")
+                    .blurb("Minimum confidence threshold for OCR text results")
+                    .minimum(0.0)
+                    .maximum(1.0)
+                    .default_value(0.0)
+                    .mutable_playing()
+                    .build(),
+                glib::ParamSpecUInt::builder("max-text-length")
+                    .nick("Maximum Text Length")
+                    .blurb("Maximum number of characters to recognize per text region")
+                    .minimum(1)
+                    .maximum(u32::MAX)
+                    .default_value(256)
+                    .mutable_playing()
+                    .build(),
+                glib::ParamSpecBoolean::builder("post-message")
+                    .nick("Post Message")
+                    .blurb("Post OCR results on the GStreamer bus")
+                    .default_value(true)
+                    .mutable_playing()
+                    .build(),
+                glib::ParamSpecUInt::builder("interval")
+                    .nick("Interval")
+                    .blurb("Process one frame every N input frames")
+                    .minimum(1)
+                    .maximum(u32::MAX)
+                    .default_value(1)
+                    .mutable_playing()
+                    .build(),
+                glib::ParamSpecBoolean::builder("text-stabilization")
+                    .nick("Text Stabilization")
+                    .blurb(
+                        "Consolidate recognized text across recognitions per \
+                         tracked object (most-frequent text, mean confidence). \
+                         All raw reads vote; min-confidence filters only the \
+                         consolidated result. Read once at start.",
+                    )
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("stabilization-window")
+                    .nick("Stabilization Window")
+                    .blurb(
+                        "Recent recognitions kept per object for the vote. \
+                         Read once at start.",
+                    )
+                    .minimum(1)
+                    .maximum(u32::MAX)
+                    .default_value(10)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("stabilization-min-hits")
+                    .nick("Stabilization Min Hits")
+                    .blurb(
+                        "Minimum recognitions required before an object is first \
+                         reported. Read once at start.",
+                    )
+                    .minimum(1)
+                    .maximum(u32::MAX)
+                    .default_value(2)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("stabilization-max-misses")
+                    .nick("Stabilization Max Misses")
+                    .blurb(
+                        "Consecutive absences tolerated before an object is \
+                         dropped. Read once at start.",
+                    )
+                    .minimum(0)
+                    .maximum(u32::MAX)
+                    .default_value(5)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoolean::builder("box-prediction")
+                    .nick("Box Prediction")
+                    .blurb(
+                        "Smooth and predict tracked boxes with a per-object \
+                         constant-velocity Kalman filter so they follow moving \
+                         objects with less lag. Enables the tracker on its own \
+                         (text is reported as the latest read unless \
+                         text-stabilization is also on). Read once at start.",
+                    )
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecDouble::builder("box-responsiveness")
+                    .nick("Box Responsiveness")
+                    .blurb(
+                        "Box-prediction tracking speed: 1.0 tracks fast with \
+                         little smoothing, 0.0 is very smooth with more lag. \
+                         Read once at start.",
+                    )
+                    .minimum(0.0)
+                    .maximum(1.0)
+                    .default_value(0.5)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("charset")
+                    .nick("Charset")
+                    .blurb(
+                        "CTC class charset, one Unicode char per class; index 0 is \
+                         the blank. Its length must equal the recognizer model's \
+                         class count. Defaults to the pretrained PaddleOCR English \
+                         charset (438 classes).",
+                    )
+                    .default_value(Some(DEFAULT_RECOGNIZER_CHARSET))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("dictionary")
+                    .nick("Dictionary")
+                    .blurb("Comma-separated allowlist of valid strings; empty allows any decoded text.")
+                    .default_value(Some(""))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("normalize")
+                    .nick("Normalize")
+                    .blurb(
+                        "Post-decode text normalization for the recognizer backend: \
+                         'none' (verbatim), 'upper' (uppercase), or 'upper-alnum' \
+                         (uppercase and keep only [A-Z0-9]). Lets a solution read a \
+                         subset of a large charset without retraining.",
+                    )
+                    .default_value(Some("none"))
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoolean::builder("compose")
+                    .nick("Compose")
+                    .blurb(
+                        "Run the recognizer in-place on the full frame: read the \
+                         upstream detector's region-of-interest metas, recognize \
+                         each region, and rewrite the frame's metas with the \
+                         recognized text so a downstream overlay renders it. When \
+                         false, the element expects pre-cropped buffers carrying \
+                         a CropOriginMeta (classic crop-fed cascade). Read once at \
+                         start; recognizer backend only.",
+                    )
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("resize-mode")
+                    .nick("Resize Mode")
+                    .blurb(
+                        "How to fit each detector region to the recognizer model \
+                         input in compose mode: 'auto' uses the model's declared \
+                         resize mode, or override with 'squash', 'fit-longest', or \
+                         'fit-shortest'. Read once at start.",
+                    )
+                    .default_value(Some("auto"))
+                    .mutable_ready()
+                    .build(),
+            ]
+        });
+        PROPERTIES.as_ref()
+    }
+
+    fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        let mut settings = self.settings.lock().unwrap();
+        match pspec.name() {
+            "backend" => settings.backend = value.get().unwrap(),
+            "detection-model" => settings.detection_model = value.get().unwrap(),
+            "recognition-model" => settings.recognition_model = value.get().unwrap(),
+            "min-confidence" => settings.min_confidence = value.get().unwrap(),
+            "max-text-length" => settings.max_text_length = value.get().unwrap(),
+            "post-message" => settings.post_message = value.get().unwrap(),
+            "interval" => settings.interval = value.get().unwrap(),
+            "text-stabilization" => settings.text_stabilization = value.get().unwrap(),
+            "stabilization-window" => settings.stabilization_window = value.get().unwrap(),
+            "stabilization-min-hits" => settings.stabilization_min_hits = value.get().unwrap(),
+            "stabilization-max-misses" => settings.stabilization_max_misses = value.get().unwrap(),
+            "box-prediction" => settings.box_prediction = value.get().unwrap(),
+            "box-responsiveness" => settings.box_responsiveness = value.get().unwrap(),
+            "charset" => settings.charset = value.get().unwrap_or_default(),
+            "dictionary" => settings.dictionary = value.get().unwrap_or_default(),
+            "normalize" => settings.normalize = value.get().unwrap_or_default(),
+            "compose" => settings.compose = value.get().unwrap(),
+            "resize-mode" => settings.resize_mode = value.get().unwrap_or_default(),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        let settings = self.settings.lock().unwrap();
+        match pspec.name() {
+            "backend" => settings.backend.to_value(),
+            "detection-model" => settings.detection_model.to_value(),
+            "recognition-model" => settings.recognition_model.to_value(),
+            "min-confidence" => settings.min_confidence.to_value(),
+            "max-text-length" => settings.max_text_length.to_value(),
+            "post-message" => settings.post_message.to_value(),
+            "interval" => settings.interval.to_value(),
+            "text-stabilization" => settings.text_stabilization.to_value(),
+            "stabilization-window" => settings.stabilization_window.to_value(),
+            "stabilization-min-hits" => settings.stabilization_min_hits.to_value(),
+            "stabilization-max-misses" => settings.stabilization_max_misses.to_value(),
+            "box-prediction" => settings.box_prediction.to_value(),
+            "box-responsiveness" => settings.box_responsiveness.to_value(),
+            "charset" => settings.charset.to_value(),
+            "dictionary" => settings.dictionary.to_value(),
+            "normalize" => settings.normalize.to_value(),
+            "compose" => settings.compose.to_value(),
+            "resize-mode" => settings.resize_mode.to_value(),
+            _ => unimplemented!(),
+        }
+    }
+}
+impl GstObjectImpl for EdgeImpulseOcr {}
+
+impl ElementImpl for EdgeImpulseOcr {
+    fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
+        static M: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
+            gst::subclass::ElementMetadata::new(
+                "Edge Impulse OCR",
+                "Filter/Analyzer/Video",
+                "Reads text from video frames and attaches it as ROI metadata",
+                "Fernando Jiménez Moreno <fernando@edgeimpulse.com>",
+            )
+        });
+        Some(&*M)
+    }
+    fn pad_templates() -> &'static [gst::PadTemplate] {
+        static T: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "RGB")
+                .field("width", gst::IntRange::new(1, i32::MAX))
+                .field("height", gst::IntRange::new(1, i32::MAX))
+                .build();
+            vec![
+                gst::PadTemplate::new(
+                    "sink",
+                    gst::PadDirection::Sink,
+                    gst::PadPresence::Always,
+                    &caps,
+                )
+                .unwrap(),
+                gst::PadTemplate::new(
+                    "src",
+                    gst::PadDirection::Src,
+                    gst::PadPresence::Always,
+                    &caps,
+                )
+                .unwrap(),
+            ]
+        });
+        T.as_slice()
+    }
+}
+
+impl EdgeImpulseOcr {
+    fn build_backend(settings: &Settings) -> Box<dyn OcrBackend> {
+        match Backend::parse(&settings.backend) {
+            Backend::Ocrs => Self::build_ocrs(settings),
+            _ => Box::new(NoopBackend),
+        }
+    }
+
+    #[cfg(feature = "ocr")]
+    fn build_ocrs(settings: &Settings) -> Box<dyn OcrBackend> {
+        // Each model loads from its explicit path when set, else from the
+        // embedded default (see OcrsBackend::new), so partial configuration
+        // still yields a working engine rather than a silent no-op.
+        match crate::ocr::ocrs_backend::OcrsBackend::new(
+            &settings.detection_model,
+            &settings.recognition_model,
+        ) {
+            Ok(b) => Box::new(b),
+            Err(e) => {
+                gst::error!(
+                    CAT,
+                    "Failed to build ocrs backend: {e}; falling back to no-op"
+                );
+                Box::new(NoopBackend)
+            }
+        }
+    }
+
+    #[cfg(not(feature = "ocr"))]
+    fn build_ocrs(_settings: &Settings) -> Box<dyn OcrBackend> {
+        Box::new(NoopBackend)
+    }
+
+    /// Decode the character detections an upstream `edgeimpulsevideoinfer`
+    /// attached to this buffer into lines of text: consume the per-character ROI
+    /// metas, assemble them into lines, attach one line ROI, and post one `ocr`
+    /// message per line. Runs inline (no worker) because there is no model.
+    fn transform_ip_edge_impulse(
+        &self,
+        buf: &mut gst::BufferRef,
+        min_confidence: f64,
+        max_text_length: u32,
+        post_message: bool,
+        interval: u32,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+        let lines = crate::ocr::decode::process_buffer(
+            buf,
+            min_confidence as f32,
+            max_text_length as usize,
+        );
+        // Detections are consumed and lines attached every frame (so the overlay
+        // stays stable); `interval` only throttles how often we *post* messages.
+        let n = self.ei_frame_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let due = n % (interval.max(1) as u64) == 0;
+        if post_message && due {
+            for line in &lines {
+                let s = build_ocr_message(line, pts_ms);
+                let _ = self
+                    .obj()
+                    .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+            }
+        }
+        Ok(gst::FlowSuccess::Ok)
+    }
+
+    /// Recognize one cropped buffer synchronously: read its `CropOriginMeta`
+    /// geometry, run the CRNN+CTC recognizer, stabilize per object id, and emit
+    /// the plain `ocr` ROI meta / bus message (the VIS layer labels the text).
+    fn transform_ip_recognizer(
+        &self,
+        buf: &mut gst::BufferRef,
+        min_confidence: f64,
+        max_text_length: u32,
+        post_message: bool,
+        interval: u32,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        // Crop geometry (original-frame coords). No meta ⇒ nothing to recognize.
+        let (object_id, src_x, src_y, src_w, src_h) = {
+            let Some(meta) = buf.meta::<crate::crop::meta::CropOriginMeta>() else {
+                return Ok(gst::FlowSuccess::Ok);
+            };
+            (
+                meta.object_id(),
+                meta.source_x(),
+                meta.source_y(),
+                meta.source_width(),
+                meta.source_height(),
+            )
+        };
+
+        let text_stabilization = self.settings.lock().unwrap().text_stabilization;
+
+        let info = self.info.lock().unwrap().clone();
+        let Some(info) = info else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+        let pts_ns = buf.pts().map(|t| t.nseconds()).unwrap_or(0);
+
+        let mut guard = self.rec_state.lock().unwrap();
+        let Some(rec) = guard.as_mut() else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        // Frame boundary: crops sharing a PTS are one frame. On PTS change, age
+        // tracks not seen last frame, reset the seen-set, advance the index.
+        if rec.current_pts != Some(pts_ns) {
+            if rec.current_pts.is_some() {
+                rec.stabilizer.end_frame(&rec.seen);
+            }
+            rec.seen.clear();
+            rec.frame_index = rec.frame_index.wrapping_add(1);
+            rec.current_pts = Some(pts_ns);
+        }
+        rec.seen.insert(object_id);
+
+        // Interval throttle: only run the (expensive) recognizer on due frames.
+        // Aging above still happens every frame so boxes clear promptly.
+        let due = rec.frame_index % (interval.max(1) as u64) == 0;
+        if !due {
+            return Ok(gst::FlowSuccess::Ok);
+        }
+
+        // Map the crop buffer to tightly-packed RGB (mirror the worker path).
+        let (rgb, crop_w, crop_h) = self.frame_to_rgb(buf, &info)?;
+
+        // Inference (FFI-only). Without the ffi model there is no read. A
+        // transient inference failure degrades gracefully (log + skip this
+        // crop) rather than tearing down the pipeline, mirroring the worker.
+        #[cfg(feature = "ffi")]
+        let read = match rec.recognizer.recognize_text(&rgb, crop_w, crop_h) {
+            Ok(read) => read,
+            Err(e) => {
+                gst::warning!(CAT, obj = self.obj(), "recognizer inference failed: {e}");
+                None
+            }
+        };
+        #[cfg(not(feature = "ffi"))]
+        let read: Option<(String, f32)> = {
+            let _ = (&rgb, crop_w, crop_h);
+            None
+        };
+
+        if let Some((text, conf)) = read.clone() {
+            rec.stabilizer.observe(object_id, text, conf);
+        }
+
+        // Output: consolidated vote when stabilizing, else the raw read.
+        let decided = if text_stabilization {
+            rec.stabilizer.consolidated(object_id)
+        } else {
+            read
+        };
+        let Some((text, confidence)) = decided else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        let line = recognizer_ocr_line(text, confidence, src_x, src_y, src_w, src_h);
+        let lines =
+            filter_and_truncate(vec![line], min_confidence as f32, max_text_length as usize);
+        if !lines.is_empty() {
+            attach_results(buf, &lines);
+            if post_message {
+                for l in &lines {
+                    let s = build_ocr_message(l, pts_ms);
+                    let _ = self
+                        .obj()
+                        .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+                }
+            }
+        }
+        Ok(gst::FlowSuccess::Ok)
+    }
+
+    /// Copy a buffer's single RGB plane into a tightly-packed `Vec<u8>`,
+    /// stripping any row padding. Returns `(rgb, width, height)`.
+    fn frame_to_rgb(
+        &self,
+        buf: &gst::BufferRef,
+        info: &gst_video::VideoInfo,
+    ) -> Result<(Vec<u8>, u32, u32), gst::FlowError> {
+        let frame = VideoFrameRef::from_buffer_ref_readable(buf, info)
+            .map_err(|_| gst::FlowError::Error)?;
+        let width = frame.width();
+        let height = frame.height();
+        let stride = frame.plane_stride()[0] as usize;
+        let row_bytes = width as usize * 3;
+        let src = frame.plane_data(0).map_err(|_| gst::FlowError::Error)?;
+        let mut rgb = Vec::with_capacity(row_bytes * height as usize);
+        for row in 0..height as usize {
+            let start = row * stride;
+            rgb.extend_from_slice(&src[start..start + row_bytes]);
+        }
+        Ok((rgb, width, height))
+    }
+
+    /// Compose mode: recognize each detector region in place on the full frame.
+    ///
+    /// Reads the standard `VideoRegionOfInterestMeta` boxes the upstream
+    /// detector attached, crops and resizes each to the recognizer model input,
+    /// recognizes the text, then rewrites the frame's metas so a downstream
+    /// overlay renders the recognized text instead of the detector's generic
+    /// labels. Unlike the crop-fed path this needs no `CropOriginMeta`, so it
+    /// works across plugin variants (the ROI meta is a shared GType).
+    fn transform_ip_recognizer_compose(
+        &self,
+        buf: &mut gst::BufferRef,
+        min_confidence: f64,
+        max_text_length: u32,
+        post_message: bool,
+        interval: u32,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        let text_stabilization = self.settings.lock().unwrap().text_stabilization;
+
+        let info = self.info.lock().unwrap().clone();
+        let Some(info) = info else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+        let pts_ns = buf.pts().map(|t| t.nseconds()).unwrap_or(0);
+
+        // Snapshot the full frame as packed RGB before mutating metas.
+        let (frame_rgb, frame_w, frame_h) = self.frame_to_rgb(buf, &info)?;
+
+        let mut guard = self.rec_state.lock().unwrap();
+        let Some(rec) = guard.as_mut() else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        // Each compose buffer is one full frame: age the previous frame's tracks,
+        // reset the seen-set, and advance the index once per call.
+        if rec.current_pts.is_some() {
+            rec.stabilizer.end_frame(&rec.seen);
+        }
+        rec.seen.clear();
+        rec.frame_index = rec.frame_index.wrapping_add(1);
+        rec.current_pts = Some(pts_ns);
+        let due = rec.frame_index % (interval.max(1) as u64) == 0;
+
+        let model_w = rec.model_input_w;
+        let model_h = rec.model_input_h;
+        let resize_mode = rec.resize_mode;
+
+        // Recognize each detector region, rewriting the frame's ROI metas so the
+        // overlay shows text. On non-due frames recognition is skipped but the
+        // detector boxes are still removed and (when stabilizing) the last
+        // consolidated text is re-attached, so the overlay never flashes the
+        // detector's labels.
+        let lines = crate::ocr::compose::recognize_and_rewrite(
+            buf,
+            min_confidence as f32,
+            max_text_length as usize,
+            |det| {
+                rec.seen.insert(det.object_id);
+
+                // Recognize this region (due frames only). Mirrors the crop-fed
+                // path: observe every read, then output the stabilized vote when
+                // stabilizing, else the raw read.
+                let read: Option<(String, f32)> = if due && model_w > 0 && model_h > 0 {
+                    let (crop, cw, ch) = crate::ocr::compose::crop_region(
+                        &frame_rgb, frame_w, frame_h, det.x, det.y, det.width, det.height,
+                    );
+                    if cw > 0 && ch > 0 {
+                        let resized =
+                            crate::resize::resize_rgb(&crop, cw, ch, model_w, model_h, resize_mode);
+                        #[cfg(feature = "ffi")]
+                        let r: Option<(String, f32)> =
+                            match rec.recognizer.recognize_text(&resized, model_w, model_h) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    gst::warning!(
+                                        CAT,
+                                        obj = self.obj(),
+                                        "recognizer inference failed: {e}"
+                                    );
+                                    None
+                                }
+                            };
+                        #[cfg(not(feature = "ffi"))]
+                        let r: Option<(String, f32)> = {
+                            let _ = &resized;
+                            None
+                        };
+                        r
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((text, conf)) = read.clone() {
+                    rec.stabilizer.observe(det.object_id, text, conf);
+                }
+
+                if text_stabilization {
+                    rec.stabilizer.consolidated(det.object_id)
+                } else {
+                    read
+                }
+            },
+        );
+
+        if post_message {
+            for l in &lines {
+                let s = build_ocr_message(l, pts_ms);
+                let _ = self
+                    .obj()
+                    .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+            }
+        }
+        Ok(gst::FlowSuccess::Ok)
+    }
+}
+
+impl BaseTransformImpl for EdgeImpulseOcr {
+    const MODE: gst_base::subclass::BaseTransformMode =
+        gst_base::subclass::BaseTransformMode::AlwaysInPlace;
+    const PASSTHROUGH_ON_SAME_CAPS: bool = false;
+    const TRANSFORM_IP_ON_PASSTHROUGH: bool = true;
+
+    fn start(&self) -> Result<(), gst::ErrorMessage> {
+        let settings = self.settings.lock().unwrap().clone();
+        if matches!(
+            Backend::parse(&settings.backend),
+            Backend::EdgeImpulseRecognizer
+        ) {
+            let stabilizer = crate::ocr::stabilize_by_id::IdStabilizer::new(
+                settings.stabilization_window.max(1) as usize,
+                settings.stabilization_min_hits as usize,
+                settings.stabilization_max_misses,
+            );
+            #[cfg(feature = "ffi")]
+            let recognizer = {
+                let num_classes = crate::ocr::ctc::parse_charset(&settings.charset).len();
+                let source = crate::ocr::recognizer::ffi::FfiLogitSource::new(false, num_classes)
+                    .map_err(|e| {
+                    gst::error_msg!(
+                        gst::ResourceError::Failed,
+                        ["failed to init recognizer: {e}"]
+                    )
+                })?;
+                crate::ocr::recognizer::Recognizer::new(
+                    source,
+                    &settings.charset,
+                    &settings.dictionary,
+                    crate::ocr::normalize::Normalize::parse(&settings.normalize),
+                )
+            };
+            // Query the model input geometry (compose resizes each detector
+            // region to it) and resolve the resize mode: `auto` follows the
+            // model's declared mode, an explicit property value overrides it.
+            #[cfg(feature = "ffi")]
+            let (model_input_w, model_input_h, model_mode) =
+                recognizer
+                    .model_input()
+                    .unwrap_or((0, 0, "squash".to_string()));
+            #[cfg(not(feature = "ffi"))]
+            let (model_input_w, model_input_h, model_mode) = (0u32, 0u32, "squash".to_string());
+            let resize_mode =
+                crate::resize::ResizeModeSetting::from_property(&settings.resize_mode)
+                    .resolve(&model_mode);
+            *self.rec_state.lock().unwrap() = Some(RecognizerState {
+                #[cfg(feature = "ffi")]
+                recognizer,
+                stabilizer,
+                current_pts: None,
+                seen: std::collections::HashSet::new(),
+                frame_index: 0,
+                model_input_w,
+                model_input_h,
+                resize_mode,
+            });
+            return self.parent_start();
+        }
+        // The edge-impulse backend decodes upstream detection metas inline in
+        // transform_ip; it evaluates no model and needs no worker thread.
+        if matches!(Backend::parse(&settings.backend), Backend::EdgeImpulse) {
+            self.ei_frame_count.store(0, Ordering::Relaxed);
+            return self.parent_start();
+        }
+        self.worker_gone_logged.store(false, Ordering::Relaxed);
+        let latest = Arc::new(Mutex::new(Latest::default()));
+        let latest_worker = latest.clone();
+        // Bound of 1: at most one frame waits while another is recognized;
+        // newer frames are dropped (see `try_send` in transform_ip) so a slow
+        // backend can never build an unbounded backlog.
+        let (frame_tx, frame_rx) = sync_channel::<FrameJob>(1);
+        // Build the backend inside the worker so model loading never blocks the
+        // streaming thread, and recognition runs entirely off it.
+        let worker = std::thread::spawn(move || {
+            let mut backend = Self::build_backend(&settings);
+            let mut tracker = if settings.text_stabilization || settings.box_prediction {
+                Some(Tracker::new(TrackerConfig {
+                    iou_threshold: STABILIZATION_IOU_THRESHOLD,
+                    window: settings.stabilization_window.max(1) as usize,
+                    min_hits: settings.stabilization_min_hits,
+                    max_misses: settings.stabilization_max_misses,
+                    kalman: settings.box_prediction.then(|| {
+                        KalmanConfig::from_responsiveness(settings.box_responsiveness as f32)
+                    }),
+                    // Consolidate labels (most-frequent voted text) only when
+                    // text stabilization is on. With box prediction alone the
+                    // tracker still runs — for box smoothing/prediction — but
+                    // each line's text is reported as the latest read.
+                    consolidate_labels: settings.text_stabilization,
+                }))
+            } else {
+                None
+            };
+            // Previous recognized PTS (ms), to derive the tracker time step.
+            let mut prev_pts_ms: Option<i64> = None;
+            while let Ok(job) = frame_rx.recv() {
+                match backend.recognize(&job.rgb, job.width, job.height) {
+                    Ok(lines) => {
+                        let lines = match tracker.as_mut() {
+                            Some(t) => {
+                                let (dt, next_prev) =
+                                    tracker_dt(prev_pts_ms, job.pts_ms, MAX_TRACKER_DT_S);
+                                prev_pts_ms = Some(next_prev);
+                                stabilize(t, lines, dt)
+                            }
+                            None => passthrough(lines),
+                        };
+                        let mut latest = latest_worker.lock().unwrap();
+                        latest.generation = latest.generation.wrapping_add(1);
+                        latest.lines = lines;
+                        latest.pts_ms = job.pts_ms;
+                    }
+                    Err(e) => gst::warning!(CAT, "OCR worker recognition failed: {e}"),
+                }
+            }
+        });
+        *self.state.lock().unwrap() = Some(State {
+            frame_tx,
+            worker: Some(worker),
+            latest,
+            frame_count: 0,
+            last_posted_generation: 0,
+        });
+        self.parent_start()
+    }
+
+    fn stop(&self) -> Result<(), gst::ErrorMessage> {
+        // Take the state out (releasing the lock immediately), then drop the
+        // sender so the worker's recv() returns Err and the thread exits, and
+        // join it. The worker never locks `state`, so this cannot deadlock.
+        let taken = self.state.lock().unwrap().take();
+        if let Some(State {
+            frame_tx, worker, ..
+        }) = taken
+        {
+            drop(frame_tx);
+            if let Some(handle) = worker {
+                let _ = handle.join();
+            }
+        }
+        *self.info.lock().unwrap() = None;
+        *self.rec_state.lock().unwrap() = None;
+        self.parent_stop()
+    }
+
+    fn set_caps(&self, incaps: &gst::Caps, _outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
+        let info = gst_video::VideoInfo::from_caps(incaps)
+            .map_err(|_| gst::loggable_error!(CAT, "Failed to parse OCR input caps"))?;
+        *self.info.lock().unwrap() = Some(info);
+        Ok(())
+    }
+
+    fn unit_size(&self, caps: &gst::Caps) -> Option<usize> {
+        gst_video::VideoInfo::from_caps(caps)
+            .ok()
+            .map(|info| info.size())
+    }
+
+    fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
+        let (backend, interval, min_confidence, max_text_length, post_message, compose) = {
+            let settings = self.settings.lock().unwrap();
+            (
+                settings.backend.clone(),
+                // max(1) keeps the modulo below divide-by-zero-safe independent
+                // of the GObject minimum, so a direct Settings construction
+                // (e.g. in a unit test) can never panic here.
+                settings.interval.max(1),
+                settings.min_confidence,
+                settings.max_text_length,
+                settings.post_message,
+                settings.compose,
+            )
+        };
+
+        // The edge-impulse backend decodes upstream detection metas synchronously
+        // (no pixels, no worker); handle it before the caps/worker path below.
+        if matches!(Backend::parse(&backend), Backend::EdgeImpulse) {
+            return self.transform_ip_edge_impulse(
+                buf,
+                min_confidence,
+                max_text_length,
+                post_message,
+                interval,
+            );
+        }
+
+        if matches!(Backend::parse(&backend), Backend::EdgeImpulseRecognizer) {
+            if compose {
+                return self.transform_ip_recognizer_compose(
+                    buf,
+                    min_confidence,
+                    max_text_length,
+                    post_message,
+                    interval,
+                );
+            }
+            return self.transform_ip_recognizer(
+                buf,
+                min_confidence,
+                max_text_length,
+                post_message,
+                interval,
+            );
+        }
+
+        let info = self.info.lock().unwrap().clone();
+        let Some(info) = info else {
+            return Ok(gst::FlowSuccess::Ok);
+        };
+
+        // Under the state lock (kept cheap): bump the frame counter, grab a
+        // sender if this frame is due for recognition, snapshot the latest
+        // results + their source PTS, and decide whether they are new enough to
+        // post. The frame copy and message posting happen after the lock.
+        let (sender, raw_lines, result_pts_ms, post_new) = {
+            let mut guard = self.state.lock().unwrap();
+            let Some(state) = guard.as_mut() else {
+                return Ok(gst::FlowSuccess::Ok);
+            };
+            state.frame_count += 1;
+            let sender = if state.frame_count % interval as u64 == 0 {
+                Some(state.frame_tx.clone())
+            } else {
+                None
+            };
+            let (lines, generation, pts_ms) = {
+                let latest = state.latest.lock().unwrap();
+                (latest.lines.clone(), latest.generation, latest.pts_ms)
+            };
+            let post_new = post_message && generation != state.last_posted_generation;
+            if post_new {
+                state.last_posted_generation = generation;
+            }
+            (sender, lines, pts_ms, post_new)
+        };
+
+        // Hand the current frame to the worker, dropping it if the worker is
+        // busy (or gone) so recognition never stalls the streaming thread.
+        if let Some(sender) = sender {
+            let pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+            let job = {
+                let frame = VideoFrameRef::from_buffer_ref_readable(buf, &info)
+                    .map_err(|_| gst::FlowError::Error)?;
+                let width = frame.width();
+                let height = frame.height();
+                let stride = frame.plane_stride()[0] as usize;
+                let row_bytes = width as usize * 3;
+                let src = frame.plane_data(0).map_err(|_| gst::FlowError::Error)?;
+                let mut rgb = Vec::with_capacity(row_bytes * height as usize);
+                for row in 0..height as usize {
+                    let start = row * stride;
+                    rgb.extend_from_slice(&src[start..start + row_bytes]);
+                }
+                FrameJob {
+                    rgb,
+                    width,
+                    height,
+                    pts_ms,
+                }
+            };
+            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = sender.try_send(job) {
+                // The worker only disconnects if it panicked; warn once so a
+                // wedged element that silently drops every frame from here on
+                // is at least diagnosable.
+                if !self.worker_gone_logged.swap(true, Ordering::Relaxed) {
+                    gst::error!(
+                        CAT,
+                        obj = self.obj(),
+                        "OCR worker thread has exited; recognition stopped"
+                    );
+                }
+            }
+        }
+
+        // Map a stabilized line to a non-extrapolated OcrLine (recognition box,
+        // rounded). Used for bus messages and, when nothing is moving, for the
+        // overlay too — so the box-prediction-off path stays Phase-1-identical.
+        let to_static = |s: &StabilizedLine| OcrLine {
+            text: s.text.clone(),
+            confidence: s.confidence,
+            x: s.bbox[0].round().max(0.0) as u32,
+            y: s.bbox[1].round().max(0.0) as u32,
+            w: s.bbox[2].round().max(0.0) as u32,
+            h: s.bbox[3].round().max(0.0) as u32,
+        };
+
+        // Bus messages carry the recognition result (non-extrapolated), stamped
+        // with the recognized frame's PTS, posted once per recognition.
+        if post_new {
+            let bus_lines: Vec<OcrLine> = raw_lines.iter().map(&to_static).collect();
+            let bus_lines =
+                filter_and_truncate(bus_lines, min_confidence as f32, max_text_length as usize);
+            for line in &bus_lines {
+                let s = build_ocr_message(line, result_pts_ms);
+                let _ = self
+                    .obj()
+                    .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
+            }
+        }
+
+        // Overlay ROI meta: fast path when nothing moves (velocity all zero ⇒
+        // Phase-1-identical static boxes); otherwise extrapolate per frame.
+        let all_static = raw_lines.iter().all(|s| s.velocity == [0.0; 4]);
+        let vis_lines: Vec<OcrLine> = if all_static {
+            raw_lines.iter().map(&to_static).collect()
+        } else {
+            let display_pts_ms = buf.pts().map(|t| t.mseconds() as i64).unwrap_or(0);
+            let dt_s = (display_pts_ms - result_pts_ms) as f32 / 1000.0;
+            let width = info.width();
+            let height = info.height();
+            raw_lines
+                .iter()
+                .map(|s| {
+                    let (x, y, w, h) = extrapolate_box(
+                        s.bbox,
+                        s.velocity,
+                        dt_s,
+                        EXTRAPOLATION_DT_CAP_S,
+                        width,
+                        height,
+                    );
+                    OcrLine {
+                        text: s.text.clone(),
+                        confidence: s.confidence,
+                        x,
+                        y,
+                        w,
+                        h,
+                    }
+                })
+                .collect()
+        };
+        let vis_lines =
+            filter_and_truncate(vis_lines, min_confidence as f32, max_text_length as usize);
+        attach_results(buf, &vis_lines);
+        Ok(gst::FlowSuccess::Ok)
+    }
+}
+
+/// Build the OcrLine for a recognized crop using the origin geometry from
+/// `CropOriginMeta`. Box coordinates are already in original-frame space.
+pub(crate) fn recognizer_ocr_line(
+    text: String,
+    confidence: f32,
+    source_x: u32,
+    source_y: u32,
+    source_w: u32,
+    source_h: u32,
+) -> OcrLine {
+    OcrLine {
+        text,
+        confidence,
+        x: source_x,
+        y: source_y,
+        w: source_w,
+        h: source_h,
+    }
+}
+
+#[cfg(test)]
+mod recognizer_tests {
+    use super::*;
+
+    #[test]
+    fn builds_line_in_original_coordinates() {
+        let line = recognizer_ocr_line("ABC123".into(), 0.87, 40, 60, 120, 32);
+        assert_eq!(line.text, "ABC123");
+        assert_eq!((line.x, line.y, line.w, line.h), (40u32, 60, 120, 32));
+        assert!((line.confidence - 0.87).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compose_settings_default_off_with_auto_resize() {
+        let settings = Settings::default();
+        assert!(
+            !settings.compose,
+            "compose must default to false (classic crop-fed cascade)"
+        );
+        assert_eq!(
+            settings.resize_mode, "auto",
+            "resize-mode must default to 'auto' (follow the model's declared mode)"
+        );
+    }
+}

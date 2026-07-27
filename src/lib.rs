@@ -5,7 +5,7 @@
 //!
 //! ## Elements
 //!
-//! The plugin provides six elements:
+//! The plugin provides seven elements:
 //!
 //! | Element | Description |
 //! |---------|-------------|
@@ -15,6 +15,7 @@
 //! | [`sink::EdgeImpulseSink`] | Uploads audio/video to Edge Impulse ingestion API |
 //! | [`filter::EdgeImpulseContinueIf`] | Conditional gate — passes or drops buffers based on inference metadata |
 //! | [`crop::EdgeImpulseCrop`] | Dynamic crop — extracts per-detection regions from video frames |
+//! | [`ocr::EdgeImpulseOcr`] | Recognizes text (OCR) and attaches text-region metadata |
 //!
 //! ## Metadata types
 //!
@@ -73,22 +74,46 @@
 use gstreamer as gst;
 use gstreamer::glib;
 
+#[cfg(feature = "inference")]
 mod audio;
+#[cfg(feature = "inference")]
 mod common;
 mod crop;
+mod detection;
 mod filter;
 pub mod meta;
+#[cfg(feature = "ocr")]
+mod ocr;
+#[cfg(feature = "presentation")]
 mod overlay;
+mod resize;
+#[cfg(feature = "ingestion")]
 pub mod sink;
+// `video` stays declared unconditionally: its `meta` submodule defines the
+// metadata types consumed by the always-on `filter` and the `presentation`
+// overlay. Only the inference *element* inside it is gated (see video/mod.rs).
+#[cfg(feature = "ocr")]
+mod tracker;
 pub mod video;
 
+// `inference` provides the video/audio elements but needs a runner backend to
+// do anything. Fail loudly at compile time rather than deep inside `common`.
+#[cfg(all(feature = "inference", not(any(feature = "ffi", feature = "eim"))))]
+compile_error!("feature `inference` requires a backend: enable `ffi` or `eim`");
+
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
+    #[cfg(feature = "inference")]
     video::register(plugin)?;
+    #[cfg(feature = "inference")]
     audio::register(plugin)?;
+    #[cfg(feature = "presentation")]
     overlay::register(plugin)?;
+    #[cfg(feature = "ingestion")]
     sink::register(plugin)?;
     filter::register(plugin)?;
     crop::register(plugin)?;
+    #[cfg(feature = "ocr")]
+    ocr::register(plugin)?;
     Ok(())
 }
 

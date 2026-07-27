@@ -84,7 +84,7 @@ fi
 # Test cross compilation build
 print_status "Testing cross compilation build..."
 if docker-compose run --rm aarch64-build bash -c "
-    cargo build --target aarch64-unknown-linux-gnu --features ffi --release
+    cargo build --target aarch64-unknown-linux-gnu --features ffi,ocr,presentation,ingestion --release
 "; then
     print_success "Cross compilation build successful"
 else
@@ -105,7 +105,7 @@ fi
 # Test examples build
 print_status "Testing examples build..."
 if docker-compose run --rm aarch64-build bash -c "
-    cargo build --target aarch64-unknown-linux-gnu --features ffi --release --examples
+    cargo build --target aarch64-unknown-linux-gnu --features ffi,ocr,presentation,ingestion --release --examples
 "; then
     print_success "Examples built successfully"
 else

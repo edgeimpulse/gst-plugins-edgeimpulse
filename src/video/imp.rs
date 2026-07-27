@@ -199,6 +199,7 @@
 // Include generated type names for variant-specific builds
 include!(concat!(env!("OUT_DIR"), "/type_names.rs"));
 
+use crate::resize::{self, ResizeMode, ResizeModeSetting, ResizeTransform};
 use edge_impulse_runner::EdgeImpulseModel;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -245,6 +246,9 @@ pub struct VideoState {
     /// Format of the input frames
     pub format: Option<VideoFormat>,
 
+    /// Resize mode setting (auto or explicit) used to fit input frames to the model input size
+    pub resize_mode_setting: ResizeModeSetting,
+
     /// Debug mode flag for FFI mode (lazy initialization)
     #[cfg(feature = "ffi")]
     pub debug_enabled: bool,
@@ -257,6 +261,7 @@ impl Default for VideoState {
             width: None,
             height: None,
             format: None,
+            resize_mode_setting: ResizeModeSetting::default(),
             #[cfg(feature = "ffi")]
             debug_enabled: false,
         }
@@ -308,7 +313,44 @@ fn resize_rgb_image(
     src_height: u32,
     dst_width: u32,
     dst_height: u32,
+    mode: ResizeMode,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // FitLongest: preserve aspect ratio, then center on a zero-padded canvas.
+    if mode == ResizeMode::FitLongest {
+        let (scaled_w, scaled_h) =
+            resize::fit_longest_dims(src_width, src_height, dst_width, dst_height);
+        let img: RgbImage = ImageBuffer::from_raw(src_width, src_height, data.to_vec())
+            .ok_or("Failed to create image buffer")?;
+        let scaled = image::imageops::resize(
+            &img,
+            scaled_w,
+            scaled_h,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        return Ok(resize::pad_center(
+            &scaled, scaled_w, scaled_h, dst_width, dst_height, 3,
+        ));
+    }
+
+    // FitShortest: preserve aspect ratio to fill, then center-crop the overflow.
+    if mode == ResizeMode::FitShortest {
+        let (scaled_w, scaled_h) =
+            resize::fit_shortest_dims(src_width, src_height, dst_width, dst_height);
+        let img: RgbImage = ImageBuffer::from_raw(src_width, src_height, data.to_vec())
+            .ok_or("Failed to create image buffer")?;
+        let scaled = image::imageops::resize(
+            &img,
+            scaled_w,
+            scaled_h,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        return Ok(resize::crop_center(
+            &scaled, scaled_w, scaled_h, dst_width, dst_height, 3,
+        ));
+    }
+
     // Try fast resize first for simple cases
     if let Some(result) = fast_resize_rgb(data, src_width, src_height, dst_width, dst_height) {
         return Ok(result);
@@ -380,7 +422,46 @@ fn resize_gray_image(
     src_height: u32,
     dst_width: u32,
     dst_height: u32,
+    mode: ResizeMode,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // FitLongest: preserve aspect ratio, then center on a zero-padded canvas.
+    if mode == ResizeMode::FitLongest {
+        let (scaled_w, scaled_h) =
+            resize::fit_longest_dims(src_width, src_height, dst_width, dst_height);
+        let img =
+            ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(src_width, src_height, data.to_vec())
+                .ok_or("Failed to create grayscale image buffer")?;
+        let scaled = image::imageops::resize(
+            &img,
+            scaled_w,
+            scaled_h,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        return Ok(resize::pad_center(
+            &scaled, scaled_w, scaled_h, dst_width, dst_height, 1,
+        ));
+    }
+
+    // FitShortest: preserve aspect ratio to fill, then center-crop the overflow.
+    if mode == ResizeMode::FitShortest {
+        let (scaled_w, scaled_h) =
+            resize::fit_shortest_dims(src_width, src_height, dst_width, dst_height);
+        let img =
+            ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(src_width, src_height, data.to_vec())
+                .ok_or("Failed to create grayscale image buffer")?;
+        let scaled = image::imageops::resize(
+            &img,
+            scaled_w,
+            scaled_h,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        return Ok(resize::crop_center(
+            &scaled, scaled_w, scaled_h, dst_width, dst_height, 1,
+        ));
+    }
+
     // Try fast resize first for simple cases
     if let Some(result) = fast_resize_gray(data, src_width, src_height, dst_width, dst_height) {
         return Ok(result);
@@ -412,26 +493,25 @@ fn resize_gray_image(
     Ok(resized.into_raw())
 }
 
-/// Helper function to scale bounding box coordinates from model resolution to original resolution
+/// Invert a model-space bounding box back to original-frame coordinates using the
+/// same [`ResizeTransform`] that fitted the input, so all resize modes stay correct.
 fn scale_bounding_box(
     x: u32,
     y: u32,
     width: u32,
     height: u32,
-    model_width: u32,
-    model_height: u32,
+    transform: &ResizeTransform,
     original_width: u32,
     original_height: u32,
 ) -> (u32, u32, u32, u32) {
-    let scale_x = original_width as f32 / model_width as f32;
-    let scale_y = original_height as f32 / model_height as f32;
-
-    let scaled_x = (x as f32 * scale_x) as u32;
-    let scaled_y = (y as f32 * scale_y) as u32;
-    let scaled_width = (width as f32 * scale_x) as u32;
-    let scaled_height = (height as f32 * scale_y) as u32;
-
-    (scaled_x, scaled_y, scaled_width, scaled_height)
+    let (x0, y0) = transform.inverse_point(x as f32, y as f32);
+    let (x1, y1) = transform.inverse_point((x + width) as f32, (y + height) as f32);
+    let clamp = |v: f32, max: u32| v.max(0.0).min(max as f32);
+    let x0 = clamp(x0, original_width);
+    let y0 = clamp(y0, original_height);
+    let x1 = clamp(x1, original_width);
+    let y1 = clamp(y1, original_height);
+    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
 impl crate::common::DebugState for VideoState {
@@ -503,12 +583,32 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
                         .build(),
                 );
             }
+            props.push(
+                glib::ParamSpecString::builder("resize-mode")
+                    .nick("Resize Mode")
+                    .blurb(
+                        "How frames are fitted to the model input size: \
+                         'auto' (default) uses the model's declared resize mode; \
+                         'squash' stretches ignoring aspect ratio; \
+                         'fit-longest' preserves aspect ratio and zero-pads; \
+                         'fit-shortest' preserves aspect ratio and center-crops.",
+                    )
+                    .default_value(Some("auto"))
+                    .mutable_ready()
+                    .build(),
+            );
             props
         });
         PROPERTIES.as_ref()
     }
 
     fn set_property(&self, id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        if pspec.name() == "resize-mode" {
+            let mut state = self.state.lock().unwrap();
+            state.resize_mode_setting =
+                ResizeModeSetting::from_property(&value.get::<String>().unwrap_or_default());
+            return;
+        }
         {
             crate::common::set_common_property::<VideoState>(
                 &self.state,
@@ -522,6 +622,10 @@ impl ObjectImpl for EdgeImpulseVideoInfer {
     }
 
     fn property(&self, id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        if pspec.name() == "resize-mode" {
+            let state = self.state.lock().unwrap();
+            return state.resize_mode_setting.as_str().to_value();
+        }
         {
             crate::common::get_common_property::<VideoState>(&self.state, id, pspec)
         }
@@ -619,11 +723,12 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         // Get all state values upfront to minimize mutex lock time
-        let (width, height, format, model) = {
+        let (width, height, format, resize_mode_setting, model) = {
             let mut state = self.state.lock().unwrap();
             let width = state.width.unwrap_or(0);
             let height = state.height.unwrap_or(0);
             let format = state.format;
+            let resize_mode_setting = state.resize_mode_setting;
             let model_exists = state.model.is_some();
 
             #[cfg(feature = "ffi")]
@@ -712,7 +817,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                 }
             };
 
-            (width, height, format, model)
+            (width, height, format, resize_mode_setting, model)
         };
 
         // Map the input buffer for reading (keep it mapped for inference)
@@ -765,6 +870,33 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                     edge_impulse_runner::types::RunnerHelloHasAnomaly::VisualGMM
                 );
 
+            // Resolve the effective resize mode: `auto` reads the model's declared
+            // mode; an explicit property overrides it. `none`/unknown -> squash.
+            let resize_mode = resize_mode_setting.resolve(&params.image_resize_mode);
+            // Don't silently squash on unrecognized model metadata — warn so a
+            // mis-declared/unknown mode is visible (bbox inversion would otherwise
+            // be wrong with no signal).
+            if resize_mode_setting == ResizeModeSetting::Auto
+                && ResizeMode::try_from_property(&params.image_resize_mode).is_none()
+            {
+                gst::warning!(
+                    CAT,
+                    obj = self.obj(),
+                    "Model declared unrecognized resize mode '{}'; falling back to '{}'. \
+                     Set the resize-mode property explicitly if this is wrong.",
+                    params.image_resize_mode,
+                    resize_mode.as_str()
+                );
+            }
+            gst::debug!(
+                CAT,
+                obj = self.obj(),
+                "Resize mode: setting={}, model_declared='{}', effective={}",
+                resize_mode_setting.as_str(),
+                params.image_resize_mode,
+                resize_mode.as_str()
+            );
+
             gst::debug!(
                 CAT,
                 obj = self.obj(),
@@ -802,25 +934,30 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
             // Has object tracking: {params.has_object_tracking}
 
             // Check if we need to resize the frame for the model
-            let (frame_data, inference_width, inference_height, resize_time_ms) = if width
-                != model_width
-                || height != model_height
-            {
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Frame size mismatch: input={}x{}, model requires={}x{}, resizing frame",
-                    width,
-                    height,
-                    model_width,
-                    model_height
-                );
+            let (frame_data, inference_width, inference_height, resize_time_ms) =
+                if width != model_width || height != model_height {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Frame size mismatch: input={}x{}, model requires={}x{}, resizing frame",
+                        width,
+                        height,
+                        model_width,
+                        model_height
+                    );
 
-                // Time the resizing operation
-                let resize_start = Instant::now();
-                let resized_data = if format == Some(VideoFormat::Gray8) {
-                    resize_gray_image(&in_map, width, height, model_width, model_height).map_err(
-                        |e| {
+                    // Time the resizing operation
+                    let resize_start = Instant::now();
+                    let resized_data = if format == Some(VideoFormat::Gray8) {
+                        resize_gray_image(
+                            &in_map,
+                            width,
+                            height,
+                            model_width,
+                            model_height,
+                            resize_mode,
+                        )
+                        .map_err(|e| {
                             gst::error!(
                                 CAT,
                                 obj = self.obj(),
@@ -828,41 +965,56 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                 e
                             );
                             gst::FlowError::Error
-                        },
-                    )?
-                } else {
-                    resize_rgb_image(&in_map, width, height, model_width, model_height).map_err(
-                        |e| {
+                        })?
+                    } else {
+                        resize_rgb_image(
+                            &in_map,
+                            width,
+                            height,
+                            model_width,
+                            model_height,
+                            resize_mode,
+                        )
+                        .map_err(|e| {
                             gst::error!(CAT, obj = self.obj(), "Failed to resize RGB frame: {}", e);
                             gst::FlowError::Error
-                        },
-                    )?
+                        })?
+                    };
+                    let resize_duration = resize_start.elapsed();
+                    let resize_time_ms = resize_duration.as_millis() as u32;
+
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Frame resizing completed in {}ms ({}x{} -> {}x{})",
+                        resize_time_ms,
+                        width,
+                        height,
+                        model_width,
+                        model_height
+                    );
+
+                    (resized_data, model_width, model_height, resize_time_ms)
+                } else {
+                    gst::debug!(
+                        CAT,
+                        obj = self.obj(),
+                        "Frame size matches model requirements: {}x{}",
+                        width,
+                        height
+                    );
+                    (in_map.to_vec(), width, height, 0u32)
                 };
-                let resize_duration = resize_start.elapsed();
-                let resize_time_ms = resize_duration.as_millis() as u32;
 
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Frame resizing completed in {}ms ({}x{} -> {}x{})",
-                    resize_time_ms,
-                    width,
-                    height,
-                    model_width,
-                    model_height
-                );
-
-                (resized_data, model_width, model_height, resize_time_ms)
-            } else {
-                gst::debug!(
-                    CAT,
-                    obj = self.obj(),
-                    "Frame size matches model requirements: {}x{}",
-                    width,
-                    height
-                );
-                (in_map.to_vec(), width, height, 0u32)
-            };
+            // Single source of truth for inverting detection boxes back to the
+            // original frame — matches how the input was fitted above.
+            let bbox_transform = ResizeTransform::for_mode(
+                width,
+                height,
+                inference_width,
+                inference_height,
+                resize_mode,
+            );
 
             // Pre-allocate features vector with exact capacity
             let pixel_count = (inference_width * inference_height) as usize;
@@ -1024,8 +1176,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y as u32,
                                         cell_width as u32,
                                         cell_height as u32,
-                                        inference_width,
-                                        inference_height,
+                                        &bbox_transform,
                                         width,
                                         height,
                                     )
@@ -1109,8 +1260,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y as u32,
                                         bbox_width as u32,
                                         bbox_height as u32,
-                                        inference_width,
-                                        inference_height,
+                                        &bbox_transform,
                                         width,
                                         height,
                                     )
@@ -1200,8 +1350,7 @@ impl BaseTransformImpl for EdgeImpulseVideoInfer {
                                         y as u32,
                                         bbox_width as u32,
                                         bbox_height as u32,
-                                        inference_width,
-                                        inference_height,
+                                        &bbox_transform,
                                         width,
                                         height,
                                     )
@@ -1425,5 +1574,105 @@ impl AsRef<Option<EdgeImpulseModel>> for VideoState {
 impl AsMut<Option<EdgeImpulseModel>> for VideoState {
     fn as_mut(&mut self) -> &mut Option<EdgeImpulseModel> {
         &mut self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resize_gray_image, resize_rgb_image, scale_bounding_box};
+    use crate::resize::{ResizeMode, ResizeTransform};
+
+    // A 4x4 solid-white source fitted into an 8x4 target must be aspect-preserved
+    // and centered with black zero-padding on the left/right, NOT stretched.
+    #[test]
+    fn resize_rgb_fit_longest_pads_instead_of_squashing() {
+        let src = vec![255u8; 4 * 4 * 3];
+        let out =
+            resize_rgb_image(&src, 4, 4, 8, 4, ResizeMode::FitLongest).expect("resize should work");
+        assert_eq!(out.len(), 8 * 4 * 3);
+
+        // Top-left corner is padding -> black.
+        assert_eq!(&out[0..3], &[0, 0, 0], "left column must be black padding");
+        // Centered content pixel (x=4, y=2) -> white.
+        let center = ((2 * 8 + 4) * 3) as usize;
+        assert_eq!(
+            &out[center..center + 3],
+            &[255, 255, 255],
+            "centered content must stay white"
+        );
+    }
+
+    #[test]
+    fn resize_gray_fit_longest_pads_instead_of_squashing() {
+        let src = vec![255u8; 4 * 4];
+        let out = resize_gray_image(&src, 4, 4, 8, 4, ResizeMode::FitLongest)
+            .expect("resize should work");
+        assert_eq!(out.len(), 8 * 4);
+
+        assert_eq!(out[0], 0, "left column must be black padding");
+        let center = (2 * 8 + 4) as usize;
+        assert_eq!(out[center], 255, "centered content must stay white");
+    }
+
+    #[test]
+    fn resize_rgb_fit_shortest_crops_instead_of_squashing() {
+        // 2x4 with the middle 2 rows white; fit-shortest to 2x2 (s=1.0) crops the
+        // top/bottom rows -> all white. A squash would blend the black rows in.
+        let mut src = vec![0u8; 2 * 4 * 3];
+        for row in 1..3usize {
+            for col in 0..2usize {
+                let i = (row * 2 + col) * 3;
+                src[i] = 255;
+                src[i + 1] = 255;
+                src[i + 2] = 255;
+            }
+        }
+        let out = resize_rgb_image(&src, 2, 4, 2, 2, ResizeMode::FitShortest)
+            .expect("resize should work");
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert!(out.iter().all(|&b| b == 255), "center rows fill the crop");
+    }
+
+    #[test]
+    fn resize_gray_fit_shortest_crops_instead_of_squashing() {
+        let mut src = vec![0u8; 2 * 4];
+        src[2] = 200; // row1
+        src[3] = 200;
+        src[4] = 200; // row2
+        src[5] = 200;
+        let out = resize_gray_image(&src, 2, 4, 2, 2, ResizeMode::FitShortest)
+            .expect("resize should work");
+        assert_eq!(out, vec![200, 200, 200, 200]);
+    }
+
+    #[test]
+    fn scale_bbox_squash_matches_axis_ratio() {
+        let t = ResizeTransform::for_mode(200, 100, 100, 50, ResizeMode::Squash);
+        // model box (10,10,20,20) -> orig (20,20,40,40)
+        assert_eq!(
+            scale_bounding_box(10, 10, 20, 20, &t, 200, 100),
+            (20, 20, 40, 40)
+        );
+    }
+
+    #[test]
+    fn scale_bbox_fit_longest_removes_padding() {
+        // orig 100x60 -> model 50x50 fit-longest: s=0.5, pad_y=10. A box spanning
+        // the content band maps to the full original frame.
+        let t = ResizeTransform::for_mode(100, 60, 50, 50, ResizeMode::FitLongest);
+        assert_eq!(
+            scale_bounding_box(0, 10, 50, 30, &t, 100, 60),
+            (0, 0, 100, 60)
+        );
+    }
+
+    #[test]
+    fn scale_bbox_fit_shortest_adds_crop_offset() {
+        // orig 100x50 -> model 50x50 fit-shortest: s=1.0, crop 25px each side.
+        let t = ResizeTransform::for_mode(100, 50, 50, 50, ResizeMode::FitShortest);
+        assert_eq!(
+            scale_bounding_box(0, 0, 50, 50, &t, 100, 50),
+            (25, 0, 50, 50)
+        );
     }
 }

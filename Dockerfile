@@ -110,11 +110,11 @@ export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc\n\
 export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++\n\
 \n\
 # Build for aarch64 with FFI feature enabled\n\
-cargo build --target aarch64-unknown-linux-gnu --features ffi --release\n\
+cargo build --target aarch64-unknown-linux-gnu --features ffi,ocr,presentation,ingestion --release\n\
 \n\
 # Build examples\n\
 echo "Building examples..."\n\
-cargo build --target aarch64-unknown-linux-gnu --features ffi --release --examples\n\
+cargo build --target aarch64-unknown-linux-gnu --features ffi,ocr,presentation,ingestion --release --examples\n\
 \n\
 echo "Build completed successfully!"\n\
 echo "Output files:"\n\

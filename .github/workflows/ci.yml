@@ -42,8 +42,32 @@ jobs:
     - name: Check formatting
       run: cargo fmt -- --check
 
-    - name: Build
-      run: cargo build --no-default-features --features eim --verbose
+    # The default and `ffi` feature sets embed a model at build time via the
+    # runner's build script (it requires EI_MODEL or EI_PROJECT_ID/EI_API_KEY),
+    # so they cannot be built here without provisioning model credentials.
+    # Studio deployments supply that model; CI instead validates every
+    # runner-free capability, the `eim` backend (which needs no build-time
+    # model), and the backend guard.
+    - name: Build runner-free matrix
+      run: |
+        cargo build --verbose --no-default-features --features ocr,presentation
+        cargo build --verbose --no-default-features --features ocr
+        cargo build --verbose --no-default-features --features presentation
+        cargo build --verbose --no-default-features --features ingestion
+        cargo build --verbose --no-default-features
 
-    - name: Run tests
-      run: cargo test --no-default-features --features eim --verbose --lib
+    - name: Build inference backend (eim)
+      run: cargo build --verbose --no-default-features --features eim
+
+    - name: Backend guard must reject inference without a backend
+      run: |
+        if cargo build --no-default-features --features inference 2>/dev/null; then
+          echo "GUARD FAILED: inference built without a backend"; exit 1
+        fi
+        echo "GUARD OK"
+
+    - name: Run lib tests (runner-free set)
+      run: cargo test --verbose --no-default-features --features ocr,presentation --lib
+
+    - name: Run lib tests (eim)
+      run: cargo test --verbose --no-default-features --features eim --lib

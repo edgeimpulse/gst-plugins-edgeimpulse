@@ -85,15 +85,23 @@ impl OcrOrigin {
         parent_width: u32,
         parent_height: u32,
     ) -> Self {
-        Self {
-            frame_width,
-            frame_height,
-            parent: Some(ParentBox {
+        // A zero-area parent describes nothing, and a consumer receiving
+        // [0, 0, 0, 0] cannot tell it apart from a real box at the origin.
+        // `None` is the honest encoding, and consumers already handle it.
+        let parent = if parent_width == 0 || parent_height == 0 {
+            None
+        } else {
+            Some(ParentBox {
                 x: parent_x,
                 y: parent_y,
                 w: parent_width,
                 h: parent_height,
-            }),
+            })
+        };
+        Self {
+            frame_width,
+            frame_height,
+            parent,
         }
     }
 }
@@ -265,5 +273,15 @@ mod tests {
                 h: 78
             })
         );
+    }
+
+    #[test]
+    fn from_crop_drops_a_zero_area_parent() {
+        let flat = OcrOrigin::from_crop(640, 480, 12, 34, 0, 78);
+        assert_eq!(flat.parent, None, "a zero-width parent describes nothing");
+        assert_eq!(flat.frame_width, 640, "the frame is still known");
+
+        let thin = OcrOrigin::from_crop(640, 480, 12, 34, 56, 0);
+        assert_eq!(thin.parent, None, "a zero-height parent describes nothing");
     }
 }

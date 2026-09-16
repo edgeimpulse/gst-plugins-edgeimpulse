@@ -216,7 +216,7 @@ fn edge_impulse_decodes_upstream_detections() {
     );
 
     let ocr_texts = Arc::new(Mutex::new(Vec::<String>::new()));
-    let ocr_frame_dims = Arc::new(Mutex::new(Vec::<(i32, i32)>::new()));
+    let ocr_frame_dims = Arc::new(Mutex::new(Vec::<(i32, i32, bool)>::new()));
     let ot = ocr_texts.clone();
     let ofd = ocr_frame_dims.clone();
     pipeline.set_state(gst::State::Playing).unwrap();
@@ -234,6 +234,7 @@ fn edge_impulse_decodes_upstream_detections() {
                         ofd.lock().unwrap().push((
                             st.get::<i32>("frame_width").unwrap(),
                             st.get::<i32>("frame_height").unwrap(),
+                            st.has_field("parent_x"),
                         ));
                     }
                 }
@@ -252,8 +253,8 @@ fn edge_impulse_decodes_upstream_detections() {
     );
     assert_eq!(
         *ocr_frame_dims.lock().unwrap(),
-        vec![(80, 48)],
-        "ocr message dimensions must match negotiated caps"
+        vec![(80, 48, false)],
+        "ocr message dimensions must match negotiated caps, and a full-frame read claims no parent"
     );
     assert_eq!(
         *out_labels.lock().unwrap(),

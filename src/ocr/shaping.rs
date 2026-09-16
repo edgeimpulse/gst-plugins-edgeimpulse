@@ -36,9 +36,40 @@ pub fn attach_results(buf: &mut gst::BufferRef, lines: &[OcrLine]) {
     }
 }
 
+/// The parent detection's box, in original-frame pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentBox {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Where a recognized line was measured, and what it was read from.
+///
+/// `frame_width` / `frame_height` are the dimensions a consumer must divide the
+/// line's box by to get resolution-independent coordinates. They are **not**
+/// always the dimensions of the buffer passing through the element: on the
+/// crop-fed path the buffer is the crop, and the frame is whatever
+/// `CropOriginMeta` says the crop was taken from.
+///
+/// `parent` is set only when OCR ran on a crop of a parent detection. The crop
+/// rect is that detection's box, which is what makes it a usable join key: it is
+/// correct with or without an object tracker, unlike `object_id`, which stays 0
+/// when the upstream detector does not track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcrOrigin {
+    pub frame_width: u32,
+    pub frame_height: u32,
+    pub parent: Option<ParentBox>,
+}
+
 /// Build an `ocr` element-message structure for one recognized line.
-pub fn build_ocr_message(line: &OcrLine, pts_ms: i64) -> gst::Structure {
-    gst::Structure::builder("ocr")
+///
+/// `parent_*` fields are present as a group or absent as a group, so a consumer
+/// never sees a half-described parent.
+pub fn build_ocr_message(line: &OcrLine, pts_ms: i64, origin: &OcrOrigin) -> gst::Structure {
+    let mut builder = gst::Structure::builder("ocr")
         .field("text", line.text.as_str())
         .field("confidence", line.confidence as f64)
         .field("x", line.x as i32)
@@ -46,7 +77,16 @@ pub fn build_ocr_message(line: &OcrLine, pts_ms: i64) -> gst::Structure {
         .field("width", line.w as i32)
         .field("height", line.h as i32)
         .field("timestamp", pts_ms)
-        .build()
+        .field("frame_width", origin.frame_width as i32)
+        .field("frame_height", origin.frame_height as i32);
+    if let Some(parent) = origin.parent {
+        builder = builder
+            .field("parent_x", parent.x as i32)
+            .field("parent_y", parent.y as i32)
+            .field("parent_width", parent.w as i32)
+            .field("parent_height", parent.h as i32);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -118,7 +158,12 @@ mod tests {
     #[test]
     fn builds_ocr_message_fields() {
         gst::init().unwrap();
-        let s = build_ocr_message(&line("hello", 0.7), 1234);
+        let origin = OcrOrigin {
+            frame_width: 0,
+            frame_height: 0,
+            parent: None,
+        };
+        let s = build_ocr_message(&line("hello", 0.7), 1234, &origin);
         assert_eq!(s.name(), "ocr");
         assert_eq!(s.get::<String>("text").unwrap(), "hello");
         assert_eq!(s.get::<f64>("confidence").unwrap(), 0.7f32 as f64);
@@ -127,5 +172,42 @@ mod tests {
         assert_eq!(s.get::<i32>("width").unwrap(), 3);
         assert_eq!(s.get::<i32>("height").unwrap(), 4);
         assert_eq!(s.get::<i64>("timestamp").unwrap(), 1234);
+    }
+
+    #[test]
+    fn builds_ocr_message_with_frame_dimensions() {
+        gst::init().unwrap();
+        let origin = OcrOrigin {
+            frame_width: 1920,
+            frame_height: 1080,
+            parent: None,
+        };
+        let s = build_ocr_message(&line("hello", 0.7), 1234, &origin);
+        assert_eq!(s.get::<i32>("frame_width").unwrap(), 1920);
+        assert_eq!(s.get::<i32>("frame_height").unwrap(), 1080);
+        assert!(
+            !s.has_field("parent_x"),
+            "a full-frame read has no parent detection"
+        );
+    }
+
+    #[test]
+    fn builds_ocr_message_with_parent_lineage() {
+        gst::init().unwrap();
+        let origin = OcrOrigin {
+            frame_width: 1920,
+            frame_height: 1080,
+            parent: Some(ParentBox {
+                x: 40,
+                y: 60,
+                w: 120,
+                h: 32,
+            }),
+        };
+        let s = build_ocr_message(&line("SN-42", 0.9), 7, &origin);
+        assert_eq!(s.get::<i32>("parent_x").unwrap(), 40);
+        assert_eq!(s.get::<i32>("parent_y").unwrap(), 60);
+        assert_eq!(s.get::<i32>("parent_width").unwrap(), 120);
+        assert_eq!(s.get::<i32>("parent_height").unwrap(), 32);
     }
 }

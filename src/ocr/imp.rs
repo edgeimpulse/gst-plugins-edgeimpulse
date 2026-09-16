@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::ocr::backend::{Backend, NoopBackend, OcrBackend, OcrLine};
-use crate::ocr::shaping::{attach_results, build_ocr_message, filter_and_truncate};
+use crate::ocr::shaping::{attach_results, build_ocr_message, filter_and_truncate, OcrOrigin};
 use crate::ocr::stabilize::{extrapolate_box, passthrough, stabilize, tracker_dt, StabilizedLine};
 use crate::tracker::{KalmanConfig, Tracker, TrackerConfig};
 
@@ -455,6 +455,23 @@ impl EdgeImpulseOcr {
         }
     }
 
+    /// Dimensions from this element's negotiated input caps.
+    ///
+    /// Returns whatever the negotiated caps describe. On a crop-fed pipeline,
+    /// that is the crop as delivered, possibly after `target-width` /
+    /// `target-height` resizing, not the original frame.
+    ///
+    /// Returns `(0, 0)` before caps are negotiated. A zero dimension means
+    /// "unknown" and coordinates should be left in pixels.
+    fn caps_dims(&self) -> (u32, u32) {
+        self.info
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|info| (info.width(), info.height()))
+            .unwrap_or((0, 0))
+    }
+
     #[cfg(feature = "ocr")]
     fn build_ocrs(settings: &Settings) -> Box<dyn OcrBackend> {
         // Each model loads from its explicit path when set, else from the
@@ -503,8 +520,12 @@ impl EdgeImpulseOcr {
         let n = self.ei_frame_count.fetch_add(1, Ordering::Relaxed) + 1;
         let due = n % (interval.max(1) as u64) == 0;
         if post_message && due {
+            // Cropped buffers never carry the character ROI metas decoded here,
+            // so this path is full-frame.
+            let (frame_width, frame_height) = self.caps_dims();
+            let origin = OcrOrigin::full_frame(frame_width, frame_height);
             for line in &lines {
-                let s = build_ocr_message(line, pts_ms);
+                let s = build_ocr_message(line, pts_ms, &origin);
                 let _ = self
                     .obj()
                     .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
@@ -525,7 +546,11 @@ impl EdgeImpulseOcr {
         interval: u32,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
         // Crop geometry (original-frame coords). No meta ⇒ nothing to recognize.
-        let (object_id, src_x, src_y, src_w, src_h) = {
+        //
+        // `orig_w` / `orig_h` are the frame the crop was cut from, not the crop
+        // itself, so they are what the line's box normalizes against. `self.info`
+        // would give the crop's size here.
+        let (object_id, src_x, src_y, src_w, src_h, orig_w, orig_h, det_x, det_y, det_w, det_h) = {
             let Some(meta) = buf.meta::<crate::crop::meta::CropOriginMeta>() else {
                 return Ok(gst::FlowSuccess::Ok);
             };
@@ -535,6 +560,12 @@ impl EdgeImpulseOcr {
                 meta.source_y(),
                 meta.source_width(),
                 meta.source_height(),
+                meta.original_width(),
+                meta.original_height(),
+                meta.detection_x(),
+                meta.detection_y(),
+                meta.detection_width(),
+                meta.detection_height(),
             )
         };
 
@@ -612,8 +643,14 @@ impl EdgeImpulseOcr {
         if !lines.is_empty() {
             attach_results(buf, &lines);
             if post_message {
+                // The detection's own box, not the crop rect: `crop` pads and
+                // clamps before cutting, so matching against the crop rect fails
+                // for any pipeline that sets `padding`. This is also the only
+                // usable join key — `CropOriginMeta::object_id` stays 0 unless
+                // the upstream detector tracks objects.
+                let origin = OcrOrigin::from_crop(orig_w, orig_h, det_x, det_y, det_w, det_h);
                 for l in &lines {
-                    let s = build_ocr_message(l, pts_ms);
+                    let s = build_ocr_message(l, pts_ms, &origin);
                     let _ = self
                         .obj()
                         .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
@@ -754,8 +791,12 @@ impl EdgeImpulseOcr {
         );
 
         if post_message {
+            // If someone feeds crops into the default `ocrs` worker path, these
+            // dimensions are the crop caps because this path ignores
+            // `CropOriginMeta`.
+            let origin = OcrOrigin::full_frame(frame_w, frame_h);
             for l in &lines {
-                let s = build_ocr_message(l, pts_ms);
+                let s = build_ocr_message(l, pts_ms, &origin);
                 let _ = self
                     .obj()
                     .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());
@@ -1059,8 +1100,9 @@ impl BaseTransformImpl for EdgeImpulseOcr {
             let bus_lines: Vec<OcrLine> = raw_lines.iter().map(&to_static).collect();
             let bus_lines =
                 filter_and_truncate(bus_lines, min_confidence as f32, max_text_length as usize);
+            let origin = OcrOrigin::full_frame(info.width(), info.height());
             for line in &bus_lines {
-                let s = build_ocr_message(line, result_pts_ms);
+                let s = build_ocr_message(line, result_pts_ms, &origin);
                 let _ = self
                     .obj()
                     .post_message(gst::message::Element::builder(s).src(&*self.obj()).build());

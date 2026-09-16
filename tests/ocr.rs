@@ -98,7 +98,7 @@ fn edge_impulse_without_upstream_detections_attaches_no_metas() {
     // edge-impulse backend has nothing to decode, so it must attach no ROI metas.
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=2 ! video/x-raw,format=RGB,width=80,height=48 ! \
-         videoconvert ! {} backend=edge-impulse interval=1 ! appsink name=sink",
+         videoconvert ! {} backend=edge-impulse-characters interval=1 ! appsink name=sink",
         ocr_element_name()
     ))
     .unwrap()
@@ -163,7 +163,7 @@ fn edge_impulse_decodes_upstream_detections() {
 
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=1 ! video/x-raw,format=RGB,width=80,height=48 ! \
-         videoconvert ! {elem} name=ocr backend=edge-impulse interval=1 ! \
+         videoconvert ! {elem} name=ocr backend=edge-impulse-characters interval=1 ! \
          appsink name=sink",
         elem = ocr_element_name(),
     ))
@@ -216,7 +216,9 @@ fn edge_impulse_decodes_upstream_detections() {
     );
 
     let ocr_texts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ocr_frame_dims = Arc::new(Mutex::new(Vec::<(i32, i32, bool)>::new()));
     let ot = ocr_texts.clone();
+    let ofd = ocr_frame_dims.clone();
     pipeline.set_state(gst::State::Playing).unwrap();
     for msg in pipeline
         .bus()
@@ -229,6 +231,11 @@ fn edge_impulse_decodes_upstream_detections() {
                 if let Some(st) = e.structure() {
                     if st.name() == "ocr" {
                         ot.lock().unwrap().push(st.get::<String>("text").unwrap());
+                        ofd.lock().unwrap().push((
+                            st.get::<i32>("frame_width").unwrap(),
+                            st.get::<i32>("frame_height").unwrap(),
+                            st.has_field("parent_x"),
+                        ));
                     }
                 }
             }
@@ -243,6 +250,11 @@ fn edge_impulse_decodes_upstream_detections() {
         *ocr_texts.lock().unwrap(),
         vec!["AB".to_string()],
         "expected exactly one ocr message with the assembled text"
+    );
+    assert_eq!(
+        *ocr_frame_dims.lock().unwrap(),
+        vec![(80, 48, false)],
+        "ocr message dimensions must match negotiated caps, and a full-frame read claims no parent"
     );
     assert_eq!(
         *out_labels.lock().unwrap(),
@@ -263,7 +275,7 @@ fn edge_impulse_interval_throttles_ocr_messages() {
 
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=5 ! video/x-raw,format=RGB,width=80,height=48 ! \
-         videoconvert ! {elem} name=ocr backend=edge-impulse interval=5 ! \
+         videoconvert ! {elem} name=ocr backend=edge-impulse-characters interval=5 ! \
          appsink name=sink",
         elem = ocr_element_name(),
     ))

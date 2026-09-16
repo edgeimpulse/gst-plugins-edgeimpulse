@@ -481,6 +481,13 @@ impl EdgeImpulseCrop {
             crop_meta.set_source_height(crop_h);
             crop_meta.set_original_width(video_info.width());
             crop_meta.set_original_height(video_info.height());
+            // The detection's own rect, unpadded and unclamped. `source_*` above
+            // is this box grown by `padding` and clipped to the frame, which is
+            // the right thing to *cut* but the wrong thing to match against.
+            crop_meta.set_detection_x(det.x);
+            crop_meta.set_detection_y(det.y);
+            crop_meta.set_detection_width(det.width);
+            crop_meta.set_detection_height(det.height);
             crop_meta.set_object_id(det.object_id);
             crop_meta.set_detection_label(det.label.clone());
             crop_meta.set_detection_confidence(det.confidence);

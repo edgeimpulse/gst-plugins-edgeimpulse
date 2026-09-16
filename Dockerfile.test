@@ -1,4 +1,7 @@
-FROM rust:1.90-slim-bullseye
+# Bookworm, not bullseye: bullseye is oldoldstable and the debian-security pool
+# no longer carries its .deb files, while the indices still list them. apt
+# resolves a version that 404s, and the build dies before it copies any source.
+FROM rust:1.90-slim-bookworm
 
 # Install GStreamer dev + runtime + codec plugins for test pipelines
 RUN apt-get update && \

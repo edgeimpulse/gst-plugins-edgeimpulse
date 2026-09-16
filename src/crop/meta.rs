@@ -13,6 +13,10 @@
 //! | `source_y` | `u32` | Y offset of the crop region in the original frame |
 //! | `source_width` | `u32` | Width of the crop region (before any resize) |
 //! | `source_height` | `u32` | Height of the crop region (before any resize) |
+//! | `detection_x` | `u32` | X of the originating detection in the original frame, before padding |
+//! | `detection_y` | `u32` | Y of the originating detection in the original frame, before padding |
+//! | `detection_width` | `u32` | Width of the originating detection, before padding |
+//! | `detection_height` | `u32` | Height of the originating detection, before padding |
 //! | `original_width` | `u32` | Width of the original frame |
 //! | `original_height` | `u32` | Height of the original frame |
 //! | `object_id` | `u64` | Object tracking ID from upstream detection |
@@ -37,10 +41,11 @@
 //! use crate::crop::meta::CropOriginMeta;
 //!
 //! if let Some(meta) = buffer.meta::<CropOriginMeta>() {
-//!     println!("crop from {}x{}+{}+{} in {}x{} frame, label={}",
+//!     println!("crop from {}x{}+{}+{} in {}x{} frame, detection_x={}, label={}",
 //!         meta.source_width(), meta.source_height(),
 //!         meta.source_x(), meta.source_y(),
 //!         meta.original_width(), meta.original_height(),
+//!         meta.detection_x(),
 //!         meta.detection_label(),
 //!     );
 //! }
@@ -74,6 +79,10 @@ impl CropOriginMeta {
                 meta.source_y = 0;
                 meta.source_width = 0;
                 meta.source_height = 0;
+                meta.detection_x = 0;
+                meta.detection_y = 0;
+                meta.detection_width = 0;
+                meta.detection_height = 0;
                 meta.original_width = 0;
                 meta.original_height = 0;
                 meta.object_id = 0;
@@ -111,6 +120,34 @@ impl CropOriginMeta {
     }
     pub fn set_source_height(&mut self, v: u32) {
         self.0.source_height = v;
+    }
+
+    pub fn detection_x(&self) -> u32 {
+        self.0.detection_x
+    }
+    pub fn set_detection_x(&mut self, v: u32) {
+        self.0.detection_x = v;
+    }
+
+    pub fn detection_y(&self) -> u32 {
+        self.0.detection_y
+    }
+    pub fn set_detection_y(&mut self, v: u32) {
+        self.0.detection_y = v;
+    }
+
+    pub fn detection_width(&self) -> u32 {
+        self.0.detection_width
+    }
+    pub fn set_detection_width(&mut self, v: u32) {
+        self.0.detection_width = v;
+    }
+
+    pub fn detection_height(&self) -> u32 {
+        self.0.detection_height
+    }
+    pub fn set_detection_height(&mut self, v: u32) {
+        self.0.detection_height = v;
     }
 
     pub fn original_width(&self) -> u32 {
@@ -171,6 +208,16 @@ impl fmt::Debug for CropOriginMeta {
                 ),
             )
             .field(
+                "detection",
+                &format!(
+                    "{}x{}+{}+{}",
+                    self.detection_width(),
+                    self.detection_height(),
+                    self.detection_x(),
+                    self.detection_y()
+                ),
+            )
+            .field(
                 "original",
                 &format!("{}x{}", self.original_width(), self.original_height()),
             )
@@ -203,6 +250,14 @@ mod imp {
         pub(super) source_width: u32,
         /// Height of the crop region (before any resize)
         pub(super) source_height: u32,
+        /// X of the originating detection in the original frame, before padding
+        pub(super) detection_x: u32,
+        /// Y of the originating detection in the original frame, before padding
+        pub(super) detection_y: u32,
+        /// Width of the originating detection, before padding
+        pub(super) detection_width: u32,
+        /// Height of the originating detection, before padding
+        pub(super) detection_height: u32,
         /// Width of the original frame
         pub(super) original_width: u32,
         /// Height of the original frame
@@ -239,6 +294,10 @@ mod imp {
         ptr::write(&mut meta.source_y, 0);
         ptr::write(&mut meta.source_width, 0);
         ptr::write(&mut meta.source_height, 0);
+        ptr::write(&mut meta.detection_x, 0);
+        ptr::write(&mut meta.detection_y, 0);
+        ptr::write(&mut meta.detection_width, 0);
+        ptr::write(&mut meta.detection_height, 0);
         ptr::write(&mut meta.original_width, 0);
         ptr::write(&mut meta.original_height, 0);
         ptr::write(&mut meta.object_id, 0);
@@ -268,6 +327,10 @@ mod imp {
         new_meta.0.source_y = meta.source_y;
         new_meta.0.source_width = meta.source_width;
         new_meta.0.source_height = meta.source_height;
+        new_meta.0.detection_x = meta.detection_x;
+        new_meta.0.detection_y = meta.detection_y;
+        new_meta.0.detection_width = meta.detection_width;
+        new_meta.0.detection_height = meta.detection_height;
         new_meta.0.original_width = meta.original_width;
         new_meta.0.original_height = meta.original_height;
         new_meta.0.object_id = meta.object_id;

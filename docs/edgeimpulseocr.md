@@ -80,10 +80,13 @@ With the `ocrs` backend, recognition is asynchronous, so results attach to a sli
 
 ```
 ocr, text=(string), confidence=(double),
-     x=(int), y=(int), width=(int), height=(int), timestamp=(gint64)
+     x=(int), y=(int), width=(int), height=(int), timestamp=(gint64),
+     frame_width=(int), frame_height=(int)
 ```
 
-`x`, `y`, `width`, and `height` are the line's bounding box in full-frame pixels; `timestamp` is the source-frame PTS in milliseconds.
+`x`, `y`, `width`, and `height` are the line's bounding box in full-frame pixels; on crop-fed pipelines this is translated from the crop origin. `timestamp` is the source-frame PTS in milliseconds. `frame_width` and `frame_height` are always present and are the dimensions to divide the box by for resolution-independent coordinates. A value of `0` means the dimensions are unknown and coordinates should stay in pixels.
+
+When OCR runs on a crop from `edgeimpulsecrop`, the message also includes `parent_x`, `parent_y`, `parent_width`, and `parent_height`. They are the originating detection's unpadded box in original-frame pixels. All four parent fields appear together or none do.
 
 ## Backends
 

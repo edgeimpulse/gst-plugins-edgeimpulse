@@ -54,9 +54,7 @@ pub struct ParentBox {
 /// `CropOriginMeta` says the crop was taken from.
 ///
 /// `parent` is set only when OCR ran on a crop of a parent detection. The crop
-/// rect is that detection's box, which is what makes it a usable join key: it is
-/// correct with or without an object tracker, unlike `object_id`, which stays 0
-/// when the upstream detector does not track.
+/// path records that detection's box separately from the padded crop rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OcrOrigin {
     pub frame_width: u32,
@@ -64,10 +62,43 @@ pub struct OcrOrigin {
     pub parent: Option<ParentBox>,
 }
 
+impl OcrOrigin {
+    /// OCR ran on the whole frame, so the buffer's own dimensions are the
+    /// frame's and there is no parent detection.
+    pub fn full_frame(frame_width: u32, frame_height: u32) -> Self {
+        Self {
+            frame_width,
+            frame_height,
+            parent: None,
+        }
+    }
+
+    /// OCR ran on a crop. `frame_*` must come from `CropOriginMeta`'s
+    /// `original_*` — the buffer here is the crop, so its caps describe the
+    /// crop, not the frame. `parent_*` is the originating detection's box,
+    /// which `CropOriginMeta` records separately from the padded crop rect.
+    pub fn from_crop(
+        frame_width: u32,
+        frame_height: u32,
+        parent_x: u32,
+        parent_y: u32,
+        parent_width: u32,
+        parent_height: u32,
+    ) -> Self {
+        Self {
+            frame_width,
+            frame_height,
+            parent: Some(ParentBox {
+                x: parent_x,
+                y: parent_y,
+                w: parent_width,
+                h: parent_height,
+            }),
+        }
+    }
+}
+
 /// Build an `ocr` element-message structure for one recognized line.
-///
-/// `parent_*` fields are present as a group or absent as a group, so a consumer
-/// never sees a half-described parent.
 pub fn build_ocr_message(line: &OcrLine, pts_ms: i64, origin: &OcrOrigin) -> gst::Structure {
     let mut builder = gst::Structure::builder("ocr")
         .field("text", line.text.as_str())
@@ -158,11 +189,7 @@ mod tests {
     #[test]
     fn builds_ocr_message_fields() {
         gst::init().unwrap();
-        let origin = OcrOrigin {
-            frame_width: 0,
-            frame_height: 0,
-            parent: None,
-        };
+        let origin = OcrOrigin::full_frame(0, 0);
         let s = build_ocr_message(&line("hello", 0.7), 1234, &origin);
         assert_eq!(s.name(), "ocr");
         assert_eq!(s.get::<String>("text").unwrap(), "hello");
@@ -177,11 +204,7 @@ mod tests {
     #[test]
     fn builds_ocr_message_with_frame_dimensions() {
         gst::init().unwrap();
-        let origin = OcrOrigin {
-            frame_width: 1920,
-            frame_height: 1080,
-            parent: None,
-        };
+        let origin = OcrOrigin::full_frame(1920, 1080);
         let s = build_ocr_message(&line("hello", 0.7), 1234, &origin);
         assert_eq!(s.get::<i32>("frame_width").unwrap(), 1920);
         assert_eq!(s.get::<i32>("frame_height").unwrap(), 1080);
@@ -189,25 +212,58 @@ mod tests {
             !s.has_field("parent_x"),
             "a full-frame read has no parent detection"
         );
+        assert!(
+            !s.has_field("parent_y"),
+            "a full-frame read has no parent detection"
+        );
+        assert!(
+            !s.has_field("parent_width"),
+            "a full-frame read has no parent detection"
+        );
+        assert!(
+            !s.has_field("parent_height"),
+            "a full-frame read has no parent detection"
+        );
     }
 
     #[test]
     fn builds_ocr_message_with_parent_lineage() {
         gst::init().unwrap();
-        let origin = OcrOrigin {
-            frame_width: 1920,
-            frame_height: 1080,
-            parent: Some(ParentBox {
-                x: 40,
-                y: 60,
-                w: 120,
-                h: 32,
-            }),
+        let origin = OcrOrigin::from_crop(1920, 1080, 40, 60, 40, 12);
+        let crop_line = OcrLine {
+            text: "SN-42".into(),
+            confidence: 0.9,
+            x: 30,
+            y: 50,
+            w: 60,
+            h: 32,
         };
-        let s = build_ocr_message(&line("SN-42", 0.9), 7, &origin);
+        let s = build_ocr_message(&crop_line, 7, &origin);
+        assert_eq!(s.get::<i32>("frame_width").unwrap(), 1920);
+        assert_eq!(s.get::<i32>("frame_height").unwrap(), 1080);
+        assert_eq!(s.get::<i32>("x").unwrap(), 30);
+        assert_eq!(s.get::<i32>("y").unwrap(), 50);
+        assert_eq!(s.get::<i32>("width").unwrap(), 60);
+        assert_eq!(s.get::<i32>("height").unwrap(), 32);
         assert_eq!(s.get::<i32>("parent_x").unwrap(), 40);
         assert_eq!(s.get::<i32>("parent_y").unwrap(), 60);
-        assert_eq!(s.get::<i32>("parent_width").unwrap(), 120);
-        assert_eq!(s.get::<i32>("parent_height").unwrap(), 32);
+        assert_eq!(s.get::<i32>("parent_width").unwrap(), 40);
+        assert_eq!(s.get::<i32>("parent_height").unwrap(), 12);
+    }
+
+    #[test]
+    fn from_crop_keeps_frame_and_parent_separate() {
+        let origin = OcrOrigin::from_crop(640, 480, 12, 34, 56, 78);
+        assert_eq!(origin.frame_width, 640);
+        assert_eq!(origin.frame_height, 480);
+        assert_eq!(
+            origin.parent,
+            Some(ParentBox {
+                x: 12,
+                y: 34,
+                w: 56,
+                h: 78
+            })
+        );
     }
 }

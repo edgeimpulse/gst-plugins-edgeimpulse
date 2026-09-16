@@ -216,7 +216,9 @@ fn edge_impulse_decodes_upstream_detections() {
     );
 
     let ocr_texts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ocr_frame_dims = Arc::new(Mutex::new(Vec::<(i32, i32)>::new()));
     let ot = ocr_texts.clone();
+    let ofd = ocr_frame_dims.clone();
     pipeline.set_state(gst::State::Playing).unwrap();
     for msg in pipeline
         .bus()
@@ -229,6 +231,10 @@ fn edge_impulse_decodes_upstream_detections() {
                 if let Some(st) = e.structure() {
                     if st.name() == "ocr" {
                         ot.lock().unwrap().push(st.get::<String>("text").unwrap());
+                        ofd.lock().unwrap().push((
+                            st.get::<i32>("frame_width").unwrap(),
+                            st.get::<i32>("frame_height").unwrap(),
+                        ));
                     }
                 }
             }
@@ -243,6 +249,11 @@ fn edge_impulse_decodes_upstream_detections() {
         *ocr_texts.lock().unwrap(),
         vec!["AB".to_string()],
         "expected exactly one ocr message with the assembled text"
+    );
+    assert_eq!(
+        *ocr_frame_dims.lock().unwrap(),
+        vec![(80, 48)],
+        "ocr message dimensions must match negotiated caps"
     );
     assert_eq!(
         *out_labels.lock().unwrap(),

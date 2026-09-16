@@ -211,14 +211,18 @@ Optionally, each grid cell may also be represented as a `VideoRegionOfInterestMe
 
 ### 4. CropOriginMeta
 
-Attached by `edgeimpulsecrop` to each cropped buffer, recording where the crop came from in the original frame so downstream classification results can be mapped back to full-frame coordinates:
+Attached by `edgeimpulsecrop` to each cropped buffer, recording where the padded, frame-clamped crop came from in the original frame so downstream classification results can be mapped back to full-frame coordinates. `source_*` is the crop rect; `detection_*` is the originating detection's own unpadded rect.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source_x` | u32 | X offset of the crop in the original frame |
-| `source_y` | u32 | Y offset of the crop in the original frame |
-| `source_width` | u32 | Width of the crop region (before resize) |
-| `source_height` | u32 | Height of the crop region (before resize) |
+| `source_x` | u32 | X offset of the padded, frame-clamped crop in the original frame |
+| `source_y` | u32 | Y offset of the padded, frame-clamped crop in the original frame |
+| `source_width` | u32 | Width of the padded, frame-clamped crop region (before resize) |
+| `source_height` | u32 | Height of the padded, frame-clamped crop region (before resize) |
+| `detection_x` | u32 | X of the originating detection in the original frame, before padding |
+| `detection_y` | u32 | Y of the originating detection in the original frame, before padding |
+| `detection_width` | u32 | Width of the originating detection, before padding |
+| `detection_height` | u32 | Height of the originating detection, before padding |
 | `original_width` | u32 | Width of the original frame |
 | `original_height` | u32 | Height of the original frame |
 | `object_id` | u64 | Object tracking ID from upstream detection |
@@ -326,7 +330,7 @@ Produced by [`edgeimpulseocr`](docs/edgeimpulseocr.md) rather than `edgeimpulsev
        timestamp=(gint64)0
   ```
 - **Video Metadata:** Each recognized line → `VideoRegionOfInterestMeta` (see [above](#videoregionofinterestmeta)) with a `detection` param carrying the text as `label`, so `edgeimpulseoverlay` renders it like any other detection.
-- **Backends:** `ocrs` (default) performs recognition in-process with embedded rten models; the `edge-impulse` backend decodes per-character detections from an upstream `edgeimpulsevideoinfer` element into text lines. See [`edgeimpulseocr`](docs/edgeimpulseocr.md) for details.
+- **Backends:** `ocrs` (default) performs recognition in-process with embedded rten models; `edge-impulse-characters` decodes per-character detections from an upstream `edgeimpulsevideoinfer` element into text lines; `edge-impulse-recognizer` runs an Edge Impulse recognizer model on crops from `edgeimpulsecrop`. See [`edgeimpulseocr`](docs/edgeimpulseocr.md) for details.
 
 ## Dependencies
 

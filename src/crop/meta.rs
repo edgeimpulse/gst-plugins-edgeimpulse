@@ -363,3 +363,51 @@ mod imp {
         META_INFO.0.as_ptr()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deep_copy_preserves_all_crop_origin_fields() {
+        gst::init().unwrap();
+
+        let mut buffer = gst::Buffer::with_size(64).unwrap();
+        {
+            let buffer = buffer.get_mut().unwrap();
+            let mut meta = CropOriginMeta::add(buffer);
+            meta.set_source_x(17);
+            meta.set_source_y(29);
+            meta.set_source_width(311);
+            meta.set_source_height(197);
+            meta.set_detection_x(43);
+            meta.set_detection_y(71);
+            meta.set_detection_width(109);
+            meta.set_detection_height(131);
+            meta.set_original_width(1921);
+            meta.set_original_height(1087);
+            meta.set_object_id(9_876_543);
+            meta.set_detection_label("serial-plate".to_string());
+            meta.set_detection_confidence(0.8125);
+        }
+
+        let copied = buffer.copy_deep().unwrap();
+        let meta = copied
+            .meta::<CropOriginMeta>()
+            .expect("CropOriginMeta should be copied by the meta transform");
+
+        assert_eq!(meta.source_x(), 17);
+        assert_eq!(meta.source_y(), 29);
+        assert_eq!(meta.source_width(), 311);
+        assert_eq!(meta.source_height(), 197);
+        assert_eq!(meta.detection_x(), 43);
+        assert_eq!(meta.detection_y(), 71);
+        assert_eq!(meta.detection_width(), 109);
+        assert_eq!(meta.detection_height(), 131);
+        assert_eq!(meta.original_width(), 1921);
+        assert_eq!(meta.original_height(), 1087);
+        assert_eq!(meta.object_id(), 9_876_543);
+        assert_eq!(meta.detection_label(), "serial-plate");
+        assert_eq!(meta.detection_confidence(), 0.8125);
+    }
+}

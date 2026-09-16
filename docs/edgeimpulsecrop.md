@@ -51,7 +51,7 @@ Dynamic crop element that extracts detected object regions from video frames bas
 2. For each detection bounding box:
    - Extracts the crop region (with optional padding, clamped to frame bounds)
    - Optionally resizes to `target-width` x `target-height`
-   - Attaches a [`CropOriginMeta`](../README.md#4-croporiginmeta) with source coordinates, original frame dimensions, object_id, label, and confidence
+   - Attaches a [`CropOriginMeta`](../README.md#4-croporiginmeta) with padded, frame-clamped source coordinates, the unpadded detection rect, original frame dimensions, object_id, label, and confidence
    - Pushes the crop buffer downstream
 3. If no detections are present, the full frame is passed through unchanged
 

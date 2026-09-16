@@ -457,9 +457,9 @@ impl EdgeImpulseOcr {
 
     /// Dimensions from this element's negotiated input caps.
     ///
-    /// Only correct on the full-frame paths, where the buffer *is* the frame.
-    /// The crop-fed path must use `CropOriginMeta::original_*` instead — there,
-    /// this returns the crop's size.
+    /// Returns whatever the negotiated caps describe. On a crop-fed pipeline,
+    /// that is the crop as delivered, possibly after `target-width` /
+    /// `target-height` resizing, not the original frame.
     ///
     /// Returns `(0, 0)` before caps are negotiated. A zero dimension means
     /// "unknown" and coordinates should be left in pixels.
@@ -520,8 +520,8 @@ impl EdgeImpulseOcr {
         let n = self.ei_frame_count.fetch_add(1, Ordering::Relaxed) + 1;
         let due = n % (interval.max(1) as u64) == 0;
         if post_message && due {
-            // This backend assumes a full-frame buffer and does not consult
-            // `CropOriginMeta`; crop-fed cascades would publish crop dimensions.
+            // Cropped buffers never carry the character ROI metas decoded here,
+            // so this path is full-frame.
             let (frame_width, frame_height) = self.caps_dims();
             let origin = OcrOrigin::full_frame(frame_width, frame_height);
             for line in &lines {
@@ -791,6 +791,9 @@ impl EdgeImpulseOcr {
         );
 
         if post_message {
+            // If someone feeds crops into the default `ocrs` worker path, these
+            // dimensions are the crop caps because this path ignores
+            // `CropOriginMeta`.
             let origin = OcrOrigin::full_frame(frame_w, frame_h);
             for l in &lines {
                 let s = build_ocr_message(l, pts_ms, &origin);

@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn builds_ocr_message_with_parent_lineage() {
         gst::init().unwrap();
-        let origin = OcrOrigin::from_crop(1920, 1080, 40, 60, 40, 12);
+        let origin = OcrOrigin::from_crop(1920, 1080, 41, 63, 47, 19);
         let crop_line = OcrLine {
             text: "SN-42".into(),
             confidence: 0.9,
@@ -245,10 +245,10 @@ mod tests {
         assert_eq!(s.get::<i32>("y").unwrap(), 50);
         assert_eq!(s.get::<i32>("width").unwrap(), 60);
         assert_eq!(s.get::<i32>("height").unwrap(), 32);
-        assert_eq!(s.get::<i32>("parent_x").unwrap(), 40);
-        assert_eq!(s.get::<i32>("parent_y").unwrap(), 60);
-        assert_eq!(s.get::<i32>("parent_width").unwrap(), 40);
-        assert_eq!(s.get::<i32>("parent_height").unwrap(), 12);
+        assert_eq!(s.get::<i32>("parent_x").unwrap(), 41);
+        assert_eq!(s.get::<i32>("parent_y").unwrap(), 63);
+        assert_eq!(s.get::<i32>("parent_width").unwrap(), 47);
+        assert_eq!(s.get::<i32>("parent_height").unwrap(), 19);
     }
 
     #[test]

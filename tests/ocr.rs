@@ -98,7 +98,7 @@ fn edge_impulse_without_upstream_detections_attaches_no_metas() {
     // edge-impulse backend has nothing to decode, so it must attach no ROI metas.
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=2 ! video/x-raw,format=RGB,width=80,height=48 ! \
-         videoconvert ! {} backend=edge-impulse interval=1 ! appsink name=sink",
+         videoconvert ! {} backend=edge-impulse-characters interval=1 ! appsink name=sink",
         ocr_element_name()
     ))
     .unwrap()
@@ -163,7 +163,7 @@ fn edge_impulse_decodes_upstream_detections() {
 
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=1 ! video/x-raw,format=RGB,width=80,height=48 ! \
-         videoconvert ! {elem} name=ocr backend=edge-impulse interval=1 ! \
+         videoconvert ! {elem} name=ocr backend=edge-impulse-characters interval=1 ! \
          appsink name=sink",
         elem = ocr_element_name(),
     ))
@@ -263,7 +263,7 @@ fn edge_impulse_interval_throttles_ocr_messages() {
 
     let pipeline = gst::parse::launch(&format!(
         "videotestsrc num-buffers=5 ! video/x-raw,format=RGB,width=80,height=48 ! \
-         videoconvert ! {elem} name=ocr backend=edge-impulse interval=5 ! \
+         videoconvert ! {elem} name=ocr backend=edge-impulse-characters interval=5 ! \
          appsink name=sink",
         elem = ocr_element_name(),
     ))

@@ -5,7 +5,7 @@
 //! # Features
 //! - Supports both audio (WAV) and video (PNG) ingestion.
 //! - Batches and uploads buffers at a configurable interval (`upload-interval-ms` property).
-//! - Exposes properties for API key, HMAC key, label, category, and upload interval.
+//! - Exposes properties for API key, HMAC key, ingestion host, label, category, and upload interval.
 //! - Posts custom messages to the GStreamer bus:
 //!   - `edge-impulse-ingestion-result`: Sent when a sample is successfully ingested. Contains filename, media type, length, label, and category.
 //!   - `edge-impulse-ingestion-error`: Sent when ingestion fails. Contains filename, media type, error message, label, and category.
@@ -20,6 +20,9 @@
 //! # Properties
 //! - `api-key` (String, required): Edge Impulse API key.
 //! - `hmac-key` (String, optional): Optional HMAC key for signing requests.
+//! - `ingestion-host` (String, optional): Base URL of the ingestion API. Defaults to
+//!   `https://ingestion.edgeimpulse.com`; set it to target a self-hosted or local
+//!   Studio deployment, whose API keys the public host would reject with HTTP 401.
 //! - `label` (String, optional): Optional label for the sample.
 //! - `category` (String, default: "training"): Category for the sample (training, testing, anomaly).
 //! - `upload-interval-ms` (u32, default: 0): Minimum interval in milliseconds between uploads (0 = every buffer).

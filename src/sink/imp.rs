@@ -28,10 +28,20 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     )
 });
 
+/// Normalizes a configured ingestion host, treating blank as unset so an empty
+/// env var or config field falls back to the default Edge Impulse host rather
+/// than producing an unroutable URL.
+fn ingestion_host_override(host: Option<&str>) -> Option<String> {
+    host.map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Default)]
 pub struct EdgeImpulseSink {
     pub api_key: Mutex<Option<String>>,
     pub hmac_key: Mutex<Option<String>>,
+    pub ingestion_host: Mutex<Option<String>>,
     pub label: Mutex<Option<String>>,
     pub category: Mutex<Option<String>>,
     pub ingestion: Mutex<Option<Arc<Ingestion>>>,
@@ -131,6 +141,13 @@ impl ObjectImpl for EdgeImpulseSink {
                     .nick("HMAC Key")
                     .blurb("Optional HMAC key for signing requests")
                     .build(),
+                ParamSpecString::builder("ingestion-host")
+                    .nick("Ingestion Host")
+                    .blurb(
+                        "Base URL of the Edge Impulse ingestion API, for self-hosted or local \
+                         Studio deployments (default: https://ingestion.edgeimpulse.com)",
+                    )
+                    .build(),
                 ParamSpecString::builder("label")
                     .nick("Label")
                     .blurb("Optional label for the file or sample")
@@ -162,6 +179,10 @@ impl ObjectImpl for EdgeImpulseSink {
                 let mut v = self.hmac_key.lock().unwrap();
                 *v = value.get().ok();
             }
+            "ingestion-host" => {
+                let mut v = self.ingestion_host.lock().unwrap();
+                *v = value.get().ok();
+            }
             "label" => {
                 let mut v = self.label.lock().unwrap();
                 *v = value.get().ok();
@@ -182,6 +203,7 @@ impl ObjectImpl for EdgeImpulseSink {
         match pspec.name() {
             "api-key" => self.api_key.lock().unwrap().to_value(),
             "hmac-key" => self.hmac_key.lock().unwrap().to_value(),
+            "ingestion-host" => self.ingestion_host.lock().unwrap().to_value(),
             "label" => self.label.lock().unwrap().to_value(),
             "category" => self.category.lock().unwrap().to_value(),
             "upload-interval-ms" => self.upload_interval_ms.lock().unwrap().to_value(),
@@ -235,8 +257,15 @@ impl BaseSinkImpl for EdgeImpulseSink {
     fn start(&self) -> Result<(), gst::ErrorMessage> {
         let api_key = self.api_key.lock().unwrap().clone();
         let hmac_key = self.hmac_key.lock().unwrap().clone();
+        let host = ingestion_host_override(self.ingestion_host.lock().unwrap().as_deref());
         if let Some(api_key) = api_key {
-            let mut ingestion = Ingestion::new(api_key);
+            let mut ingestion = match host {
+                Some(host) => {
+                    gst::info!(CAT, "Using ingestion host {}", host);
+                    Ingestion::with_host(api_key, host)
+                }
+                None => Ingestion::new(api_key),
+            };
             if let Some(hmac) = hmac_key {
                 ingestion = ingestion.with_hmac(hmac);
             }
@@ -467,5 +496,51 @@ impl BaseSinkImpl for EdgeImpulseSink {
             return Ok(gst::FlowSuccess::Ok);
         }
         Err(gst::FlowError::Error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ingestion_host_override;
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+
+    fn init() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| gst::init().expect("Failed to initialize GStreamer"));
+    }
+
+    // An unset or blank `ingestion-host` must leave the client on its default
+    // production host, so existing pipelines keep uploading to Edge Impulse.
+    #[test]
+    fn blank_ingestion_host_is_treated_as_unset() {
+        assert_eq!(ingestion_host_override(None), None);
+        assert_eq!(ingestion_host_override(Some("")), None);
+        assert_eq!(ingestion_host_override(Some("   ")), None);
+    }
+
+    // Hosts arrive from env vars and config files, so surrounding whitespace
+    // must not turn into an unroutable URL.
+    #[test]
+    fn ingestion_host_is_trimmed() {
+        assert_eq!(
+            ingestion_host_override(Some("  http://host.docker.internal:4810  ")),
+            Some("http://host.docker.internal:4810".to_string())
+        );
+    }
+
+    // The property has to round-trip: a self-hosted or local Studio deployment
+    // configures the sink through it.
+    #[test]
+    fn ingestion_host_property_round_trips() {
+        init();
+        let sink = glib::Object::new::<crate::sink::EdgeImpulseSink>();
+        assert_eq!(sink.property::<Option<String>>("ingestion-host"), None);
+
+        sink.set_property("ingestion-host", "http://localhost:4810");
+        assert_eq!(
+            sink.property::<Option<String>>("ingestion-host"),
+            Some("http://localhost:4810".to_string())
+        );
     }
 }

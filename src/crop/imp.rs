@@ -51,8 +51,10 @@ struct State {
     resize_mode: ResizeMode,
     /// Input video info (set during caps negotiation)
     video_info: Option<gst_video::VideoInfo>,
-    /// Whether we've set output caps yet
-    src_caps_set: bool,
+    /// Dimensions of the caps last pushed on the src pad, if any. Crops of
+    /// their natural size change from buffer to buffer, and each change
+    /// needs a new caps event before the buffer.
+    src_dims: Option<(u32, u32)>,
     /// Segment event deferred until after caps are set on src pad
     pending_segment: Option<gst::Event>,
 }
@@ -65,7 +67,7 @@ impl Default for State {
             target_height: 0,
             resize_mode: ResizeMode::Squash,
             video_info: None,
-            src_caps_set: false,
+            src_dims: None,
             pending_segment: None,
         }
     }
@@ -135,7 +137,8 @@ impl ObjectImpl for EdgeImpulseCrop {
                     .nick("Target Width")
                     .blurb(
                         "Resize all crops to this width (0 = keep natural crop size). \
-                         Setting a fixed target avoids caps renegotiation per-crop.",
+                         Takes effect only with target-height also set. A fixed size \
+                         avoids renegotiating caps for every crop.",
                     )
                     .minimum(0)
                     .maximum(4096)
@@ -146,7 +149,8 @@ impl ObjectImpl for EdgeImpulseCrop {
                     .nick("Target Height")
                     .blurb(
                         "Resize all crops to this height (0 = keep natural crop size). \
-                         Setting a fixed target avoids caps renegotiation per-crop.",
+                         Takes effect only with target-width also set. A fixed size \
+                         avoids renegotiating caps for every crop.",
                     )
                     .minimum(0)
                     .maximum(4096)
@@ -246,7 +250,7 @@ impl ElementImpl for EdgeImpulseCrop {
         if transition == gst::StateChange::ReadyToNull {
             let mut state = self.state.lock().unwrap();
             state.video_info = None;
-            state.src_caps_set = false;
+            state.src_dims = None;
             state.pending_segment = None;
         }
         self.parent_change_state(transition)
@@ -265,7 +269,7 @@ impl EdgeImpulseCrop {
                 if let Ok(info) = gst_video::VideoInfo::from_caps(caps) {
                     let mut state = self.state.lock().unwrap();
                     state.video_info = Some(info);
-                    state.src_caps_set = false;
+                    state.src_dims = None;
                 }
 
                 // Don't forward caps downstream — we'll set our own when we
@@ -317,20 +321,14 @@ impl EdgeImpulseCrop {
         // No detections → pass full frame through unchanged
         if detections.is_empty() {
             gst::log!(CAT, obj = self.obj(), "No detections — passing full frame");
-            self.ensure_src_caps(frame_width, frame_height, target_width, target_height)?;
-            if target_width > 0 && target_height > 0 {
+            if let Some((out_w, out_h)) = fixed_size(target_width, target_height) {
                 // Resize full frame to target dimensions
-                let resized = self.resize_buffer(
-                    &buffer,
-                    &video_info,
-                    frame_width,
-                    frame_height,
-                    target_width as u32,
-                    target_height as u32,
-                    resize_mode,
-                )?;
+                let out_info = output_info(&video_info, out_w, out_h)?;
+                let resized = self.resize_buffer(&buffer, &video_info, &out_info, resize_mode)?;
+                self.ensure_src_caps(&out_info)?;
                 return self.src_pad.push(resized);
             }
+            self.ensure_src_caps(&output_info(&video_info, frame_width, frame_height)?)?;
             return self.src_pad.push(buffer);
         }
 
@@ -439,33 +437,21 @@ impl EdgeImpulseCrop {
         drop(frame);
 
         // Determine output dimensions
-        let (out_w, out_h, out_data) = if target_width > 0
-            && target_height > 0
-            && (crop_w != target_width as u32 || crop_h != target_height as u32)
-        {
-            let out = resize_rgb(
-                &crop_data,
-                crop_w,
-                crop_h,
-                target_width as u32,
-                target_height as u32,
-                resize_mode,
-            );
-            (target_width as u32, target_height as u32, out)
-        } else {
-            (crop_w, crop_h, crop_data)
+        let (out_w, out_h, out_data) = match fixed_size(target_width, target_height) {
+            Some((w, h)) if (crop_w, crop_h) != (w, h) => {
+                let out = resize_rgb(&crop_data, crop_w, crop_h, w, h, resize_mode);
+                (w, h, out)
+            }
+            _ => (crop_w, crop_h, crop_data),
         };
 
-        // Set output caps if dimensions changed
-        self.ensure_src_caps(
-            video_info.width(),
-            video_info.height(),
-            target_width,
-            target_height,
-        )?;
+        // Announce this crop's size before pushing it, if it differs from the
+        // last one's.
+        let out_info = output_info(video_info, out_w, out_h)?;
+        self.ensure_src_caps(&out_info)?;
 
         // Create output buffer
-        let mut out_buf = gst::Buffer::from_mut_slice(out_data);
+        let mut out_buf = rgb_buffer(out_data, &out_info);
         {
             let out_buf_ref = out_buf.make_mut();
             // Copy timestamp from source
@@ -510,18 +496,16 @@ impl EdgeImpulseCrop {
         self.src_pad.push(out_buf)
     }
 
-    /// Resize a full buffer to target dimensions.
-    #[allow(clippy::too_many_arguments)]
+    /// Resize a full buffer to the dimensions of `out_info`.
     fn resize_buffer(
         &self,
         buffer: &gst::Buffer,
         video_info: &gst_video::VideoInfo,
-        frame_w: u32,
-        frame_h: u32,
-        target_w: u32,
-        target_h: u32,
+        out_info: &gst_video::VideoInfo,
         resize_mode: ResizeMode,
     ) -> Result<gst::Buffer, gst::FlowError> {
+        let frame_w = video_info.width();
+        let frame_h = video_info.height();
         let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer.as_ref(), video_info)
             .map_err(|_| gst::FlowError::Error)?;
 
@@ -544,12 +528,12 @@ impl EdgeImpulseCrop {
             &contiguous,
             frame_w,
             frame_h,
-            target_w,
-            target_h,
+            out_info.width(),
+            out_info.height(),
             resize_mode,
         );
 
-        let mut out_buf = gst::Buffer::from_mut_slice(resized);
+        let mut out_buf = rgb_buffer(resized, out_info);
         {
             let out_ref = out_buf.make_mut();
             out_ref.set_pts(buffer.pts());
@@ -559,46 +543,235 @@ impl EdgeImpulseCrop {
         Ok(out_buf)
     }
 
-    /// Ensure src pad caps are set for the given output dimensions.
-    fn ensure_src_caps(
-        &self,
-        frame_w: u32,
-        frame_h: u32,
-        target_width: i32,
-        target_height: i32,
-    ) -> Result<(), gst::FlowError> {
-        let out_w = if target_width > 0 {
-            target_width as u32
-        } else {
-            frame_w
-        };
-        let out_h = if target_height > 0 {
-            target_height as u32
-        } else {
-            frame_h
-        };
-
+    /// Push caps for `info` on the src pad when its size differs from the last
+    /// caps pushed, then any segment held back until caps were known.
+    fn ensure_src_caps(&self, info: &gst_video::VideoInfo) -> Result<(), gst::FlowError> {
+        let dims = (info.width(), info.height());
         let mut state = self.state.lock().unwrap();
-        if state.src_caps_set {
+        let changed = state.src_dims != Some(dims);
+        let pending_segment = state.pending_segment.take();
+        if !changed && pending_segment.is_none() {
             return Ok(());
         }
-
-        let caps = gst_video::VideoInfo::builder(gst_video::VideoFormat::Rgb, out_w, out_h)
-            .build()
-            .map_err(|_| gst::FlowError::Error)?
-            .to_caps()
-            .map_err(|_| gst::FlowError::Error)?;
-
-        gst::info!(CAT, obj = self.obj(), "Setting src caps: {:?}", caps);
-        state.src_caps_set = true;
-        let pending_segment = state.pending_segment.take();
+        let caps = if changed {
+            Some(info.to_caps().map_err(|_| gst::FlowError::Error)?)
+        } else {
+            None
+        };
+        state.src_dims = Some(dims);
         drop(state);
 
-        // Push caps first, then the deferred segment event — correct ordering
-        self.src_pad.push_event(gst::event::Caps::new(&caps));
+        // Caps first, then the deferred segment event — correct ordering
+        if let Some(caps) = caps {
+            gst::debug!(CAT, obj = self.obj(), "Setting src caps: {:?}", caps);
+            if !self.src_pad.push_event(gst::event::Caps::new(&caps)) {
+                gst::warning!(CAT, obj = self.obj(), "Downstream refused caps {:?}", caps);
+            }
+        }
         if let Some(segment) = pending_segment {
             self.src_pad.push_event(segment);
         }
         Ok(())
+    }
+}
+
+/// The fixed output size, when both target dimensions are set.
+fn fixed_size(target_width: i32, target_height: i32) -> Option<(u32, u32)> {
+    (target_width > 0 && target_height > 0).then_some((target_width as u32, target_height as u32))
+}
+
+/// Video info for an RGB output of `width` x `height`, keeping the input's
+/// framerate and pixel aspect ratio.
+fn output_info(
+    input: &gst_video::VideoInfo,
+    width: u32,
+    height: u32,
+) -> Result<gst_video::VideoInfo, gst::FlowError> {
+    gst_video::VideoInfo::builder(gst_video::VideoFormat::Rgb, width, height)
+        .fps(input.fps())
+        .par(input.par())
+        .build()
+        .map_err(|_| gst::FlowError::Error)
+}
+
+/// Lay tightly packed RGB rows out as `info` describes them. GStreamer pads
+/// every RGB row to a multiple of 4 bytes, so a crop whose width times 3 is
+/// not one needs the padding added, or downstream reads skewed rows.
+fn rgb_buffer(tight: Vec<u8>, info: &gst_video::VideoInfo) -> gst::Buffer {
+    let row = info.width() as usize * 3;
+    let stride = info.stride()[0] as usize;
+    if stride == row {
+        return gst::Buffer::from_mut_slice(tight);
+    }
+    let mut laid_out = vec![0u8; info.size()];
+    for (i, pixels) in tight.chunks_exact(row).enumerate() {
+        laid_out[i * stride..i * stride + row].copy_from_slice(pixels);
+    }
+    gst::Buffer::from_mut_slice(laid_out)
+}
+
+#[cfg(test)]
+mod tests {
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use gstreamer_app as gst_app;
+    use gstreamer_video as gst_video;
+
+    const ELEMENT: &str = "eitestcrop";
+    const FRAME_W: u32 = 8;
+    const FRAME_H: u32 = 6;
+
+    fn init() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            gst::init().unwrap();
+            gst::Element::register(
+                None,
+                ELEMENT,
+                gst::Rank::NONE,
+                crate::crop::EdgeImpulseCrop::static_type(),
+            )
+            .unwrap();
+        });
+    }
+
+    /// Byte of pixel (x, y), channel c, in the input frame.
+    fn pixel(x: u32, y: u32, c: u32) -> u8 {
+        ((y * FRAME_W + x) * 3 + c) as u8
+    }
+
+    struct Crop {
+        width: u32,
+        height: u32,
+        /// Tightly packed RGB rows, read through the caps' stride.
+        pixels: Vec<u8>,
+    }
+
+    /// Push one 8x6 frame carrying `boxes` (x, y, w, h) through the crop and
+    /// return every buffer it pushed, read as its caps describe it.
+    fn run(crop_props: &str, boxes: &[(u32, u32, u32, u32)]) -> Vec<Crop> {
+        init();
+        let pipeline = gst::parse::launch(&format!(
+            "appsrc name=src format=time \
+             caps=video/x-raw,format=RGB,width={FRAME_W},height={FRAME_H},framerate=10/1 \
+             ! {ELEMENT} {crop_props} ! appsink name=out sync=false"
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let src = pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gst_app::AppSrc>()
+            .unwrap();
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let data: Vec<u8> = (0..FRAME_H)
+            .flat_map(|y| (0..FRAME_W).flat_map(move |x| (0..3).map(move |c| pixel(x, y, c))))
+            .collect();
+        let mut buffer = gst::Buffer::from_mut_slice(data);
+        {
+            let buffer = buffer.get_mut().unwrap();
+            buffer.set_pts(gst::ClockTime::from_mseconds(100));
+            for (i, rect) in boxes.iter().enumerate() {
+                let mut roi = gst_video::VideoRegionOfInterestMeta::add(buffer, "obj", *rect);
+                roi.add_param(
+                    gst::Structure::builder("detection")
+                        .field("label", "obj")
+                        .field("confidence", 0.9f64)
+                        .field("object_id", i as u64)
+                        .build(),
+                );
+            }
+        }
+        src.push_buffer(buffer).unwrap();
+        src.end_of_stream().unwrap();
+
+        let mut crops = Vec::new();
+        while let Ok(sample) = out.pull_sample() {
+            let info = gst_video::VideoInfo::from_caps(sample.caps().unwrap()).unwrap();
+            let buffer = sample.buffer().unwrap();
+            assert_eq!(
+                buffer.size(),
+                info.size(),
+                "buffer does not match its caps {}x{}",
+                info.width(),
+                info.height()
+            );
+            let map = buffer.map_readable().unwrap();
+            let stride = info.stride()[0] as usize;
+            let row = info.width() as usize * 3;
+            let pixels = (0..info.height() as usize)
+                .flat_map(|y| map[y * stride..y * stride + row].to_vec())
+                .collect();
+            crops.push(Crop {
+                width: info.width(),
+                height: info.height(),
+                pixels,
+            });
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        crops
+    }
+
+    fn expected_pixels(x0: u32, y0: u32, w: u32, h: u32) -> Vec<u8> {
+        (y0..y0 + h)
+            .flat_map(|y| (x0..x0 + w).flat_map(move |x| (0..3).map(move |c| pixel(x, y, c))))
+            .collect()
+    }
+
+    #[test]
+    fn natural_size_crops_carry_their_own_caps_and_pixels() {
+        // 3 and 5 pixels wide: 9 and 15 bytes a row, both padded to 12 and 16.
+        let crops = run("", &[(1, 1, 3, 2), (2, 2, 5, 3)]);
+
+        assert_eq!(crops.len(), 2);
+        assert_eq!((crops[0].width, crops[0].height), (3, 2));
+        assert_eq!(crops[0].pixels, expected_pixels(1, 1, 3, 2));
+        assert_eq!((crops[1].width, crops[1].height), (5, 3));
+        assert_eq!(crops[1].pixels, expected_pixels(2, 2, 5, 3));
+    }
+
+    #[test]
+    fn a_fixed_target_size_resizes_every_crop_to_it() {
+        let crops = run(
+            "target-width=5 target-height=4",
+            &[(1, 1, 3, 2), (0, 0, 5, 4)],
+        );
+
+        assert_eq!(crops.len(), 2);
+        assert!(crops.iter().all(|c| (c.width, c.height) == (5, 4)));
+        // Already the target size: copied, not resampled.
+        assert_eq!(crops[1].pixels, expected_pixels(0, 0, 5, 4));
+    }
+
+    #[test]
+    fn a_frame_without_detections_passes_through_at_its_size() {
+        let crops = run("", &[]);
+
+        assert_eq!(crops.len(), 1);
+        assert_eq!((crops[0].width, crops[0].height), (FRAME_W, FRAME_H));
+        assert_eq!(crops[0].pixels, expected_pixels(0, 0, FRAME_W, FRAME_H));
+    }
+
+    #[test]
+    fn a_frame_without_detections_is_resized_to_a_fixed_target() {
+        let crops = run("target-width=3 target-height=3", &[]);
+
+        assert_eq!(crops.len(), 1);
+        assert_eq!((crops[0].width, crops[0].height), (3, 3));
+    }
+
+    #[test]
+    fn a_single_target_dimension_keeps_the_natural_size() {
+        let crops = run("target-width=4", &[(1, 1, 3, 2)]);
+
+        assert_eq!(crops.len(), 1);
+        assert_eq!((crops[0].width, crops[0].height), (3, 2));
     }
 }

@@ -76,8 +76,20 @@ Supported operators: `>=`, `<=`, `>`, `<`, `==`, `!=`
 - Reads [`InferenceResultMeta`](../README.md#3-inferenceresultmeta-convenience-layer) attached to each buffer by upstream `edgeimpulsevideoinfer` or `edgeimpulseaudioinfer` (falls back to video-specific metadata if `InferenceResultMeta` is not present)
 - Evaluates the condition expression against the extracted values
 - If the condition is true, the buffer passes through unchanged (zero-copy)
-- If the condition is false, the buffer is marked with `GAP | DROPPABLE` flags
+- If the condition is false, or `drop` is true, the buffer is dropped: elements downstream never receive it. The pipeline keeps running.
+- Every decision posts an `edge-impulse-continue-if-decision` element message from the gate (see below)
 - If `rules` are configured, the first matching rule posts a `edge-impulse-continue-if-metadata` bus message with its key-value pairs
+
+## Bus Messages
+
+`edge-impulse-continue-if-decision` is posted for every buffer the gate evaluates, passed or dropped, so an application can tell which frames the elements behind the gate will not see:
+
+| Field | Type | Description |
+|---|---|---|
+| `passed` | boolean | Whether the buffer went downstream |
+| `timestamp` | ClockTime | The buffer's PTS; absent when the buffer has none |
+
+`edge-impulse-continue-if-metadata` is posted when a `rules` entry matches (see `rules` above).
 
 ## Example Pipelines
 

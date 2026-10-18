@@ -305,6 +305,10 @@ fn evaluate(state: &InferenceState, cond: &ParsedCondition) -> bool {
     }
 }
 
+/// Element message posted for every buffer the gate decides on: `passed`
+/// (bool) and, when the buffer has one, `timestamp` (its PTS, a ClockTime).
+pub const DECISION_MESSAGE: &str = "edge-impulse-continue-if-decision";
+
 // ─── Element state ───────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -458,6 +462,23 @@ impl ElementImpl for EdgeImpulseContinueIf {
     }
 }
 
+impl EdgeImpulseContinueIf {
+    /// Post a [`DECISION_MESSAGE`] for `buf`, so an application can tell which
+    /// frames the elements behind the gate will never see. Posted for passed
+    /// frames too, so every frame the gate evaluates is accounted for.
+    fn post_decision(&self, buf: &gst::BufferRef, passed: bool) {
+        let mut builder = gst::Structure::builder(DECISION_MESSAGE).field("passed", passed);
+        if let Some(pts) = buf.pts() {
+            builder = builder.field("timestamp", pts);
+        }
+        let _ = self.obj().post_message(
+            gst::message::Element::builder(builder.build())
+                .src(&*self.obj())
+                .build(),
+        );
+    }
+}
+
 impl BaseTransformImpl for EdgeImpulseContinueIf {
     const MODE: gstreamer_base::subclass::BaseTransformMode =
         gstreamer_base::subclass::BaseTransformMode::AlwaysInPlace;
@@ -468,7 +489,9 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
         let state = self.state.lock().unwrap();
 
         if state.drop_all {
-            return Err(gst::FlowError::CustomError);
+            drop(state);
+            self.post_decision(buf, false);
+            return Ok(gstreamer_base::BASE_TRANSFORM_FLOW_DROPPED);
         }
 
         let gate_condition = state.parsed.clone();
@@ -523,6 +546,8 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
                 state.passed,
                 state.dropped
             );
+            drop(state);
+            self.post_decision(buf, true);
             Ok(gst::FlowSuccess::Ok)
         } else {
             state.dropped += 1;
@@ -536,8 +561,12 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
                 state.passed,
                 state.dropped
             );
-            buf.set_flags(gst::BufferFlags::GAP | gst::BufferFlags::DROPPABLE);
-            Ok(gst::FlowSuccess::Ok)
+            drop(state);
+            self.post_decision(buf, false);
+            // Drop the buffer rather than flag it GAP: elements downstream,
+            // `edgeimpulsevideoinfer` among them, are not gap-aware and would
+            // process a flagged buffer anyway.
+            Ok(gstreamer_base::BASE_TRANSFORM_FLOW_DROPPED)
         }
     }
 
@@ -559,5 +588,144 @@ impl BaseTransformImpl for EdgeImpulseContinueIf {
             state.dropped
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gstreamer_app as gst_app;
+
+    const ELEMENT: &str = "eitestcontinueif";
+
+    fn init() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            gst::init().unwrap();
+            gst::Element::register(
+                None,
+                ELEMENT,
+                gst::Rank::NONE,
+                crate::filter::EdgeImpulseContinueIf::static_type(),
+            )
+            .unwrap();
+        });
+    }
+
+    struct Run {
+        /// PTS (ms) of the buffers that reached the sink.
+        received: Vec<u64>,
+        /// (PTS ms, passed) of every decision message, in order.
+        decisions: Vec<(Option<u64>, bool)>,
+        errors: Vec<String>,
+    }
+
+    /// appsrc → gate → appsink, one buffer per entry of `detections` (its
+    /// detection count), PTS 100 ms apart starting at 100 ms.
+    fn run(gate_props: &str, detections: &[u32]) -> Run {
+        init();
+        let pipeline = gst::parse::launch(&format!(
+            "appsrc name=src format=time \
+             caps=video/x-raw,format=RGB,width=2,height=2,framerate=10/1 \
+             ! {ELEMENT} name=gate {gate_props} \
+             ! appsink name=out sync=false"
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let src = pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gst_app::AppSrc>()
+            .unwrap();
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        for (i, count) in detections.iter().enumerate() {
+            let mut buffer = gst::Buffer::with_size(12).unwrap();
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(100 * (i as u64 + 1)));
+                InferenceResultMeta::add(buffer).set_detection_count(*count);
+            }
+            src.push_buffer(buffer).unwrap();
+        }
+        src.end_of_stream().unwrap();
+
+        let mut received = Vec::new();
+        while let Ok(sample) = out.pull_sample() {
+            let buffer = sample.buffer().unwrap();
+            assert!(
+                !buffer.flags().contains(gst::BufferFlags::GAP),
+                "a rejected buffer must be dropped, not flagged"
+            );
+            received.push(buffer.pts().unwrap().mseconds());
+        }
+
+        let bus = pipeline.bus().unwrap();
+        let mut decisions = Vec::new();
+        let mut errors = Vec::new();
+        while let Some(msg) = bus.timed_pop(gst::ClockTime::from_seconds(5)) {
+            match msg.view() {
+                gst::MessageView::Element(m) => {
+                    let s = m.structure().unwrap();
+                    if s.name() == DECISION_MESSAGE {
+                        assert_eq!(m.src().unwrap().name(), "gate");
+                        let pts = s
+                            .get::<gst::ClockTime>("timestamp")
+                            .ok()
+                            .map(|t| t.mseconds());
+                        decisions.push((pts, s.get::<bool>("passed").unwrap()));
+                    }
+                }
+                gst::MessageView::Error(e) => errors.push(e.error().to_string()),
+                gst::MessageView::Eos(_) => break,
+                _ => {}
+            }
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        Run {
+            received,
+            decisions,
+            errors,
+        }
+    }
+
+    #[test]
+    fn drops_rejected_buffers_and_reports_every_decision() {
+        let run = run("condition=\"detection_count >= 1\"", &[1, 0, 2, 0]);
+
+        assert_eq!(run.received, vec![100, 300]);
+        assert_eq!(
+            run.decisions,
+            vec![
+                (Some(100), true),
+                (Some(200), false),
+                (Some(300), true),
+                (Some(400), false)
+            ]
+        );
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+    }
+
+    #[test]
+    fn passes_everything_without_a_condition() {
+        let run = run("", &[0, 0]);
+
+        assert_eq!(run.received, vec![100, 200]);
+        assert_eq!(run.decisions, vec![(Some(100), true), (Some(200), true)]);
+    }
+
+    #[test]
+    fn drop_drops_every_buffer_without_failing_the_pipeline() {
+        let run = run("drop=true", &[1, 1]);
+
+        assert!(run.received.is_empty());
+        assert_eq!(run.decisions, vec![(Some(100), false), (Some(200), false)]);
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
     }
 }

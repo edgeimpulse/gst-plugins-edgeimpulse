@@ -155,7 +155,7 @@ All inference elements emit structured messages on the GStreamer bus with the na
 - `edge-impulse-ingestion-result`: Sent when a sample is successfully ingested (fields: filename, media type, length, label, category).
 - `edge-impulse-ingestion-error`: Sent when ingestion fails (fields: filename, media type, error, label, category).
 
-The `edgeimpulsecontinueif` element can also emit `edge-impulse-continue-if-metadata` bus messages when `rules` are configured (see [edgeimpulsecontinueif](#edgeimpulsecontinueif)).
+The `edgeimpulsecontinueif` element posts an `edge-impulse-continue-if-decision` message (`passed`, `timestamp`) for every buffer it evaluates, and `edge-impulse-continue-if-metadata` messages when `rules` are configured (see [edgeimpulsecontinueif](docs/edgeimpulsecontinueif.md)).
 
 ### 2. Video Frame Metadata (Primary API)
 

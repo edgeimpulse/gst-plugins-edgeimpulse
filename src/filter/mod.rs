@@ -29,6 +29,13 @@
 //!
 //! Supported operators: `>=`, `<=`, `>`, `<`, `==`, `!=`
 //!
+//! ## Dropping and decisions
+//!
+//! A rejected buffer (condition false, or `drop` set) is dropped, not
+//! forwarded: elements downstream never see it. Every decision, passed or
+//! dropped, posts an `edge-impulse-continue-if-decision` element message
+//! with `passed` (bool) and `timestamp` (the buffer PTS, when it has one).
+//!
 //! ## Rules
 //!
 //! The `rules` property accepts a JSON array of ordered rules. The first matching

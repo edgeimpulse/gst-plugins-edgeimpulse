@@ -34,13 +34,13 @@ Dynamic crop element that extracts detected object regions from video frames bas
    - Flags: readable, writable, changeable in PLAYING state
 
 2. `target-width` (integer):
-   - Resize all crops to this width. Setting a fixed target avoids GStreamer caps renegotiation per-crop.
+   - Resize all crops to this width. Takes effect only when `target-height` is also set. A fixed size avoids renegotiating caps for every crop.
    - Range: 0 -- 4096 (0 = keep natural crop size)
    - Default: 0
    - Flags: readable, writable
 
 3. `target-height` (integer):
-   - Resize all crops to this height. Setting a fixed target avoids GStreamer caps renegotiation per-crop.
+   - Resize all crops to this height. Takes effect only when `target-width` is also set. A fixed size avoids renegotiating caps for every crop.
    - Range: 0 -- 4096 (0 = keep natural crop size)
    - Default: 0
    - Flags: readable, writable
@@ -53,7 +53,9 @@ Dynamic crop element that extracts detected object regions from video frames bas
    - Optionally resizes to `target-width` x `target-height`
    - Attaches a [`CropOriginMeta`](../README.md#4-croporiginmeta) with padded, frame-clamped source coordinates, the unpadded detection rect, original frame dimensions, object_id, label, and confidence
    - Pushes the crop buffer downstream
-3. If no detections are present, the full frame is passed through unchanged
+3. If no detections are present, the full frame is passed through (resized to the target size when one is set)
+
+Without a target size each crop keeps its natural size, so the output size changes from buffer to buffer. The element pushes a new caps event before every buffer whose size differs from the previous one, and lays each buffer out with the row stride its caps imply, so any downstream element can read it. Elements that only cope with one input size should get a fixed `target-width` and `target-height`, normally the downstream model's input size.
 
 This is a **1-to-N element**: one input buffer may produce N output buffers (one per detected object). The downstream element (e.g., a classification `edgeimpulsevideoinfer`) processes each crop independently.
 

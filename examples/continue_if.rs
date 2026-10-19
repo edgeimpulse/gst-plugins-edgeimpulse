@@ -2,7 +2,7 @@
 //!
 //! Demonstrates how to use `edgeimpulsecontinueif` to gate a video pipeline
 //! based on inference metadata. Only buffers matching the condition pass
-//! through; others are marked as GAP and dropped.
+//! through; the others are dropped.
 //!
 //! The example also shows the `rules` property for conditional metadata output:
 //! different bus messages are emitted depending on detection count.

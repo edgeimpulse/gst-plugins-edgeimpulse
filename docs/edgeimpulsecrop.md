@@ -45,6 +45,11 @@ Dynamic crop element that extracts detected object regions from video frames bas
    - Default: 0
    - Flags: readable, writable
 
+4. `drop-empty` (boolean):
+   - Drop frames without detections instead of passing the full frame through, so downstream elements only see crops
+   - Default: false
+   - Flags: readable, writable, changeable in PLAYING state
+
 ## How It Works
 
 1. Reads [`VideoRegionOfInterestMeta`](../README.md#videoregionofinterestmeta) attached by upstream `edgeimpulsevideoinfer`
@@ -53,7 +58,7 @@ Dynamic crop element that extracts detected object regions from video frames bas
    - Optionally resizes to `target-width` x `target-height`
    - Attaches a [`CropOriginMeta`](../README.md#4-croporiginmeta) with padded, frame-clamped source coordinates, the unpadded detection rect, original frame dimensions, object_id, label, and confidence
    - Pushes the crop buffer downstream
-3. If no detections are present, the full frame is passed through (resized to the target size when one is set)
+3. If no detections are present, the full frame is passed through (resized to the target size when one is set), or dropped when `drop-empty` is true
 
 Without a target size each crop keeps its natural size, so the output size changes from buffer to buffer. The element pushes a new caps event before every buffer whose size differs from the previous one, and lays each buffer out with the row stride its caps imply, so any downstream element can read it. Elements that only cope with one input size should get a fixed `target-width` and `target-height`, normally the downstream model's input size.
 

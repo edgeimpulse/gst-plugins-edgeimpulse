@@ -7,7 +7,7 @@
 //!
 //! This is a 1-to-N element: one input buffer may produce N output buffers
 //! (one per detected object).  If no detections are present the full frame
-//! is passed through unchanged.
+//! is passed through unchanged, or dropped when `drop-empty` is set.
 
 use gstreamer as gst;
 use gstreamer::glib;
@@ -49,6 +49,8 @@ struct State {
     target_height: i32,
     /// How crops are fitted to the target dimensions
     resize_mode: ResizeMode,
+    /// Drop frames without detections instead of passing them through
+    drop_empty: bool,
     /// Input video info (set during caps negotiation)
     video_info: Option<gst_video::VideoInfo>,
     /// Dimensions of the caps last pushed on the src pad, if any. Crops of
@@ -66,6 +68,7 @@ impl Default for State {
             target_width: 0,
             target_height: 0,
             resize_mode: ResizeMode::Squash,
+            drop_empty: false,
             video_info: None,
             src_dims: None,
             pending_segment: None,
@@ -169,6 +172,15 @@ impl ObjectImpl for EdgeImpulseCrop {
                     .default_value(Some("squash"))
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoolean::builder("drop-empty")
+                    .nick("Drop Empty")
+                    .blurb(
+                        "Drop frames without detections instead of passing the \
+                         full frame through, so downstream elements only see crops",
+                    )
+                    .default_value(false)
+                    .mutable_playing()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -184,6 +196,7 @@ impl ObjectImpl for EdgeImpulseCrop {
                 state.resize_mode =
                     ResizeMode::from_property(&value.get::<String>().unwrap_or_default())
             }
+            "drop-empty" => state.drop_empty = value.get::<bool>().unwrap_or(false),
             _ => unimplemented!(),
         }
     }
@@ -195,6 +208,7 @@ impl ObjectImpl for EdgeImpulseCrop {
             "target-width" => state.target_width.to_value(),
             "target-height" => state.target_height.to_value(),
             "resize-mode" => state.resize_mode.as_str().to_value(),
+            "drop-empty" => state.drop_empty.to_value(),
             _ => unimplemented!(),
         }
     }
@@ -310,6 +324,7 @@ impl EdgeImpulseCrop {
         let target_width = state.target_width;
         let target_height = state.target_height;
         let resize_mode = state.resize_mode;
+        let drop_empty = state.drop_empty;
         drop(state);
 
         let frame_width = video_info.width();
@@ -318,8 +333,12 @@ impl EdgeImpulseCrop {
         // Extract detections from ROI metadata
         let detections = extract_detections(&buffer);
 
-        // No detections → pass full frame through unchanged
+        // No detections → drop the frame, or pass the full frame through unchanged
         if detections.is_empty() {
+            if drop_empty {
+                gst::log!(CAT, obj = self.obj(), "No detections — dropping frame");
+                return Ok(gst::FlowSuccess::Ok);
+            }
             gst::log!(CAT, obj = self.obj(), "No detections — passing full frame");
             if let Some((out_w, out_h)) = fixed_size(target_width, target_height) {
                 // Resize full frame to target dimensions
